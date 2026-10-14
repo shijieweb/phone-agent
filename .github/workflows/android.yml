@@ -34,6 +34,11 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
 
+      - name: Make gradlew executable
+        # Belt and braces: the executable bit is stored in the git index
+        # (mode 100755), but a stray re-clone or an archive download can lose it.
+        run: chmod +x ./gradlew
+
       - name: Show environment
         run: |
           java -version
