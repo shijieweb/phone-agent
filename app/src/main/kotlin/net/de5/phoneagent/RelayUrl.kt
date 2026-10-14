@@ -18,3 +18,21 @@ internal fun joinUrlOrNull(base: String?, path: String): String? {
 
 internal fun joinUrl(base: String?, path: String): String =
     joinUrlOrNull(base, path) ?: error("relay base url is not configured")
+
+/**
+ * Which relay address an install should actually use, given whatever is in its
+ * settings.
+ *
+ * Up to v0.2.0 the app shipped [Prefs.LEGACY_RELAY_BASE] as its default and
+ * wrote that value into storage on first run. That address is the one the
+ * carrier resets mid-handshake, so leaving it in place after an upgrade would
+ * reproduce the exact failure we are fixing. A stored copy of the legacy
+ * default — or no stored value at all — therefore resolves to the current
+ * default; anything the operator typed deliberately is left alone.
+ */
+internal fun resolveRelayBase(stored: String?): String {
+    val value = stored?.trim().orEmpty()
+    if (value.isEmpty()) return Prefs.DEFAULT_RELAY_BASE
+    if (value == Prefs.LEGACY_RELAY_BASE) return Prefs.DEFAULT_RELAY_BASE
+    return stored!!.trim()
+}

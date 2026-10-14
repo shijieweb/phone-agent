@@ -26,7 +26,7 @@ import javax.net.ssl.SSLSocketFactory
  *  1. environment — proxy properties, VPN, active transports
  *  2. DNS         — which address the phone actually resolves (a hijacked or
  *                   VPN-supplied answer explains a lot)
- *  3. TCP         — plain connect to the resolved address on 19092
+ *  3. TCP         — plain connect to the resolved address on the relay port
  *  4. TLS         — full handshake with an explicit SNI, then dump the peer
  *                   certificate. Reaching the server without SNI lands on the
  *                   nginx `default_server` block, which returns 444 and resets
@@ -40,8 +40,27 @@ import javax.net.ssl.SSLSocketFactory
  */
 internal object Diagnostics {
 
-    const val HOST = "dsh.owen1.de5.net"
-    const val PORT = 19092
+    /**
+     * Probes target whatever relay the operator typed in, never a hard-coded
+     * host: a build that still pointed at a retired endpoint would report the
+     * old route's failure and send us chasing a fault that no longer exists.
+     */
+    private class Target(val host: String, val port: Int, val path: String)
+
+    private fun targetOf(prefs: Prefs): Target? {
+        val raw = prefs.relayBase.trim()
+        if (raw.isEmpty()) return null
+        return try {
+            val url = java.net.URL(raw)
+            val host = url.host ?: return null
+            val port = if (url.port > 0) url.port else if (url.protocol == "https") 443 else 80
+            val path = url.path.orEmpty().trimEnd('/')
+            Target(host, port, path)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
     private const val CONNECT_TIMEOUT_MS = 6_000
     private const val READ_TIMEOUT_MS = 8_000
 
@@ -62,11 +81,20 @@ internal object Diagnostics {
             .append('\n')
 
         probe("1 环境", sb) { environment(context, sb) }
-        probe("2 DNS", sb) { dns(sb) }
-        probe("3 TCP", sb) { tcp(sb) }
-        probe("4 TLS", sb) { tls(sb) }
-        probe("5 HTTPS", sb) { https(sb) }
-        probe("6 原始HTTP", sb) { rawHttp(sb) }
+
+        val target = targetOf(prefs)
+        if (target == null) {
+            sb.append("\n--- 探针 2-6 跳过 ---\n")
+            sb.append("  relay 地址无法解析为 host:port: ").append(prefs.relayBase).append('\n')
+        } else {
+            sb.append("  探测目标: ").append(target.host).append(':').append(target.port)
+                .append("  路径前缀=").append(target.path.ifEmpty { "/" }).append('\n')
+            probe("2 DNS", sb) { dns(sb, target) }
+            probe("3 TCP", sb) { tcp(sb, target) }
+            probe("4 TLS", sb) { tls(sb, target) }
+            probe("5 HTTPS", sb) { https(sb, target) }
+            probe("6 原始HTTP", sb) { rawHttp(sb, target) }
+        }
 
         sb.append("\n--- 服务状态 ---\n").append(RcAgentService.snapshot()).append('\n')
         sb.append("\n--- 运行日志 (最近 ").append(AgentLog.size()).append(" 行) ---\n")
@@ -148,9 +176,9 @@ internal object Diagnostics {
     }
 
     /** Returns the addresses DNS hands the app, which may not be the public ones. */
-    private fun dns(sb: StringBuilder): List<InetAddress> {
+    private fun dns(sb: StringBuilder, target: Target): List<InetAddress> {
         val addresses = try {
-            InetAddress.getAllByName(HOST).toList()
+            InetAddress.getAllByName(target.host).toList()
         } catch (t: UnknownHostException) {
             sb.append("  解析失败: ").append(t.message ?: t.javaClass.simpleName).append('\n')
             return emptyList()
@@ -162,33 +190,35 @@ internal object Diagnostics {
         for (address in addresses) {
             sb.append("  ").append(address.hostAddress).append('\n')
         }
-        if (addresses.none { it.hostAddress == EXPECTED_IP }) {
-            sb.append("  <<< 期望 ").append(EXPECTED_IP)
+        val expected = expectedAddressFor(target.host)
+        if (expected != null && addresses.none { it.hostAddress == expected }) {
+            sb.append("  <<< 期望 ").append(expected)
                 .append("，实际没有这个地址 → DNS 被改写或走了代理")
         }
         return addresses
     }
 
-    private fun tcp(sb: StringBuilder) {
+    private fun tcp(sb: StringBuilder, target: Target) {
         val resolved = try {
-            InetAddress.getAllByName(HOST).mapNotNull { it.hostAddress }
+            InetAddress.getAllByName(target.host).mapNotNull { it.hostAddress }
         } catch (t: Throwable) {
             emptyList()
         }
         // Test the hard-coded address as well: if DNS hands back something else
         // and that something refuses connections, the two results together say
         // "DNS is the problem" rather than "the server is down".
-        val targets = (resolved + EXPECTED_IP).distinct()
+        val expected = expectedAddressFor(target.host)
+        val targets = (resolved + listOfNotNull(expected)).distinct()
 
-        for (target in targets) {
+        for (address in targets) {
             val socket = Socket()
             val started = System.currentTimeMillis()
             try {
-                socket.connect(InetSocketAddress(target, PORT), CONNECT_TIMEOUT_MS)
-                sb.append("  ").append(target).append(":").append(PORT)
+                socket.connect(InetSocketAddress(address, target.port), CONNECT_TIMEOUT_MS)
+                sb.append("  ").append(address).append(":").append(target.port)
                     .append(" 连接成功 ").append(System.currentTimeMillis() - started).append("ms\n")
             } catch (t: Throwable) {
-                sb.append("  ").append(target).append(":").append(PORT)
+                sb.append("  ").append(address).append(":").append(target.port)
                     .append(" 连接失败 ").append(System.currentTimeMillis() - started).append("ms ")
                     .append(t.javaClass.simpleName).append(": ").append(t.message ?: "").append('\n')
             } finally {
@@ -213,9 +243,9 @@ internal object Diagnostics {
      *   with-SNI cert == dummy              → our ClientHello loses its SNI
      *   no-SNI   cert == dummy              → confirms the 444 default server
      */
-    private fun tls(sb: StringBuilder) {
-        val inspected = inspectTls(sb, "带 SNI（正常情况）", withSni = true)
-        inspectTls(sb, "不带 SNI（对照）", withSni = false)
+    private fun tls(sb: StringBuilder, target: Target) {
+        val inspected = inspectTls(sb, "带 SNI（正常情况）", withSni = true, target = target)
+        inspectTls(sb, "不带 SNI（对照）", withSni = false, target = target)
 
         when (inspected) {
             CertKind.REAL -> sb.append("  OK: 带 SNI 能拿到正式证书 → TLS/SNI 这一层没问题，故障在更上层\n")
@@ -226,22 +256,22 @@ internal object Diagnostics {
 
     private enum class CertKind { REAL, DUMMY, UNKNOWN }
 
-    private fun inspectTls(sb: StringBuilder, label: String, withSni: Boolean): CertKind {
+    private fun inspectTls(sb: StringBuilder, label: String, withSni: Boolean, target: Target): CertKind {
         sb.append("  [").append(label).append("]\n")
         val raw = Socket()
         var kind = CertKind.UNKNOWN
         try {
-            raw.connect(InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS)
+            raw.connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
             raw.soTimeout = READ_TIMEOUT_MS
             val context = javax.net.ssl.SSLContext.getInstance("TLS")
             context.init(null, arrayOf(TRUST_ANY), java.security.SecureRandom())
-            val ssl = context.socketFactory.createSocket(raw, HOST, PORT, true) as SSLSocket
+            val ssl = context.socketFactory.createSocket(raw, target.host, target.port, true) as SSLSocket
             try {
                 ssl.soTimeout = READ_TIMEOUT_MS
                 val params = ssl.sslParameters
                 // No hostname verification on purpose: we read the certificate
                 // ourselves below, and a mismatch is the finding, not an error.
-                if (withSni) params.serverNames = listOf(SNIHostName(HOST))
+                if (withSni) params.serverNames = listOf(SNIHostName(target.host))
                 ssl.sslParameters = params
                 ssl.startHandshake()
 
@@ -257,11 +287,16 @@ internal object Diagnostics {
                     sb.append("    issuer=").append(cert.issuerDN.name).append('\n')
                     sb.append("    有效期=").append(cert.notBefore).append(" → ").append(cert.notAfter)
                         .append('\n')
-                    kind = if (subject.contains(EXPECTED_CN, ignoreCase = true)) {
-                        sb.append("    → 正式站点证书\n")
+                    // A real endpoint presents a certificate that names the host we
+                    // asked for (or one of Cloudflare's edge names when the host is
+                    // proxied). Anything else means we are talking to a fallback
+                    // server, which is itself the finding.
+                    kind = if (certNamesHost(cert, target.host)) {
+                        sb.append("    → 证书覆盖 ").append(target.host).append("（正常）\n")
                         CertKind.REAL
                     } else {
-                        sb.append("    → 不是正式证书（nginx 默认站）\n")
+                        sb.append("    → 证书不覆盖 ").append(target.host)
+                            .append("（默认站/中间人）\n")
                         CertKind.DUMMY
                     }
                 }
@@ -277,6 +312,34 @@ internal object Diagnostics {
         return kind
     }
 
+    /** True when the certificate is valid for [host], by SAN or by wildcard. */
+    private fun certNamesHost(cert: X509Certificate, host: String): Boolean {
+        val names = mutableListOf<String>()
+        try {
+            cert.subjectAlternativeNames?.forEach { entry ->
+                if (entry.size >= 2 && (entry[0] == 2 || entry[0] == 7)) {
+                    names.add(entry[1].toString().lowercase())
+                }
+            }
+        } catch (t: Throwable) {
+            // fall through to the CN check
+        }
+        if (names.isEmpty()) {
+            val cn = cert.subjectDN.name
+            val marker = "CN="
+            val at = cn.indexOf(marker)
+            if (at >= 0) {
+                names.add(cn.substring(at + marker.length).substringBefore(',').lowercase())
+            }
+        }
+        val wanted = host.lowercase()
+        return names.any { name ->
+            name == wanted ||
+                (name.startsWith("*.") && wanted.endsWith(name.substring(1)) &&
+                    wanted.count { it == '.' } == name.count { it == '.' })
+        }
+    }
+
     /** Inspection-only trust manager (see [inspectTls]); never used for real traffic. */
     private val TRUST_ANY = object : javax.net.ssl.X509TrustManager {
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
@@ -285,8 +348,9 @@ internal object Diagnostics {
     }
 
     /** Exactly what the agent does, through the framework HTTP stack. */
-    private fun https(sb: StringBuilder) {
-        val connection = java.net.URL("https://$HOST:$PORT/agent/hello").openConnection() as HttpsURLConnection
+    private fun https(sb: StringBuilder, target: Target) {
+        val url = "https://${target.host}:${target.port}${target.path}/agent/hello"
+        val connection = java.net.URL(url).openConnection() as HttpsURLConnection
         try {
             connection.requestMethod = "POST"
             connection.setRequestProperty("X-RC-Secret", "probe")
@@ -318,24 +382,24 @@ internal object Diagnostics {
      * behaviour (redirect handling, header rewriting, connection pooling) and
      * therefore separates an HTTP-layer rejection from a socket-layer one.
      */
-    private fun rawHttp(sb: StringBuilder) {
+    private fun rawHttp(sb: StringBuilder, target: Target) {
         val raw = Socket()
         try {
-            raw.connect(InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS)
+            raw.connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
             raw.soTimeout = READ_TIMEOUT_MS
             val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            val ssl = factory.createSocket(raw, HOST, PORT, true) as SSLSocket
+            val ssl = factory.createSocket(raw, target.host, target.port, true) as SSLSocket
             try {
                 ssl.soTimeout = READ_TIMEOUT_MS
                 val params = ssl.sslParameters
-                params.serverNames = listOf(SNIHostName(HOST))
+                params.serverNames = listOf(SNIHostName(target.host))
                 ssl.sslParameters = params
                 ssl.startHandshake()
 
                 val body = """{"id":"PROBE-RAW"}"""
                 val request = buildString {
-                    append("POST /agent/hello HTTP/1.1\r\n")
-                    append("Host: ").append(HOST).append(':').append(PORT).append("\r\n")
+                    append("POST ").append(target.path).append("/agent/hello HTTP/1.1\r\n")
+                    append("Host: ").append(target.host).append(':').append(target.port).append("\r\n")
                     append("X-RC-Secret: probe\r\n")
                     append("Content-Type: application/json\r\n")
                     append("Content-Length: ").append(body.toByteArray(Charsets.UTF_8).size).append("\r\n")
@@ -391,7 +455,14 @@ internal object Diagnostics {
         }
     }
 
-    /** The address the public DNS returns; anything else means interception. */
-    private const val EXPECTED_IP = "212.50.232.54"
-    private const val EXPECTED_CN = "dsh.owen1.de5.net"
+    /**
+     * The address the public DNS returns for our own relay host; anything else
+     * means interception. Unknown hosts (for example a Cloudflare-proxied name)
+     * return null and simply skip the comparison.
+     */
+    private fun expectedAddressFor(host: String): String? =
+        if (host.equals(RELAY_DIRECT_HOST, ignoreCase = true)) RELAY_DIRECT_IP else null
+
+    private const val RELAY_DIRECT_HOST = "dsh.owen1.de5.net"
+    private const val RELAY_DIRECT_IP = "212.50.232.54"
 }

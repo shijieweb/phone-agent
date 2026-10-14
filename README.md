@@ -7,7 +7,7 @@ nothing needs to be exposed on the phone's network.
 
 - **No root.** No Shizuku. No ADB. No Google Play Services.
 - **Zero third-party dependencies.** JDK + Android framework only.
-- **~2.4 MB APK**, built entirely in GitHub Actions (no local Android SDK needed).
+- **~2.5 MB APK**, built entirely in GitHub Actions (no local Android SDK needed).
 - **Android 13+** (`minSdk 33`), `targetSdk 34`.
 
 ## What it can do
@@ -42,6 +42,21 @@ POST /agent/poll     long poll (up to 25 s) for the next queued command
 POST /agent/result   report exit code, stdout, stderr
 ```
 
+The default relay is `https://mcp.owen1.de5.net` — a Cloudflare-fronted name.
+The relay itself listens on loopback only; the tunnel is what makes it
+reachable.
+
+> **Why not dial the server directly?** On the operator's mobile carrier, a TLS
+> connection to the direct address (`dsh.owen1.de5.net:19092`) is killed with a
+> forged TCP RST immediately after the ClientHello. Packet capture showed the
+> reset carrying a different TTL and IP ID than the phone's own packets, with no
+> server-side log entry at all — i.e. injected in transit, most likely by
+> TLS-fingerprint DPI. Browser traffic on the same host and port was fine, so it
+> is specific to this app's TLS stack. Fronting the relay with Cloudflare puts
+> the phone's connection on a standard `:443` HTTPS path and sidesteps it.
+> `Prefs.LEGACY_RELAY_BASE` records the old address; an install still holding it
+> migrates to the new default automatically (see `resolveRelayBase`).
+
 Delivery is **at-most-once** by design: a command is removed from the queue when
 handed out. A missed command can be re-sent; a double-executed destructive action
 cannot be undone.
@@ -54,7 +69,8 @@ grammar, the node-tree format, and the screenshot size ladder.
 1. Download `app-debug.apk` from the latest green run's **Artifacts**
    (artifacts require a GitHub login), or from the operator's own mirror.
 2. Sideload it and open **Phone Agent**.
-3. Fill in the relay base URL and the shared secret, then press **保存**.
+3. The relay base URL is pre-filled with the operator's default; paste the shared
+   secret and press **保存**.
 4. Press **请求权限** and grant notifications + location (including
    *Allow all the time* for background reporting).
 5. Press **打开无障碍设置** and enable **Phone Agent**.

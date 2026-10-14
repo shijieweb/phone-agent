@@ -11,8 +11,19 @@ class Prefs(context: Context) {
 
     private val sp: SharedPreferences = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
+    /**
+     * The stored value, migrated off the retired direct route by
+     * [resolveRelayBase]; see there for why the migration is not optional.
+     */
     var relayBase: String
-        get() = sp.getString(KEY_RELAY_BASE, DEFAULT_RELAY_BASE) ?: DEFAULT_RELAY_BASE
+        get() {
+            val stored = sp.getString(KEY_RELAY_BASE, null)
+            val resolved = resolveRelayBase(stored)
+            if (stored != null && stored.trim() != resolved) {
+                sp.edit().putString(KEY_RELAY_BASE, resolved).apply()
+            }
+            return resolved
+        }
         set(value) {
             sp.edit().putString(KEY_RELAY_BASE, value).apply()
         }
@@ -53,7 +64,16 @@ class Prefs(context: Context) {
         const val KEY_AUTO_START = "auto_start"
         const val KEY_LOCATION_INTERVAL = "location_interval"
 
-        const val DEFAULT_RELAY_BASE = "https://dsh.owen1.de5.net:19092"
+        /**
+         * The Cloudflare-fronted endpoint, not the direct `dsh.owen1.de5.net:19092`
+         * one: the phone's carrier injects a forged RST into the first TLS flight
+         * of the direct route, so that address only ever yields
+         * "SocketException: Connection reset" on this device.
+         */
+        const val DEFAULT_RELAY_BASE = "https://mcp.owen1.de5.net"
+
+        /** Shipped as the default up to v0.2.0; carriers reset its TLS flight. */
+        const val LEGACY_RELAY_BASE = "https://dsh.owen1.de5.net:19092"
         const val DEFAULT_AGENT_ID = "PHONE-MEIZU"
         const val DEFAULT_AUTO_START = true
         const val DEFAULT_LOCATION_INTERVAL = 300
