@@ -29,10 +29,25 @@ internal fun joinUrl(base: String?, path: String): String =
  * reproduce the exact failure we are fixing. A stored copy of the legacy
  * default — or no stored value at all — therefore resolves to the current
  * default; anything the operator typed deliberately is left alone.
+ *
+ * The comparison is deliberately forgiving about the two things people actually
+ * get wrong when typing a URL by hand: trailing slashes and letter case. If it
+ * were an exact string match, a stored `.../19092/` would survive the upgrade
+ * and the operator would stay stranded on the address that never connects,
+ * which is the one outcome this function exists to prevent. Nothing beyond
+ * those two normalisations is forgiven — a genuinely different address is still
+ * the operator's to keep.
  */
 internal fun resolveRelayBase(stored: String?): String {
     val value = stored?.trim().orEmpty()
     if (value.isEmpty()) return Prefs.DEFAULT_RELAY_BASE
-    if (value == Prefs.LEGACY_RELAY_BASE) return Prefs.DEFAULT_RELAY_BASE
-    return stored!!.trim()
+    if (isSameAddressAsLegacyDefault(value)) return Prefs.DEFAULT_RELAY_BASE
+    return value
 }
+
+/**
+ * True when [value] points at the retired direct route, ignoring trailing
+ * slashes and case.
+ */
+private fun isSameAddressAsLegacyDefault(value: String): Boolean =
+    value.trimEnd('/').equals(Prefs.LEGACY_RELAY_BASE.trimEnd('/'), ignoreCase = true)
