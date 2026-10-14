@@ -52,7 +52,7 @@ grammar, the node-tree format, and the screenshot size ladder.
 ## Install
 
 1. Download `app-debug.apk` from the latest green run's **Artifacts**
-   (artifacts require a GitHub login).
+   (artifacts require a GitHub login), or from the operator's own mirror.
 2. Sideload it and open **Phone Agent**.
 3. Fill in the relay base URL and the shared secret, then press **保存**.
 4. Press **请求权限** and grant notifications + location (including
@@ -61,6 +61,13 @@ grammar, the node-tree format, and the screenshot size ladder.
 6. Press **打开电池优化设置** and set the app to *Not optimized*.
 7. Press **启动**.
 
+> **Upgrades install in place.** Builds are signed with a stable key held in
+> `keystore.properties` + `keystore/` locally, and injected in CI from the
+> `SIGNING_KEY_BASE64` secret — so a newer APK replaces an older one without
+> uninstalling, keeping the relay config. If you are upgrading from a build made
+> *before* that key existed, one uninstall is unavoidable (the old and new
+> signatures differ, no matter which key is used going forward).
+
 > On Android 13+, a sideloaded app may be blocked from enabling accessibility
 > under *Restricted settings*. Clearing that once over USB ADB with
 > `adb shell appops set net.de5.phoneagent ACCESS_RESTRICTED_SETTINGS allow`
@@ -68,6 +75,29 @@ grammar, the node-tree format, and the screenshot size ladder.
 
 On Flyme (Meizu) also allow **自启动**, set the battery profile to **无限制**, and
 enable **允许后台活动** — otherwise the system will kill the agent.
+
+## When it does not connect
+
+The phone cannot be reached by ADB, so the app diagnoses itself. Press
+**诊断并复制（推荐）** and paste the clipboard into a message; the report is
+designed so one paste is enough to locate the fault.
+
+The report is a layered probe, because `SocketException: Connection reset` alone
+cannot tell apart four very different causes:
+
+| Probe | What it separates |
+|---|---|
+| `environment` | a VPN or proxy rewriting traffic (also prints `http.proxyHost`) |
+| `dns` | a rewritten/hijacked answer — flags a missing expected address |
+| `tcp` | dials the resolved address **and** a hard-coded one: distinguishes "DNS is lying" from "server is down" |
+| `tls` | reads the peer certificate **with SNI and without** — a real cert means nginx matched us; a self-signed one proves the ClientHello landed on the default server (`return 444`) |
+| `https` | `HttpsURLConnection` all the way to `/agent/hello` (403 = reached the relay, wrong secret) |
+| `rawHttp` | hand-written request on a raw TLS socket, bypassing `HttpURLConnection` entirely |
+
+The service also copies a report to the clipboard **once per run** on its first
+failure — not per outage, so a flat link cannot keep overwriting whatever has not
+been pasted yet. `复制日志` gets the log alone with no network traffic; `清空日志`
+clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 
 ## Privacy notes
 
