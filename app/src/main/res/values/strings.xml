@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Phone Agent</string>
+    <string name="accessibility_service_label">Phone Agent</string>
+    <string name="accessibility_service_description">Allows the operator to read the screen and perform taps, swipes and text input on this device.</string>
+</resources>

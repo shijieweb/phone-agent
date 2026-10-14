@@ -1,0 +1,11 @@
+* text=auto
+
+# The Gradle wrapper script must have LF endings or Linux exec fails with
+# "bad interpreter: /bin/sh^M". Force it regardless of the local core.autocrlf.
+gradlew text eol=lf
+gradlew.bat text eol=crlf
+
+*.bat text eol=crlf
+*.jar binary
+*.png binary
+*.apk binary

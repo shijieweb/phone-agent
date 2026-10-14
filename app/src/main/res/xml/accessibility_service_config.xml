@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility service configuration.
+
+  canRetrieveWindowContent : we read the node tree (ui_tree command).
+  canPerformGestures       : we inject taps/swipes (tap/swipe commands).
+  canTakeScreenshot        : API 30+, lets us grab the screen with no
+                             MediaProjection consent dialog.
+  flagRetrieveInteractiveWindows : needed to enumerate every window (dialogs,
+                             IME) rather than only the active one.
+  flagReportViewIds        : gives us resource ids, which make the tree
+                             far easier to target than raw text.
+
+  Note: `notificationTimeout` is left at the default. We do not subscribe to
+  TYPE_WINDOW_CONTENT_CHANGED on purpose - it fires constantly and would keep
+  the agent busy re-reading the tree for no benefit.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/accessibility_service_description"
+    android:notificationTimeout="100"
+    android:settingsActivity="net.de5.phoneagent.MainActivity" />

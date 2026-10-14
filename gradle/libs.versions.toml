@@ -1,0 +1,21 @@
+[versions]
+# Android Gradle Plugin. AGP 9.x has *built-in Kotlin* support enabled by default,
+# so the `org.jetbrains.kotlin.android` plugin is neither needed nor compatible
+# (see https://developer.android.com/build/releases/agp-9-0-0-release-notes).
+agp = "9.3.2"
+
+[libraries]
+# Intentionally EMPTY.
+#
+# This project ships zero third-party runtime dependencies on purpose:
+#   - HTTP            -> java.net.HttpURLConnection (JDK)
+#   - JSON            -> org.json (Android framework)
+#   - screenshots     -> AccessibilityService.takeScreenshot() (API 30+, framework)
+#   - location        -> android.location.LocationManager (framework)
+#   - UI              -> plain android.app.Activity + android.widget (framework)
+#
+# The only build-time dependency is AGP itself (which pulls Kotlin Gradle Plugin
+# and the Kotlin stdlib transitively for built-in Kotlin).
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
