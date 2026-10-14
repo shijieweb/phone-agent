@@ -45,6 +45,29 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           ./gradlew --version
 
+      - name: Restore signing key
+        # Keep one stable signature across CI runs. Without this, AGP generates a
+        # fresh debug keystore on every runner, so each APK carries a different
+        # certificate and Android refuses to install it over the previous one
+        # ("App not installed") — forcing an uninstall, which wipes the relay
+        # config. The secret is optional: with no secret set, the build falls
+        # back to the default debug key and still succeeds.
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.SIGNING_KEY_BASE64 }}
+        run: |
+          if [ -z "$SIGNING_KEY_BASE64" ]; then
+            echo "no SIGNING_KEY_BASE64 secret; falling back to the default debug key"
+            exit 0
+          fi
+          mkdir -p keystore
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 -d > keystore/phone-agent.p12
+          cat > keystore.properties <<'EOF'
+          storeFile=keystore/phone-agent.p12
+          storePassword=phoneagent
+          keyAlias=phoneagent
+          keyPassword=phoneagent
+          EOF
+
       - name: Unit tests
         run: ./gradlew --no-daemon test
 

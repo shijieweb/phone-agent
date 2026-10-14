@@ -4,6 +4,10 @@ build/
 .idea/
 *.iml
 local.properties
+# Signing key: never commit. Local builds read keystore.properties + keystore/;
+# CI injects the same key from the SIGNING_KEY_BASE64 secret.
+keystore.properties
+keystore/
 captures/
 .externalNativeBuild/
 .cxx/
