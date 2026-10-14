@@ -14,8 +14,8 @@ android {
         applicationId = "net.de5.phoneagent"
         minSdk = 33
         targetSdk = 34
-        versionCode = (project.findProperty("APP_VERSION_CODE") as String? ?: "1").toInt()
-        versionName = project.findProperty("APP_VERSION_NAME") as String? ?: "0.1.0"
+        versionCode = (project.findProperty("APP_VERSION_CODE") as String? ?: "2").toInt()
+        versionName = project.findProperty("APP_VERSION_NAME") as String? ?: "0.2.0"
 
         // No native code, no ABI splits: the APK is pure DEX + resources.
     }

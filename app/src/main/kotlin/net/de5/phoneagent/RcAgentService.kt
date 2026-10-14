@@ -142,6 +142,7 @@ class RcAgentService : Service() {
     private fun pollLoop() {
         var failures = 0
         var lastHelloAt = 0L
+        var autoCollected = false
         while (running) {
             try {
                 renewWakeLock()
@@ -153,24 +154,35 @@ class RcAgentService : Service() {
 
                 val now = System.currentTimeMillis()
                 if (now - lastHelloAt >= HELLO_INTERVAL_MS) {
-                    relay.hello(deviceEnv(this))
+                    val ok = relay.hello(deviceEnv(this))
                     lastHelloAt = System.currentTimeMillis()
                     lastHelloMs = lastHelloAt
+                    if (!ok) {
+                        AgentLog.add("hello", "relay 未确认（ok=false）")
+                    }
                 }
 
                 val polled = relay.poll(POLL_WAIT_SECONDS)
                 lastPollMs = System.currentTimeMillis()
+                if (failures > 0) {
+                    AgentLog.add("poll", "链路恢复（此前连续失败 " + failures + " 次）")
+                }
                 failures = 0
                 lastError = null
                 if (polled == null) continue
 
                 val line = polled.cmd
                 lastCommand = line
+                AgentLog.add("cmd", line + "  cid=" + polled.cid)
                 val command = Commands.parse(line)
                 val started = System.currentTimeMillis()
                 val result = executor?.execute(command)
                     ?: ExecutionResult(EXIT_INTERRUPTED, "", "agent service is stopping")
                 val duration = (System.currentTimeMillis() - started) / 1000.0
+                AgentLog.add(
+                    "exec",
+                    "exit=" + result.exit + " " + String.format(java.util.Locale.US, "%.1fs", duration)
+                )
 
                 // Always report, even on failure: the relay needs the cid closed.
                 relay.result(polled.cid, line, result.exit, duration, result.stdout, result.stderr)
@@ -183,6 +195,15 @@ class RcAgentService : Service() {
             } catch (t: Throwable) {
                 failures++
                 lastError = t.javaClass.simpleName + ": " + (t.message ?: "")
+                AgentLog.add("error", "第 " + failures + " 次失败 " + describe(t))
+                // Copy a report once per run, while the log still shows what
+                // happened right before the failure. Deliberately not per
+                // outage: a flat link would otherwise clobber the clipboard and
+                // wipe out whatever the operator had not pasted yet.
+                if (!autoCollected) {
+                    autoCollected = true
+                    autoCollect(this, t)
+                }
                 if (failures >= MAX_FAILURES_BEFORE_LONG_PAUSE) {
                     // Give the network a real chance, then re-register.
                     sleep(LONG_RETRY_PAUSE_MS)
@@ -192,6 +213,25 @@ class RcAgentService : Service() {
                     sleep(RETRY_PAUSE_MS)
                 }
             }
+        }
+    }
+
+    /**
+     * On the very first failure of a run, copy a report to the clipboard so the
+     * operator can paste it back. Only the first one: a flat network would
+     * otherwise overwrite the clipboard every few seconds.
+     */
+    private fun autoCollect(context: android.content.Context, cause: Throwable) {
+        try {
+            val text = Diagnostics.stateOnly(Prefs(context)) +
+                "\n--- 首个异常 ---\n" + describe(cause) + "\n" + stackOf(cause)
+            Clipboard.copy(context, text)
+            note = "已把失败报告复制到剪贴板（" +
+                java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                    .format(java.util.Date()) + "），请粘贴发回"
+            AgentLog.add("diag", "已自动复制报告到剪贴板")
+        } catch (t: Throwable) {
+            AgentLog.add("diag", "自动复制失败: " + describe(t))
         }
     }
 

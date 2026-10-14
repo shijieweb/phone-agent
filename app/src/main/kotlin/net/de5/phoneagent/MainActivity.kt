@@ -66,6 +66,9 @@ class MainActivity : Activity() {
         addButton(root, "打开电池优化设置") {
             openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
         }
+        addButton(root, "诊断并复制（推荐）") { runDiagnostics() }
+        addButton(root, "复制日志") { copyLog() }
+        addButton(root, "清空日志") { AgentLog.clear(); refreshStatus() }
 
         statusView = TextView(this)
         root.addView(statusView)
@@ -152,6 +155,33 @@ class MainActivity : Activity() {
     private fun refreshStatus() {
         statusView.text = RcAgentService.snapshot()
         toggleButton.text = if (RcAgentService.running) "停止" else "启动"
+    }
+
+    /**
+     * Walk the network layers and copy the result. Runs off the UI thread
+     * because it makes real connections with short timeouts.
+     */
+    private fun runDiagnostics() {
+        statusView.text = "正在诊断…（最多约 1 分钟）"
+        Thread(Runnable {
+            val text = try {
+                Diagnostics.run(this, prefs)
+            } catch (t: Throwable) {
+                "诊断本身失败: " + describe(t) + "\n" + stackOf(t)
+            }
+            Clipboard.copy(this, text)
+            uiHandler.post {
+                statusView.text = "诊断结果已复制到剪贴板（" +
+                    text.length + " 字符），粘贴发回即可。\n\n" + RcAgentService.snapshot()
+            }
+        }, "diagnostics").start()
+    }
+
+    private fun copyLog() {
+        val text = Diagnostics.stateOnly(prefs)
+        Clipboard.copy(this, text)
+        statusView.text = "状态与日志已复制到剪贴板（" +
+            text.length + " 字符）。\n\n" + RcAgentService.snapshot()
     }
 
     private fun addLabel(parent: LinearLayout, text: String) {
