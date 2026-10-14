@@ -44,6 +44,15 @@ import javax.net.ssl.SSLSocketFactory
  *                   they dislike the shape of rather than the destination.
  *  9. cleartext   — plain HTTP on port 80 and against the old direct endpoint:
  *                   an HTTP answer proves TCP survives and only TLS is killed.
+ * 10. IP x SNI    — our address handshaked with our name, with a different name
+ *                   and with no name at all: the control that tells a blocked
+ *                   *destination* apart from a blocked *name*. The pinned-address
+ *                   probes in 4 always carry our own SNI, so on their own they
+ *                   cannot make that distinction.
+ * 11. ECH         — whether the relay name publishes an Encrypted Client Hello
+ *                   policy over DNS. The one observable difference found so far
+ *                   between the name that resets and the names that work: Chrome
+ *                   speaks ECH and hides the name, Java/Conscrypt cannot.
  *
  * Every probe catches its own failures; this never throws.
  */
@@ -93,7 +102,7 @@ internal object Diagnostics {
 
         val target = targetOf(prefs)
         if (target == null) {
-            sb.append("\n--- 探针 2-9 跳过 ---\n")
+            sb.append("\n--- 探针 2-11 跳过 ---\n")
             sb.append("  relay 地址无法解析为 host:port: ").append(prefs.relayBase).append('\n')
         } else {
             sb.append("  探测目标: ").append(target.host).append(':').append(target.port)
@@ -106,6 +115,8 @@ internal object Diagnostics {
             probe("7 对照主机", sb) { controls(sb) }
             probe("8 TLS 变体", sb) { tlsVariants(sb, target) }
             probe("9 明文 HTTP", sb) { cleartext(sb, target) }
+            probe("10 IP×SNI 对照", sb) { ipSniMatrix(sb, target) }
+            probe("11 ECH 配置", sb) { echLookup(sb, target) }
         }
 
         sb.append("\n--- 服务状态 ---\n").append(RcAgentService.snapshot()).append('\n')
@@ -349,6 +360,51 @@ internal object Diagnostics {
     }
 
     /**
+     * The control that separates "this IP is blocked" from "the name in this
+     * handshake is blocked": the *same* address and port, handshaked three
+     * times with three different SNI values.
+     *
+     *  - our name succeeds  → nothing is wrong at all any more
+     *  - our name fails, another name succeeds → the address is reachable and
+     *    the reset is aimed at the name we ask for, not at the destination
+     *  - every name fails → the address (or the path to it) is blocked, and a
+     *    new domain would not have helped
+     *
+     * Existing probes already pin the addresses, but always with our own SNI,
+     * so on their own they cannot tell those three cases apart.
+     */
+    private fun ipSniMatrix(sb: StringBuilder, target: Target) {
+        sb.append("  （同一地址换 SNI：域名被针对 vs 地址被拦）\n")
+        val pairs = mutableListOf<Pair<InetAddress, Int>>()
+        for (address in resolveQuietly(target.host)) pairs.add(address to target.port)
+        // Always include our own fixed address as well: whichever route the app
+        // is configured for, both are worth answering for.
+        try {
+            pairs.add(InetAddress.getByName(RELAY_DIRECT_IP) to RELAY_DIRECT_PORT)
+        } catch (t: Throwable) {
+            // ignore
+        }
+        if (pairs.isEmpty()) {
+            sb.append("  没有任何可测地址，跳过\n")
+            return
+        }
+        for ((address, port) in pairs.distinctBy { (it.first.hostAddress ?: "") + ':' + it.second }) {
+            tlsProbe(
+                sb, "${address.hostAddress}:$port + SNI " + target.host,
+                target.host, port, address, withSni = true, protocols = null, alpn = null
+            )
+            tlsProbe(
+                sb, "${address.hostAddress}:$port + SNI " + CONTROL_SNI_HOST,
+                CONTROL_SNI_HOST, port, address, withSni = true, protocols = null, alpn = null
+            )
+            tlsProbe(
+                sb, "${address.hostAddress}:$port + 不带 SNI",
+                target.host, port, address, withSni = false, protocols = null, alpn = null
+            )
+        }
+    }
+
+    /**
      * Plain HTTP, no TLS at all. An HTTP answer — even a redirect or a 400 —
      * proves the path carries bytes and only the TLS handshake is being killed,
      * which rules out DNS, routing and port blocking in one shot.
@@ -375,10 +431,13 @@ internal object Diagnostics {
                 append("Connection: close\r\n\r\n")
                 append(body)
             }
-            raw.outputStream.use {
-                it.write(request.toByteArray(Charsets.UTF_8))
-                it.flush()
-            }
+            // Deliberately not closing (and not using) the output stream: closing
+            // a socket's output stream closes the socket itself, and the read
+            // below would then report "Socket is closed" — the defect that made
+            // this probe useless in 0.4.0 — instead of the HTTP answer.
+            val out = raw.getOutputStream()
+            out.write(request.toByteArray(Charsets.UTF_8))
+            out.flush()
             val text = readAll(raw.inputStream)
             val firstLine = text.lineSequence().firstOrNull() ?: "(无响应)"
             sb.append("  http://").append(host).append(':').append(port)
@@ -579,6 +638,54 @@ internal object Diagnostics {
         }
     }
 
+    /**
+     * Whether the relay name publishes an Encrypted Client Hello policy.
+     *
+     * This is the one observable difference found so far between the name that
+     * fails and the names that work: Chrome speaks ECH and therefore hides the
+     * real name behind an encrypted blob, while the Java/Conscrypt stack does
+     * not and sends the name in clear. Asking DNS over HTTPS from the phone
+     * settles whether the policy exists on this name — and it runs over a
+     * different host, which the controls show is reachable.
+     */
+    private fun echLookup(sb: StringBuilder, target: Target) {
+        for (host in listOf(target.host, CONTROL_SNI_HOST)) {
+            val url = "https://cloudflare-dns.com/dns-query?name=$host&type=HTTPS"
+            val connection = java.net.URL(url).openConnection() as HttpsURLConnection
+            try {
+                connection.setRequestProperty("accept", "application/dns-json")
+                connection.connectTimeout = CONNECT_TIMEOUT_MS
+                connection.readTimeout = READ_TIMEOUT_MS
+                val text = readAll(connection.inputStream)
+                val answers = org.json.JSONObject(text).optJSONArray("Answer")
+                var data: String? = null
+                if (answers != null) {
+                    for (i in 0 until answers.length()) {
+                        val record = answers.optJSONObject(i) ?: continue
+                        if (record.optInt("type") == 65) {
+                            data = record.optString("data")
+                            break
+                        }
+                    }
+                }
+                if (data == null) {
+                    sb.append("  ").append(host).append(": 没有 HTTPS(65) 记录\n")
+                } else {
+                    val hasEch = data.contains("ech=")
+                    sb.append("  ").append(host).append(": ").append(data).append('\n')
+                    sb.append("    ECH 配置=").append(if (hasEch) "有" else "无").append('\n')
+                    if (hasEch && host.equals(target.host, ignoreCase = true)) {
+                        sb.append("    <<< 该域名发布了 ECH：支持 ECH 的客户端（Chrome）会把真实域名")
+                            .append("加密，中间设备看不到；不支持 ECH 的 Java/Conscrypt 栈明文送出域名，")
+                            .append("可能因此被针对\n")
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+
     private fun readAll(stream: java.io.InputStream?): String {
         if (stream == null) return ""
         return try {
@@ -623,6 +730,9 @@ internal object Diagnostics {
         "www.cloudflare.com" to 443,
         RELAY_DIRECT_HOST to RELAY_DIRECT_PORT
     )
+
+    /** A second name to point at our own address, to tell name-blocking from IP-blocking. */
+    private const val CONTROL_SNI_HOST = "www.cloudflare.com"
 
     /**
      * The address the public DNS returns for our own relay host; anything else
