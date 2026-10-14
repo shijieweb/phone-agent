@@ -484,7 +484,7 @@ internal object Diagnostics {
                 val params = ssl.sslParameters
                 // No hostname verification on purpose: the certificate is read
                 // and judged below, and a mismatch is the finding, not an error.
-                if (withSni) params.serverNames = listOf(SNIHostName(host))
+                if (withSni) params.serverNames = listOf(SNIHostName(host)) else params.serverNames = emptyList()
                 if (alpn != null) params.applicationProtocols = alpn
                 if (protocols != null) ssl.enabledProtocols = protocols
                 ssl.sslParameters = params
