@@ -4,13 +4,16 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.net.UnknownHostException
 import java.security.cert.X509Certificate
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SNIHostName
+import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
@@ -20,21 +23,27 @@ import javax.net.ssl.SSLSocketFactory
  * The phone is unreachable by adb and its logcat is not readable from the outside,
  * so the only channel out of the device is text the operator copies to the
  * clipboard. A plain log dump would not be enough: the relay path can break at
- * four different layers and each one needs a different fix, so this probe walks
- * the layers in order and reports which one fails.
+ * several different layers and each one needs a different fix, so this probe
+ * walks the layers in order and reports which one fails.
  *
- *  1. environment — proxy properties, VPN, active transports
- *  2. DNS         — which address the phone actually resolves (a hijacked or
- *                   VPN-supplied answer explains a lot)
- *  3. TCP         — plain connect to the resolved address on the relay port
- *  4. TLS         — full handshake with an explicit SNI, then dump the peer
- *                   certificate. Reaching the server without SNI lands on the
- *                   nginx `default_server` block, which returns 444 and resets
- *                   the connection — indistinguishable from a network failure
- *                   unless the certificate is inspected.
+ *  1. environment — proxy properties, VPN, active transports, local addresses
+ *  2. DNS         — which address the phone actually resolves, per family
+ *  3. TCP         — plain connect to every resolved address on the relay port
+ *  4. TLS         — full handshake to every resolved address *pinned by address*,
+ *                   plus a with-SNI / without-SNI A/B by hostname. Pinning tells
+ *                   an IPv6-only breakage apart from a TLS-layer one; the A/B
+ *                   tells a stripped SNI apart from a reset.
  *  5. HTTPS       — the same POST the agent makes, through HttpURLConnection
  *  6. raw HTTP    — the same POST written by hand over the TLS socket, to tell
  *                   an HTTP-layer rejection apart from a framework/TLS one
+ *  7. control     — the same handshake against unrelated hosts. If the controls
+ *                   succeed while the relay fails, the fault is on the relay's
+ *                   path and not in this device's TLS stack.
+ *  8. TLS variants— the relay handshake with TLS1.3-only, TLS1.2-only and an
+ *                   explicit ALPN, because some middleboxes reset a handshake
+ *                   they dislike the shape of rather than the destination.
+ *  9. cleartext   — plain HTTP on port 80 and against the old direct endpoint:
+ *                   an HTTP answer proves TCP survives and only TLS is killed.
  *
  * Every probe catches its own failures; this never throws.
  */
@@ -84,7 +93,7 @@ internal object Diagnostics {
 
         val target = targetOf(prefs)
         if (target == null) {
-            sb.append("\n--- 探针 2-6 跳过 ---\n")
+            sb.append("\n--- 探针 2-9 跳过 ---\n")
             sb.append("  relay 地址无法解析为 host:port: ").append(prefs.relayBase).append('\n')
         } else {
             sb.append("  探测目标: ").append(target.host).append(':').append(target.port)
@@ -94,6 +103,9 @@ internal object Diagnostics {
             probe("4 TLS", sb) { tls(sb, target) }
             probe("5 HTTPS", sb) { https(sb, target) }
             probe("6 原始HTTP", sb) { rawHttp(sb, target) }
+            probe("7 对照主机", sb) { controls(sb) }
+            probe("8 TLS 变体", sb) { tlsVariants(sb, target) }
+            probe("9 明文 HTTP", sb) { cleartext(sb, target) }
         }
 
         sb.append("\n--- 服务状态 ---\n").append(RcAgentService.snapshot()).append('\n')
@@ -144,19 +156,26 @@ internal object Diagnostics {
         sb.append("  socksProxyHost=").append(System.getProperty("socksProxyHost") ?: "-")
             .append('\n')
 
+        val provider = java.security.Security.getProviders().firstOrNull { it.name.contains("Conscrypt") }
+        sb.append("  TLS 提供方=").append(provider?.name ?: "(系统默认)")
+            .append("  ").append(provider?.version ?: "").append('\n')
+
         val cm = context.getSystemService(ConnectivityManager::class.java)
         if (cm == null) {
             sb.append("  ConnectivityManager 不可用\n")
+            localAddresses(sb)
             return
         }
         val network = cm.activeNetwork
         if (network == null) {
             sb.append("  没有活动网络\n")
+            localAddresses(sb)
             return
         }
         val caps = cm.getNetworkCapabilities(network)
         if (caps == null) {
             sb.append("  无法读取网络能力\n")
+            localAddresses(sb)
             return
         }
         sb.append("  传输方式: wifi=").append(caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
@@ -173,6 +192,31 @@ internal object Diagnostics {
         sb.append("  VALIDATED=").append(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED))
             .append("  INTERNET=").append(caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET))
             .append('\n')
+        localAddresses(sb)
+    }
+
+    /**
+     * The addresses this device actually holds. An IPv6 address here plus a
+     * failing IPv6 handshake is a very different fault from a TLS-layer reset,
+     * and only the address list makes that visible from a clipboard report.
+     */
+    private fun localAddresses(sb: StringBuilder) {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return
+            var any = false
+            for (nif in java.util.Collections.list(interfaces)) {
+                if (!nif.isUp) continue
+                for (address in java.util.Collections.list(nif.inetAddresses)) {
+                    if (address.isLoopbackAddress) continue
+                    sb.append("  本机地址 ").append(nif.name).append(' ')
+                        .append(family(address)).append(' ').append(address.hostAddress).append('\n')
+                    any = true
+                }
+            }
+            if (!any) sb.append("  本机没有非回环地址\n")
+        } catch (t: Throwable) {
+            sb.append("  读取网卡失败: ").append(describe(t)).append('\n')
+        }
     }
 
     /** Returns the addresses DNS hands the app, which may not be the public ones. */
@@ -188,7 +232,7 @@ internal object Diagnostics {
             return addresses
         }
         for (address in addresses) {
-            sb.append("  ").append(address.hostAddress).append('\n')
+            sb.append("  ").append(family(address)).append(' ').append(address.hostAddress).append('\n')
         }
         val expected = expectedAddressFor(target.host)
         if (expected != null && addresses.none { it.hostAddress == expected }) {
@@ -199,28 +243,25 @@ internal object Diagnostics {
     }
 
     private fun tcp(sb: StringBuilder, target: Target) {
-        val resolved = try {
-            InetAddress.getAllByName(target.host).mapNotNull { it.hostAddress }
-        } catch (t: Throwable) {
-            emptyList()
-        }
         // Test the hard-coded address as well: if DNS hands back something else
         // and that something refuses connections, the two results together say
         // "DNS is the problem" rather than "the server is down".
         val expected = expectedAddressFor(target.host)
-        val targets = (resolved + listOfNotNull(expected)).distinct()
+        val targets = resolveQuietly(target.host) + listOfNotNull(expected?.let { InetAddress.getByName(it) })
 
-        for (address in targets) {
+        for (address in targets.distinctBy { it.hostAddress }) {
             val socket = Socket()
             val started = System.currentTimeMillis()
             try {
                 socket.connect(InetSocketAddress(address, target.port), CONNECT_TIMEOUT_MS)
-                sb.append("  ").append(address).append(":").append(target.port)
+                sb.append("  ").append(family(address)).append(' ').append(address.hostAddress)
+                    .append(':').append(target.port)
                     .append(" 连接成功 ").append(System.currentTimeMillis() - started).append("ms\n")
             } catch (t: Throwable) {
-                sb.append("  ").append(address).append(":").append(target.port)
+                sb.append("  ").append(family(address)).append(' ').append(address.hostAddress)
+                    .append(':').append(target.port)
                     .append(" 连接失败 ").append(System.currentTimeMillis() - started).append("ms ")
-                    .append(t.javaClass.simpleName).append(": ").append(t.message ?: "").append('\n')
+                    .append(describe(t)).append('\n')
             } finally {
                 closeQuietly(socket)
             }
@@ -228,88 +269,199 @@ internal object Diagnostics {
     }
 
     /**
-     * The decisive probe, run as a controlled A/B: the same handshake once with
-     * an explicit SNI and once without one.
+     * The decisive probe. Each resolved address is tried *pinned*, so a broken
+     * IPv6 path cannot hide behind a working IPv4 one (or the other way round),
+     * and the hostname path is tried twice as a controlled A/B on SNI.
      *
-     * The default trust manager cannot be used here — nginx serves a self-signed
-     * `dummy.crt` on its default server, so a stripped SNI makes the handshake
-     * fail before the certificate can be inspected, and "handshake failed" is
-     * exactly the ambiguity we are trying to remove. A permissive manager is
-     * installed for this probe **only** so the peer certificate can be read and
-     * compared; no data is ever sent over these sockets.
-     *
-     * Interpretation:
-     *   with-SNI cert == dsh.owen1.de5.net  → SNI works; look elsewhere
-     *   with-SNI cert == dummy              → our ClientHello loses its SNI
-     *   no-SNI   cert == dummy              → confirms the 444 default server
+     * The default trust manager cannot be used here — a middlebox or a fallback
+     * server presents a certificate that does not validate, and "handshake
+     * failed" is exactly the ambiguity we are trying to remove. A permissive
+     * manager is installed for this probe **only** so the peer certificate can
+     * be read and judged; no data is ever sent over these sockets.
      */
     private fun tls(sb: StringBuilder, target: Target) {
-        val inspected = inspectTls(sb, "带 SNI（正常情况）", withSni = true, target = target)
-        inspectTls(sb, "不带 SNI（对照）", withSni = false, target = target)
+        val addresses = resolveQuietly(target.host)
+        if (addresses.isEmpty()) {
+            sb.append("  域名解析不到地址，跳过固定地址测试\n")
+        }
+        for (address in addresses) {
+            tlsProbe(
+                sb, "固定 ${family(address)} ${address.hostAddress} 带 SNI",
+                target.host, target.port, address, withSni = true, protocols = null, alpn = null
+            )
+        }
+        tlsProbe(
+            sb, "按域名 带 SNI（正常情况）",
+            target.host, target.port, null, withSni = true, protocols = null, alpn = null
+        )
+        tlsProbe(
+            sb, "按域名 不带 SNI（对照）",
+            target.host, target.port, null, withSni = false, protocols = null, alpn = null
+        )
+    }
 
-        when (inspected) {
-            CertKind.REAL -> sb.append("  OK: 带 SNI 能拿到正式证书 → TLS/SNI 这一层没问题，故障在更上层\n")
-            CertKind.DUMMY -> sb.append("  <<< 命中: 带 SNI 也拿到 dummy 证书 → nginx 没认出我们的 SNI")
-            CertKind.UNKNOWN -> sb.append("  <<< 带 SNI 的握手没成功，看上面的异常信息\n")
+    /**
+     * Same handshake against unrelated hosts. Controls are the whole point: if
+     * they succeed while the relay host fails, this device's TLS stack is fine
+     * and something on the relay's path is resetting us. If the controls fail
+     * too, the fault is local (device, ROM, security app, network).
+     */
+    private fun controls(sb: StringBuilder) {
+        sb.append("  （与目标无关的对照；对照能过而 relay 不过 ⇒ 问题在 relay 这条链路上，不在本机 TLS 栈）\n")
+        for (control in CONTROLS) {
+            tlsProbe(
+                sb, "${control.first}:${control.second}",
+                control.first, control.second, null, withSni = true, protocols = null, alpn = null
+            )
         }
     }
 
-    private enum class CertKind { REAL, DUMMY, UNKNOWN }
+    /**
+     * The same destination with a different handshake shape. Some middleboxes
+     * reset a flow they do not like the look of rather than one they cannot
+     * reach, and the only way to see that from a clipboard report is to vary
+     * the shape and watch which variants survive.
+     */
+    private fun tlsVariants(sb: StringBuilder, target: Target) {
+        tlsProbe(
+            sb, "仅 TLSv1.3", target.host, target.port, null,
+            withSni = true, protocols = arrayOf("TLSv1.3"), alpn = null
+        )
+        tlsProbe(
+            sb, "仅 TLSv1.2", target.host, target.port, null,
+            withSni = true, protocols = arrayOf("TLSv1.2"), alpn = null
+        )
+        tlsProbe(
+            sb, "仅 TLSv1.2 + ALPN http/1.1", target.host, target.port, null,
+            withSni = true, protocols = arrayOf("TLSv1.2"), alpn = arrayOf("http/1.1")
+        )
+        tlsProbe(
+            sb, "默认版本 + ALPN http/1.1", target.host, target.port, null,
+            withSni = true, protocols = null, alpn = arrayOf("http/1.1")
+        )
+        // The one that matters most: a browser always offers h2 first, and some
+        // filters reset a ClientHello that does not. Handshake only — nothing is
+        // sent over the socket afterwards, so h2 needs no HTTP/2 implementation.
+        tlsProbe(
+            sb, "浏览器式 ALPN h2,http/1.1", target.host, target.port, null,
+            withSni = true, protocols = null, alpn = arrayOf("h2", "http/1.1")
+        )
+    }
 
-    private fun inspectTls(sb: StringBuilder, label: String, withSni: Boolean, target: Target): CertKind {
+    /**
+     * Plain HTTP, no TLS at all. An HTTP answer — even a redirect or a 400 —
+     * proves the path carries bytes and only the TLS handshake is being killed,
+     * which rules out DNS, routing and port blocking in one shot.
+     */
+    private fun cleartext(sb: StringBuilder, target: Target) {
+        plainHttp(sb, target.host, 80)
+        plainHttp(sb, RELAY_DIRECT_HOST, RELAY_DIRECT_PORT)
+    }
+
+    private fun plainHttp(sb: StringBuilder, host: String, port: Int) {
+        val started = System.currentTimeMillis()
+        val raw = Socket()
+        try {
+            raw.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            val connectedAt = System.currentTimeMillis() - started
+            raw.soTimeout = READ_TIMEOUT_MS
+            val body = """{"id":"PROBE-PLAIN"}"""
+            val payload = body.toByteArray(Charsets.UTF_8)
+            val request = buildString {
+                append("POST /agent/hello HTTP/1.1\r\n")
+                append("Host: ").append(host).append(':').append(port).append("\r\n")
+                append("Content-Type: application/json\r\n")
+                append("Content-Length: ").append(payload.size).append("\r\n")
+                append("Connection: close\r\n\r\n")
+                append(body)
+            }
+            raw.outputStream.use {
+                it.write(request.toByteArray(Charsets.UTF_8))
+                it.flush()
+            }
+            val text = readAll(raw.inputStream)
+            val firstLine = text.lineSequence().firstOrNull() ?: "(无响应)"
+            sb.append("  http://").append(host).append(':').append(port)
+                .append("  连接=").append(connectedAt).append("ms  响应首行: ")
+                .append(firstLine).append('\n')
+        } catch (t: Throwable) {
+            sb.append("  http://").append(host).append(':').append(port)
+                .append("  失败 ").append(System.currentTimeMillis() - started).append("ms ")
+                .append(describe(t)).append('\n')
+        } finally {
+            closeQuietly(raw)
+        }
+    }
+
+    /**
+     * One TLS handshake, fully controlled: pinned address or hostname, SNI on or
+     * off, protocol list and ALPN overridable. Returns true when the handshake
+     * completed, whatever the certificate turned out to be.
+     */
+    private fun tlsProbe(
+        sb: StringBuilder,
+        label: String,
+        host: String,
+        port: Int,
+        address: InetAddress?,
+        withSni: Boolean,
+        protocols: Array<String>?,
+        alpn: Array<String>?
+    ): Boolean {
         sb.append("  [").append(label).append("]\n")
         val raw = Socket()
-        var kind = CertKind.UNKNOWN
+        val started = System.currentTimeMillis()
         try {
-            raw.connect(InetSocketAddress(target.host, target.port), CONNECT_TIMEOUT_MS)
+            val endpoint = if (address != null) InetSocketAddress(address, port) else InetSocketAddress(host, port)
+            raw.connect(endpoint, CONNECT_TIMEOUT_MS)
+            val connectedAt = System.currentTimeMillis() - started
             raw.soTimeout = READ_TIMEOUT_MS
-            val context = javax.net.ssl.SSLContext.getInstance("TLS")
+
+            val context = SSLContext.getInstance("TLS")
             context.init(null, arrayOf(TRUST_ANY), java.security.SecureRandom())
-            val ssl = context.socketFactory.createSocket(raw, target.host, target.port, true) as SSLSocket
+            val ssl = context.socketFactory.createSocket(raw, host, port, true) as SSLSocket
             try {
                 ssl.soTimeout = READ_TIMEOUT_MS
                 val params = ssl.sslParameters
-                // No hostname verification on purpose: we read the certificate
-                // ourselves below, and a mismatch is the finding, not an error.
-                if (withSni) params.serverNames = listOf(SNIHostName(target.host))
+                // No hostname verification on purpose: the certificate is read
+                // and judged below, and a mismatch is the finding, not an error.
+                if (withSni) params.serverNames = listOf(SNIHostName(host))
+                if (alpn != null) params.applicationProtocols = alpn
+                if (protocols != null) ssl.enabledProtocols = protocols
                 ssl.sslParameters = params
-                ssl.startHandshake()
 
+                ssl.startHandshake()
+                val handshakeMs = System.currentTimeMillis() - started - connectedAt
                 val session = ssl.session
-                sb.append("    握手成功 protocol=").append(session.protocol)
-                    .append(" cipher=").append(session.cipherSuite).append('\n')
+                sb.append("    握手成功 连接=").append(connectedAt).append("ms 握手=")
+                    .append(handshakeMs).append("ms protocol=").append(session.protocol)
+                    .append(" alpn=").append(ssl.applicationProtocol ?: "-").append('\n')
                 val cert = session.peerCertificates.firstOrNull() as? X509Certificate
                 if (cert == null) {
                     sb.append("    没有对端证书\n")
                 } else {
-                    val subject = cert.subjectDN.name
-                    sb.append("    subject=").append(subject).append('\n')
-                    sb.append("    issuer=").append(cert.issuerDN.name).append('\n')
-                    sb.append("    有效期=").append(cert.notBefore).append(" → ").append(cert.notAfter)
-                        .append('\n')
-                    // A real endpoint presents a certificate that names the host we
-                    // asked for (or one of Cloudflare's edge names when the host is
-                    // proxied). Anything else means we are talking to a fallback
-                    // server, which is itself the finding.
-                    kind = if (certNamesHost(cert, target.host)) {
-                        sb.append("    → 证书覆盖 ").append(target.host).append("（正常）\n")
-                        CertKind.REAL
-                    } else {
-                        sb.append("    → 证书不覆盖 ").append(target.host)
-                            .append("（默认站/中间人）\n")
-                        CertKind.DUMMY
-                    }
+                    sb.append("    subject=").append(cert.subjectDN.name).append('\n')
+                    sb.append("    → ").append(
+                        if (certNamesHost(cert, host)) {
+                            "证书覆盖 $host（正常）"
+                        } else {
+                            "证书不覆盖 $host（默认站或中间人）"
+                        }
+                    ).append('\n')
                 }
+                return true
             } finally {
                 closeQuietly(ssl)
             }
         } catch (t: Throwable) {
-            sb.append("    握手失败 ").append(t.javaClass.name).append(": ")
-                .append(t.message ?: "").append('\n')
+            // The elapsed time is evidence too: a reset that arrives far faster
+            // than a real round trip to that host was not sent by that host.
+            sb.append("    握手失败 连接+握手=").append(System.currentTimeMillis() - started)
+                .append("ms ").append(describe(t)).append('\n')
+            return false
         } finally {
             closeQuietly(raw)
         }
-        return kind
     }
 
     /** True when the certificate is valid for [host], by SAN or by wildcard. */
@@ -340,7 +492,7 @@ internal object Diagnostics {
         }
     }
 
-    /** Inspection-only trust manager (see [inspectTls]); never used for real traffic. */
+    /** Inspection-only trust manager (see [tlsProbe]); never used for real traffic. */
     private val TRUST_ANY = object : javax.net.ssl.X509TrustManager {
         override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
@@ -447,6 +599,17 @@ internal object Diagnostics {
         return format.format(java.util.Date())
     }
 
+    private fun family(address: InetAddress): String = if (address is Inet4Address) "IPv4" else "IPv6"
+
+    private fun resolveQuietly(host: String): List<InetAddress> = try {
+        InetAddress.getAllByName(host).toList()
+    } catch (t: Throwable) {
+        emptyList()
+    }
+
+    private fun describe(t: Throwable): String =
+        t.javaClass.simpleName + ": " + (t.message ?: "")
+
     private fun closeQuietly(closeable: java.io.Closeable?) {
         try {
             closeable?.close()
@@ -454,6 +617,12 @@ internal object Diagnostics {
             // ignore
         }
     }
+
+    private val CONTROLS = listOf(
+        "www.baidu.com" to 443,
+        "www.cloudflare.com" to 443,
+        RELAY_DIRECT_HOST to RELAY_DIRECT_PORT
+    )
 
     /**
      * The address the public DNS returns for our own relay host; anything else
@@ -465,4 +634,5 @@ internal object Diagnostics {
 
     private const val RELAY_DIRECT_HOST = "dsh.owen1.de5.net"
     private const val RELAY_DIRECT_IP = "212.50.232.54"
+    private const val RELAY_DIRECT_PORT = 19092
 }
