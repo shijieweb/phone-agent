@@ -23,12 +23,14 @@ internal fun joinUrl(base: String?, path: String): String =
  * Which relay address an install should actually use, given whatever is in its
  * settings.
  *
- * Up to v0.2.0 the app shipped [Prefs.LEGACY_RELAY_BASE] as its default and
- * wrote that value into storage on first run. That address is the one the
- * carrier resets mid-handshake, so leaving it in place after an upgrade would
- * reproduce the exact failure we are fixing. A stored copy of the legacy
- * default — or no stored value at all — therefore resolves to the current
- * default; anything the operator typed deliberately is left alone.
+ * This app has shipped two defaults over its life, and both are addresses the
+ * carrier resets mid-handshake: `dsh.owen1.de5.net:19092` up to v0.2.0, then
+ * `mcp.owen1.de5.net` from v0.3.0. Each was written into storage on first run,
+ * so an install holding either would faithfully dial a dead address after an
+ * upgrade — reproducing the exact failure the migration exists to fix. A stored
+ * copy of any retired default — or no stored value at all — therefore resolves
+ * to the current default; anything the operator typed deliberately is left
+ * alone.
  *
  * The comparison is deliberately forgiving about the two things people actually
  * get wrong when typing a URL by hand: trailing slashes and letter case. If it
@@ -41,13 +43,15 @@ internal fun joinUrl(base: String?, path: String): String =
 internal fun resolveRelayBase(stored: String?): String {
     val value = stored?.trim().orEmpty()
     if (value.isEmpty()) return Prefs.DEFAULT_RELAY_BASE
-    if (isSameAddressAsLegacyDefault(value)) return Prefs.DEFAULT_RELAY_BASE
+    if (isARetiredDefault(value)) return Prefs.DEFAULT_RELAY_BASE
     return value
 }
 
 /**
- * True when [value] points at the retired direct route, ignoring trailing
- * slashes and case.
+ * True when [value] points at an address this app previously shipped as its own
+ * default, ignoring trailing slashes and case.
  */
-private fun isSameAddressAsLegacyDefault(value: String): Boolean =
-    value.trimEnd('/').equals(Prefs.LEGACY_RELAY_BASE.trimEnd('/'), ignoreCase = true)
+private fun isARetiredDefault(value: String): Boolean =
+    Prefs.RETIRED_RELAY_BASES.any { retired ->
+        value.trimEnd('/').equals(retired.trimEnd('/'), ignoreCase = true)
+    }

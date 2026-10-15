@@ -65,15 +65,27 @@ class Prefs(context: Context) {
         const val KEY_LOCATION_INTERVAL = "location_interval"
 
         /**
-         * The Cloudflare-fronted endpoint, not the direct `dsh.owen1.de5.net:19092`
-         * one: the phone's carrier injects a forged RST into the first TLS flight
-         * of the direct route, so that address only ever yields
-         * "SocketException: Connection reset" on this device.
+         * The Cloudflare-fronted endpoint on the operator's own domain. Not the
+         * direct `dsh.owen1.de5.net:19092` route, and not `mcp.owen1.de5.net`
+         * either: this device's carrier injects a forged RST into the first TLS
+         * flight of both of those names, so either one only ever yields
+         * "SocketException: Connection reset" here. Probe 10 settled it — same
+         * IP, same port, only the SNI changed: our names reset, an unrelated
+         * name completes the handshake.
          */
-        const val DEFAULT_RELAY_BASE = "https://mcp.owen1.de5.net"
+        const val DEFAULT_RELAY_BASE = "https://relay.2-c.cc"
 
-        /** Shipped as the default up to v0.2.0; carriers reset its TLS flight. */
-        const val LEGACY_RELAY_BASE = "https://dsh.owen1.de5.net:19092"
+        /**
+         * Addresses this app itself shipped as the default and wrote into
+         * storage on first run. A stored copy of either is not a human choice,
+         * so it must be migrated to [DEFAULT_RELAY_BASE] — otherwise an upgrade
+         * reproduces the exact handshake-reset failure the migration exists to
+         * fix. Anything not in this list is the operator's own and is kept.
+         */
+        val RETIRED_RELAY_BASES = listOf(
+            "https://dsh.owen1.de5.net:19092", // shipped up to v0.2.0
+            "https://mcp.owen1.de5.net", // shipped v0.3.0–v0.6.0
+        )
         const val DEFAULT_AGENT_ID = "PHONE-MEIZU"
         const val DEFAULT_AUTO_START = true
         const val DEFAULT_LOCATION_INTERVAL = 300

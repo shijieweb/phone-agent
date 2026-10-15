@@ -13,25 +13,32 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\aiagent\projects\vpsm
 
 > Never paste the relay secret into this repository. It is a public repo.
 
-> The relay base url is `https://mcp.owen1.de5.net`, not the direct
-> `https://dsh.owen1.de5.net:19092`. On at least one carrier the direct address
-> has a forged RST injected into the first TLS flight, so the app can never
-> complete a handshake there. Upgrading from v0.2.0 or earlier migrates a stored
-> copy of the old default automatically — you only need to type the new value if
-> you had entered some other address by hand.
+> The relay base url is `https://relay.2-c.cc`. Two addresses this app used to
+> ship as its default are **dead on this carrier** and must not be typed back in:
+> the direct `https://dsh.owen1.de5.net:19092` (up to v0.2.0) and the
+> Cloudflare-fronted `https://mcp.owen1.de5.net` (v0.3.0–v0.6.0). On this carrier
+> a forged RST is injected into the first TLS flight of both names, so the app
+> can never complete a handshake there. Probe 10 proved the blocking follows the
+> *name*, not the IP or port: an unrelated SNI on the same IP:port handshakes
+> fine. Upgrading migrates a stored copy of either retired default automatically
+> — you only need to type the new value if you had entered some other address by
+> hand.
 
 ## 0. Values to type into the app
 
 | Field | Value |
 | --- | --- |
-| Relay base url | `https://mcp.owen1.de5.net` (the Cloudflare-fronted name — see the note below) |
+| Relay base url | `https://relay.2-c.cc` (Cloudflare-fronted; see the note above) |
 | Agent id | `PHONE-MEIZU` |
 | Secret | the contents of `/etc/rc-agent/secret` on the VPS (64 hex chars) — ask the operator, do **not** commit it |
 
 ## 1. Install
 
 1. Download `phone-agent.apk` from `https://dsh.owen1.de5.net:19092/dl/phone-agent.apk`
-   (HTTP basic auth, user `dsh`).
+   (HTTP basic auth, user `dsh`). *(The download host is itself a name that gets
+   reset for the app's TLS stack on cellular, but the phone's **browser** fetches
+   it from the same address without trouble — verified on the phone. Only the
+   app's own connections are affected.)*
 2. Allow installing from this source, then install. The APK is signed with a
    debug key, so Android will show the usual "unknown developer" warning.
 3. Open the app.

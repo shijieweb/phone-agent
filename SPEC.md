@@ -54,9 +54,15 @@ execution.
 
 ## 2. Relay contract (already live — do not change)
 
-Base URL default: `https://mcp.owen1.de5.net` (Cloudflare-fronted; see the note in
-[README.md](README.md) about why the direct `dsh.owen1.de5.net:19092` route is
-reset in transit on mobile carriers)
+Base URL default: `https://relay.2-c.cc` (Cloudflare-fronted; see the note in
+[README.md](README.md) about why neither the direct `dsh.owen1.de5.net:19092`
+route nor the `mcp.owen1.de5.net` name can be the default — both are reset in
+transit on the operator's mobile carrier).
+
+Two addresses are **retired defaults** and must migrate to the current one when
+found in storage, because the app itself wrote them on first run:
+`dsh.owen1.de5.net:19092` (shipped up to v0.2.0) and `mcp.owen1.de5.net`
+(shipped v0.3.0–v0.6.0). Anything the operator typed is left alone.
 
 All three calls are `POST` with header `X-RC-Secret: <secret>` and a JSON body.
 The secret is a 64-char hex string, configured in the UI, never hard-coded.
@@ -269,7 +275,7 @@ One node per line:
 One screen, `android.app.Activity`, plain `LinearLayout` built in code (no XML
 layout file). Fields:
 
-- Relay base URL (`EditText`, default `https://mcp.owen1.de5.net`)
+- Relay base URL (`EditText`, default `https://relay.2-c.cc`)
 - Agent id (`EditText`, default `PHONE-MEIZU`)
 - Secret (`EditText`, `inputType=textPassword`)
 - `保存` button → persists to SharedPreferences
