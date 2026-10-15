@@ -138,4 +138,97 @@ class CommandsTest {
         assertEquals(Command.Ping, Commands.parse("ping extra"))
         assertEquals(Command.Apps, Commands.parse("apps 1 2 3"))
     }
+
+    // ------------------------------------------- element-level actions (3.1)
+
+    @Test
+    fun clickKeepsTheWholeRestOfTheLineAsItsSelector() {
+        assertEquals(Command.Click(Selector.parse("登录")), Commands.parse("click 登录"))
+        assertEquals(
+            Command.Click(Selector.parse("text:delete all")),
+            Commands.parse("click text:delete all")
+        )
+        // Inner spaces survive; only the separator is dropped.
+        assertEquals(
+            Command.Click(Selector.parse("a  b")),
+            Commands.parse("click   a  b")
+        )
+    }
+
+    @Test
+    fun clickNeedsASelector() {
+        assertTrue(Commands.parse("click") is Command.BadUsage)
+        assertTrue(Commands.parse("click   ") is Command.BadUsage)
+    }
+
+    @Test
+    fun longClickMirrorsClick() {
+        assertEquals(Command.LongClick(Selector.parse("确定")), Commands.parse("longclick 确定"))
+        assertTrue(Commands.parse("longclick") is Command.BadUsage)
+    }
+
+    @Test
+    fun scrollKeepsItsDirectionCountAndOptionalSelector() {
+        assertEquals(Command.Scroll(Direction.DOWN, 1, null), Commands.parse("scroll down"))
+        assertEquals(Command.Scroll(Direction.UP, 1, null), Commands.parse("scroll up"))
+        assertEquals(Command.Scroll(Direction.DOWN, 3, null), Commands.parse("scroll down 3"))
+        assertEquals(
+            Command.Scroll(Direction.DOWN, 3, Selector.parse("list item")),
+            Commands.parse("scroll down 3 list item")
+        )
+        assertEquals(
+            Command.Scroll(Direction.UP, 2, Selector.parse("id:feed")),
+            Commands.parse("scroll up 2 id:feed")
+        )
+    }
+
+    @Test
+    fun scrollKeepsTheSelectorSpacingVerbatim() {
+        // Inner runs of spaces belong to the selector, exactly like `text`.
+        assertEquals(
+            Command.Scroll(Direction.DOWN, 1, Selector.parse("a  b")),
+            Commands.parse("scroll down   a  b")
+        )
+    }
+
+    @Test
+    fun scrollDefaultsToASingleStepAndCapsAtTwenty() {
+        assertEquals(Command.Scroll(Direction.DOWN, 20, null), Commands.parse("scroll down 99"))
+        assertEquals(Command.Scroll(Direction.UP, 1, null), Commands.parse("scroll up 0"))
+    }
+
+    @Test
+    fun scrollWithoutAValidDirectionIsBadUsage() {
+        assertTrue(Commands.parse("scroll") is Command.BadUsage)
+        assertTrue(Commands.parse("scroll sideways") is Command.BadUsage)
+    }
+
+    /**
+     * `scroll down <selector>` and `scroll down <n> <selector>` differ only by
+     * whether the second token parses as a number, so both must be unambiguous.
+     */
+    @Test
+    fun aNumericSelectorIsNotMistakenForACount() {
+        // `123` parses as a count, leaving no selector.
+        assertEquals(Command.Scroll(Direction.DOWN, 5, null), Commands.parse("scroll down 5"))
+        // A value that is documented as a selector keeps its full text.
+        val withNumberLikeText = Commands.parse("scroll down text:123")
+        assertEquals(
+            Command.Scroll(Direction.DOWN, 1, Selector.parse("text:123")),
+            withNumberLikeText
+        )
+    }
+
+    @Test
+    fun imeEnterNeedsTheWordEnter() {
+        assertEquals(Command.ImeEnter, Commands.parse("ime enter"))
+        assertEquals(Command.ImeEnter, Commands.parse("ime ENTER"))
+        assertTrue(Commands.parse("ime") is Command.BadUsage)
+        assertTrue(Commands.parse("ime search") is Command.BadUsage)
+    }
+
+    @Test
+    fun wakeIsACommand() {
+        assertEquals(Command.Wake, Commands.parse("wake"))
+    }
 }

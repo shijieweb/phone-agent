@@ -89,6 +89,12 @@ and compare against the expectation below.
 | `key recents` | opens the recents list |
 | `key notifications` | pulls down the notification shade |
 | `key quicksettings` | expands quick settings |
+| `click SEL` | exit 0, stdout `clicked via=action\|ancestor\|gesture node=… at=<x>,<y>` and stderr `matches=<n>`. Open a screen with a labelled button, run `click <its text>` and watch that exact control react. `via=action` means the accessibility action landed on the node, `via=ancestor` means the nearest clickable parent was used (e.g. clicking the text inside a list row), `via=gesture` means it fell back to a coordinate tap. Re-run with `click id:<resourceId>` and `click desc:<content-desc>` to exercise the kind prefixes. |
+| `longclick SEL` | exit 0, stdout `longclicked via=… node=… at=…`; a long-press menu or context menu opens on that element |
+| `scroll down [n] [SEL]` | exit 0, stdout `scrolled down x<n> node=…`; the list/dialog scrolls one step per `n` (default 1, max 20). `scroll down 3` on a long list must visibly advance three steps. `scroll up` returns |
+| `scroll down 2 id:feed` | scoped form: only the subtree matching the selector is scrolled, stdout names that container |
+| `ime enter` | focus a text field first (e.g. `tap` the search box), then run it: exit 0, stdout `ime enter`; the keyboard's Go/Search action fires (the form submits / the search runs). With no editable field focused: exit 5 `no editable text field` |
+| `wake` | with the screen already on: exit 0, stdout `wake already-on scr=on kg=none`. Then lock the phone (screen off) and run it: exit 0 with `wake ok via=wakelock scr=on kg=none\|locked` (or `via=activity`). If the ROM blocks background activity starts you will get exit 4 `wake failed via=none scr=off kg=…` — that is a reported restriction, not a crash, and the fix is the Flyme keep-alive switches in section 3. With a **secure** lockscreen the screen comes on but the keyguard stays: `wake ok via=activity scr=on kg=secure`, still exit 0. |
 | `text hello` | exit 0 with stdout `text 5` (the character count) and `hello` appears in the focused text field — focus one first with `tap`. With no editable field: exit 5 `no editable text field`. |
 | `apps` | exit 0, one `<package>\t<label>` line per launchable app (tab separated), sorted |
 | `app <package>` | exit 0 with stdout `launched <package>`; that app opens in the foreground |
@@ -103,6 +109,11 @@ and compare against the expectation below.
 | --- | --- |
 | `bogus` | exit 2, stderr `unknown command: bogus` |
 | `tap` / `tap 1` | exit 2 (usage) |
+| `click` / `click   ` | exit 2, usage `click SEL` (a selector is mandatory) |
+| `click no-such-label` | exit 5, stderr `no node matched: no-such-label matches=0` |
+| `scroll down` on a screen with nothing scrollable | exit 5, stderr `no scrollable node` |
+| `scroll sideways` | exit 2, usage `scroll up\|down [n] [SEL]` |
+| `ime` / `ime search` | exit 2, usage `ime enter` |
 | any command with accessibility **off** | exit 3, stderr `accessibility service not connected` |
 | `loc` with location permission revoked | exit 6, stderr `location permission not granted` |
 | `app com.does.not.exist` | exit 5, stderr `package not found: com.does.not.exist` |

@@ -34,6 +34,12 @@ Ship these files (all under `app/src/main/kotlin/net/de5/phoneagent/`):
 | `ScreenShot.kt` | Accessibility screenshot → downscaled JPEG → base64 |
 | `LocationHelper.kt` | One-shot fix + periodic reporting |
 | `BootReceiver.kt` | Restart the service after boot / app update |
+| `Selector.kt` | Parse an element selector (`SEL`) — pure logic, no Android imports |
+| `ElementActions.kt` | Element-level click / long click / scroll / IME enter |
+| `Wake.kt` | Layered screen wake (`wake` command) |
+| `WakeActivity.kt` | One-shot translucent Activity used by the third `wake` layer |
+| `LoopGuard.kt` | Per-instance generation counter that keeps worker threads honest |
+| `Battery.kt` | Doze / battery-whitelist state (`opt`) |
 
 Deliver `AndroidManifest.xml`, `res/values/strings.xml` and
 `res/xml/accessibility_service_config.xml` **exactly as already written** — they
@@ -93,7 +99,12 @@ Rules the client MUST honour:
 
 ### `env` field
 Free-form, keep it short and machine-readable, e.g.
-`android=16;model=meizu22;acc=on;bat=87;scr=on`.
+`android=16;model=meizu22;acc=on;bat=87;scr=on;opt=on`.
+
+`opt` = Doze/App-Standby exemption (battery whitelist) granted. It is carried in
+`env` because it is the one flag that decides whether the agent survives the
+screen going off: without it the OS freezes the long poll and the relay records
+the phone as offline (measured gaps of 138 s, 151 s and one of 9705 s).
 
 ---
 
@@ -112,6 +123,11 @@ Parsing is whitespace-split; **arguments after the command name are positional**
 | `long X Y [ms]` | long press, default 600 ms, cap 5000 |
 | `swipe X1 Y1 X2 Y2 [ms]` | swipe, default 300 ms, cap 3000 |
 | `key NAME` | global action: `back`, `home`, `recents`, `notifications`, `quicksettings` |
+| `click SEL` | element-level click on the node matching `SEL` (see §3.1) |
+| `longclick SEL` | element-level long click on the node matching `SEL` |
+| `scroll up\|down [n] [SEL]` | element-level scroll, `n` times (default 1, cap 20) |
+| `ime enter` | send `ACTION_IME_ENTER` to the focused editable node |
+| `wake` | turn the screen on and try to clear a non-secure keyguard |
 | `text STRING` | type `STRING` into the focused field (rest of line, verbatim) |
 | `apps` | list launchable apps, one per line: `<package>\t<label>` |
 | `app PACKAGE` | launch the app's main activity |
@@ -122,13 +138,71 @@ Parsing is whitespace-split; **arguments after the command name are positional**
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
+### 3.1 Element selectors (`SEL`)
+
+The whole rest of the line after the command name is the selector, **verbatim**
+(spaces included, same treatment as `text`). Grammar:
+
+```
+SEL := [kind:]value
+kind := text | desc | id | cls        (optional; default = any of text/desc/id)
+```
+
+- Matching is **substring** and **case-insensitive**.
+- Without a `kind:` prefix, `value` is tested against `text`, `contentDescription`
+  and `resourceId`. With a prefix, only that one field.
+- `id:foo` also matches a full id such as `com.meituan.android:id/foo` by substring.
+- Walk the node tree **depth-first, pre-order, across all windows** (same
+  enumeration as `tree`) and take the **first** match.
+- If the matched node is not itself clickable, walk **up** to the nearest clickable
+  ancestor before acting.
+- If the node is not `isVisibleToUser`, first try
+  `performAction(ACTION_SHOW_ON_SCREEN)` and re-read the bounds.
+- Attempt order for `click`: `ACTION_CLICK` on the node (or its clickable
+  ancestor) → if that returns false, fall back to a gesture tap at the **centre of
+  the node's bounds**. Report which path was used.
+- Attempt order for `longclick`: `ACTION_LONG_CLICK` → gesture long press at the
+  centre (default 600 ms).
+- `stdout` on success: `clicked via=action|ancestor|gesture node=<resId|text> at=<x>,<y>`
+  (the label is `resId` if present, otherwise the first 40 chars of `text`, then
+  `desc`). `longclick` prints `longclicked …` with the same shape.
+- `stderr` always carries `matches=<n>` so the operator can see ambiguity.
+- No match → `exit=5`, stderr `no node matched: <SEL>`.
+- `SCROLL` needs `ACTION_SCROLL_FORWARD` / `ACTION_SCROLL_BACKWARD`; if no
+  scrollable node is found → `exit=5`, stderr `no scrollable node`.
+  `stdout`: `scrolled down x<n> node=<resId|text>`.
+
+### 3.2 `wake`
+
+Layered, because no single mechanism is reliable on every ROM. Report which layer
+worked so the operator can tell an OS restriction from a bug:
+
+1. If `PowerManager.isInteractive()` is already true → `stdout`
+   `wake already-on`, `exit=0`.
+2. Otherwise acquire `SCREEN_BRIGHT_WAKE_LOCK | ACQUIRE_CAUSES_WAKEUP` (deprecated
+   since API 17 but still functional; `WAKE_LOCK` is already declared), hold ~1 s,
+   release, re-check.
+3. If still off, start the translucent `WakeActivity`
+   (`setTurnScreenOn(true)` + `setShowWhenLocked(true)`, then `finish()`), wait
+   ~1.5 s, re-check.
+4. If the screen is now on and `KeyguardManager.isKeyguardLocked()` and
+   **not** `isKeyguardSecure()` → `requestDismissKeyguard`.
+5. `stdout`: `wake ok via=wakelock|activity scr=on kg=locked|none` — or
+   `wake failed via=none scr=off kg=locked` with `exit=4`.
+   A secure keyguard can never be cleared silently: report `kg=secure` and still
+   return `exit=0` if the screen came on.
+
+Being blocked by background-activity-start restrictions is a **reported
+outcome**, not a crash: `wake` must never throw.
+
 `status` stdout (one line):
 ```json
-{"ok":true,"ver":"0.1.0","acc":true,"svc":true,"scr":true,"bat":87,"loc":true,"loop":0,"queue":0}
+{"ok":true,"ver":"0.1.0","acc":true,"svc":true,"scr":true,"bat":87,"loc":true,"loop":0,"opt":"on","queue":0}
 ```
 `acc` = accessibility service connected, `svc` = agent service running,
 `scr` = screen interactive, `loc` = location permission granted,
-`loop` = periodic location interval in seconds (0 = off).
+`loop` = periodic location interval in seconds (0 = off),
+`opt` = `"on"` when the app is exempt from battery optimisation, else `"off"`.
 
 ### Exit codes
 | Code | Meaning |
@@ -204,10 +278,14 @@ layout file). Fields:
   `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, then (second pass)
   `ACCESS_BACKGROUND_LOCATION`
 - `打开无障碍设置` button → `ACTION_ACCESSIBILITY_SETTINGS`
+- `加入电池白名单` button → `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with
+  `package:<applicationId>`; if the ROM refuses the intent, fall back to
+  `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`
 - `打开电池优化设置` button → `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`
 - A `TextView` status line refreshed every 2 s from a static snapshot held by
   `RcAgentService` (service state, accessibility on/off, last poll time, last
-  error). Never do network I/O on the UI thread.
+  error), plus the current battery-whitelist state. Never do network I/O on the
+  UI thread.
 
 Buttons must not crash when the service was never started.
 

@@ -3,6 +3,7 @@ package net.de5.phoneagent
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -63,6 +64,7 @@ class MainActivity : Activity() {
         toggleButton = addButton(root, "启动") { toggleAgent() }
         addButton(root, "请求权限") { requestAgentPermissions() }
         addButton(root, "打开无障碍设置") { openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS) }
+        addButton(root, "加入电池白名单") { requestBatteryExemption() }
         addButton(root, "打开电池优化设置") {
             openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
         }
@@ -152,8 +154,29 @@ class MainActivity : Activity() {
         }
     }
 
+    /**
+     * Ask the OS to stop freezing us when the screen is off.
+     *
+     * Without this the long poll dies in Doze and the relay sees "offline" — the
+     * exact symptom the operator reported. The dialog is a system one, so the
+     * user still has to confirm; if the ROM refuses the intent we fall back to
+     * the settings list, which at least lets them find it by hand.
+     */
+    private fun requestBatteryExemption() {
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+            intent.data = Uri.parse("package:$packageName")
+            startActivity(intent)
+            statusView.text = "请在系统弹窗里选择「允许」"
+        } catch (t: Throwable) {
+            statusView.text = "本机不支持直接申请，已打开设置列表"
+            openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        }
+    }
+
     private fun refreshStatus() {
-        statusView.text = RcAgentService.snapshot()
+        statusView.text = RcAgentService.snapshot() +
+            "\n电池白名单: " + Battery.flag(this)
         toggleButton.text = if (RcAgentService.running) "停止" else "启动"
     }
 

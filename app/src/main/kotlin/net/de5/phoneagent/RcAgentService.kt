@@ -29,10 +29,20 @@ class RcAgentService : Service() {
     private var pollThread: Thread? = null
     private var heartThread: Thread? = null
 
+    /**
+     * Liveness for *this* incarnation of the service. The worker threads check
+     * this, never the shared [running] flag — see [LoopGuard] for the bug that
+     * made a shared flag insufficient.
+     */
+    private var guard: LoopGuard? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!running) start()
+        // Re-entry is decided by "does this instance already own workers", not by
+        // the shared flag: an instance that is already running must not start a
+        // second pair of threads.
+        if (guard == null) start()
         return START_STICKY
     }
 
@@ -59,7 +69,25 @@ class RcAgentService : Service() {
     }
 
     override fun onDestroy() {
-        running = false
+        // Order matters. Stop this generation *first*, so a worker that is about
+        // to wake up sees its own guard as dead; then interrupt it, so it leaves
+        // the long poll instead of sitting in a 45 s socket read. Without the
+        // interrupt the old thread would only notice on its next iteration —
+        // which is how the duplicate-poll window opened in 0.5.0.
+        val mine = guard
+        guard = null
+        mine?.stop()
+        interrupt(pollThread)
+        interrupt(heartThread)
+        pollThread = null
+        heartThread = null
+        // Only the current instance may clear the shared state: a superseded
+        // instance whose onDestroy lands late must not report the replacement as
+        // stopped, nor blank out its registration.
+        val isCurrent = current == this
+        if (isCurrent) {
+            running = false
+        }
         try {
             locations?.stopLoop()
         } catch (t: Throwable) {
@@ -79,8 +107,18 @@ class RcAgentService : Service() {
         } catch (t: Throwable) {
             // ignore
         }
-        current = null
+        // Only deregister ourselves (see `isCurrent` above).
+        if (isCurrent) current = null
         super.onDestroy()
+    }
+
+    private fun interrupt(thread: Thread?) {
+        if (thread == null) return
+        try {
+            thread.interrupt()
+        } catch (t: Throwable) {
+            // ignore
+        }
     }
 
     private fun start() {
@@ -96,6 +134,13 @@ class RcAgentService : Service() {
         note = null
         running = true
         current = this
+
+        // Supersede any previous incarnation before spawning our own workers, so
+        // a stale thread still blocked in `relay.poll()` is dead the moment it
+        // wakes up, whatever the shared `running` flag says.
+        val mine = LoopGuard()
+        guard = mine
+        val generation = mine.generation
 
         try {
             startForeground(
@@ -128,8 +173,8 @@ class RcAgentService : Service() {
 
         locationInterval = prefs.locationInterval
 
-        pollThread = worker("rc-poll") { pollLoop() }
-        heartThread = worker("rc-heartbeat") { heartLoop() }
+        pollThread = worker("rc-poll") { pollLoop(generation) }
+        heartThread = worker("rc-heartbeat") { heartLoop(generation) }
     }
 
     private fun worker(name: String, body: () -> Unit): Thread {
@@ -139,11 +184,13 @@ class RcAgentService : Service() {
         return thread
     }
 
-    private fun pollLoop() {
+    private fun pollLoop(generation: Int) {
         var failures = 0
         var lastHelloAt = 0L
         var autoCollected = false
-        while (running) {
+        // The guard is read through the field so a stopped instance is observed
+        // immediately; the generation pins the loop to the instance that made it.
+        while (guardOf(generation)) {
             try {
                 renewWakeLock()
                 val relay = client
@@ -163,6 +210,9 @@ class RcAgentService : Service() {
                 }
 
                 val polled = relay.poll(POLL_WAIT_SECONDS)
+                // `poll()` may have returned because we were interrupted during
+                // onDestroy; re-check before acting on the (empty) result.
+                if (!guardOf(generation)) return
                 lastPollMs = System.currentTimeMillis()
                 if (failures > 0) {
                     AgentLog.add("poll", "链路恢复（此前连续失败 " + failures + " 次）")
@@ -193,6 +243,9 @@ class RcAgentService : Service() {
                     return
                 }
             } catch (t: Throwable) {
+                // An interrupt means onDestroy() is unwinding us: leave at once
+                // instead of treating it as a network failure and retrying.
+                if (Thread.currentThread().isInterrupted) return
                 failures++
                 lastError = t.javaClass.simpleName + ": " + (t.message ?: "")
                 AgentLog.add("error", "第 " + failures + " 次失败 " + describe(t))
@@ -217,6 +270,17 @@ class RcAgentService : Service() {
     }
 
     /**
+     * True while [generation] is the live generation of this service instance.
+     * The instance's own guard is consulted, so a service that has been destroyed
+     * reports false even if a *newer* instance exists and is running.
+     */
+    private fun guardOf(generation: Int): Boolean {
+        if (Thread.currentThread().isInterrupted) return false
+        val mine = guard ?: return false
+        return mine.isRunning(generation)
+    }
+
+    /**
      * On the very first failure of a run, copy a report to the clipboard so the
      * operator can paste it back. Only the first one: a flat network would
      * otherwise overwrite the clipboard every few seconds.
@@ -236,8 +300,8 @@ class RcAgentService : Service() {
     }
 
     /** `hello` is the heartbeat: never let it go stale for more than 60 s. */
-    private fun heartLoop() {
-        while (running) {
+    private fun heartLoop(generation: Int) {
+        while (guardOf(generation)) {
             try {
                 val relay = client
                 if (relay != null && System.currentTimeMillis() - lastHelloMs >= HELLO_INTERVAL_MS) {

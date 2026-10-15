@@ -28,6 +28,7 @@ interface NodeView {
     val checked: Boolean
     val enabled: Boolean
     val selected: Boolean
+    val visibleToUser: Boolean
     val children: List<NodeView>
 }
 
@@ -151,7 +152,7 @@ object UiTree {
  * The only place that reads [AccessibilityNodeInfo]. Kept apart from [UiTree]
  * so the formatter stays pure.
  */
-class AccessibilityNodeAdapter(private val node: AccessibilityNodeInfo) : NodeView {
+open class AccessibilityNodeAdapter(private val node: AccessibilityNodeInfo) : NodeView {
 
     override val className: String?
         get() = node.className?.toString()
@@ -196,6 +197,9 @@ class AccessibilityNodeAdapter(private val node: AccessibilityNodeInfo) : NodeVi
     override val selected: Boolean
         get() = node.isSelected
 
+    override val visibleToUser: Boolean
+        get() = node.isVisibleToUser
+
     override val children: List<NodeView>
         get() {
             val count = node.childCount
@@ -209,4 +213,7 @@ class AccessibilityNodeAdapter(private val node: AccessibilityNodeInfo) : NodeVi
             }
             return list
         }
+
+    /** The framework node behind this view; used by [ElementActions] only. */
+    fun frameworkNode(): AccessibilityNodeInfo = node
 }

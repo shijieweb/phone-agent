@@ -50,7 +50,8 @@ internal fun deviceEnv(context: Context): String {
         ";model=" + Build.MODEL.replace(' ', '_') +
         ";acc=" + acc +
         ";bat=" + batteryPercent(context) +
-        ";scr=" + scr
+        ";scr=" + scr +
+        ";opt=" + Battery.flag(context)
 }
 
 /**
@@ -96,6 +97,21 @@ class CommandExecutor(
             is Command.Key ->
                 key(command)
 
+            is Command.Click ->
+                elementClick(command)
+
+            is Command.LongClick ->
+                elementLongClick(command)
+
+            is Command.Scroll ->
+                elementScroll(command)
+
+            is Command.ImeEnter ->
+                imeEnter()
+
+            is Command.Wake ->
+                Wake.wake(context)
+
             is Command.Text ->
                 inputText(command)
 
@@ -135,6 +151,7 @@ class CommandExecutor(
         json.put("bat", batteryPercent(context))
         json.put("loc", locations.hasPermission())
         json.put("loop", locations.loopInterval)
+        json.put("opt", Battery.flag(context))
         json.put("queue", 0)
         return ExecutionResult(EXIT_OK, json.toString(), "")
     }
@@ -197,6 +214,53 @@ class CommandExecutor(
         } else {
             ExecutionResult(EXIT_USAGE, "", "global action failed: ${command.name}")
         }
+    }
+
+    /**
+     * `click SEL` (SPEC.md section 3.1). The tree read and `ACTION_CLICK` run on
+     * the main thread; the gesture fallback is dispatched from *this* (the poll)
+     * thread, because [Gestures] blocks its caller while it posts to the main
+     * thread — doing that on the main thread would deadlock the looper.
+     */
+    private fun elementClick(command: Command.Click): ExecutionResult {
+        val service = PhoneAccessibilityService.instance ?: return notConnected()
+        return ElementActions.click(service, command.selector, mainDispatch(ELEMENT_TIMEOUT_MS))
+    }
+
+    private fun elementLongClick(command: Command.LongClick): ExecutionResult {
+        val service = PhoneAccessibilityService.instance ?: return notConnected()
+        return ElementActions.longClick(
+            service,
+            command.selector,
+            mainDispatch(ELEMENT_TIMEOUT_MS)
+        )
+    }
+
+    /**
+     * A [ElementActions.MainDispatch] that runs framework reads on the main
+     * thread while the gesture fallback stays on the caller's thread.
+     */
+    private fun mainDispatch(timeoutMs: Long): ElementActions.MainDispatch =
+        object : ElementActions.MainDispatch {
+            override fun <T> run(block: () -> T): T? = onMain(timeoutMs) { block() }
+        }
+
+    /**
+     * `scroll` only calls `performAction`, which is a plain framework call on the
+     * node — it needs the main thread but has no gesture fallback, so the whole
+     * operation can be posted as one piece.
+     */
+    private fun elementScroll(command: Command.Scroll): ExecutionResult {
+        val service = PhoneAccessibilityService.instance ?: return notConnected()
+        return onMain(ELEMENT_TIMEOUT_MS) {
+            ElementActions.scroll(service, command, service.roots())
+        } ?: ExecutionResult(EXIT_TIMEOUT, "", "scroll timed out")
+    }
+
+    private fun imeEnter(): ExecutionResult {
+        val service = PhoneAccessibilityService.instance ?: return notConnected()
+        return onMain(TEXT_TIMEOUT_MS) { ElementActions.imeEnter(service.roots()) }
+            ?: ExecutionResult(EXIT_TIMEOUT, "", "ime enter timed out")
     }
 
     private fun inputText(command: Command.Text): ExecutionResult {
@@ -344,6 +408,8 @@ class CommandExecutor(
     companion object {
         private const val TREE_TIMEOUT_MS = 15_000L
         private const val TEXT_TIMEOUT_MS = 10_000L
+        /** Element actions walk the tree and may dispatch a gesture. */
+        private const val ELEMENT_TIMEOUT_MS = 15_000L
         private const val SET_TEXT_OK = 1
         private const val SET_TEXT_NO_FIELD = 0
         private const val LOCATION_PERMISSION_DENIED = "location permission not granted"

@@ -21,6 +21,7 @@ class UiTreeTest {
         override val checked: Boolean = false,
         override val enabled: Boolean = true,
         override val selected: Boolean = false,
+        override val visibleToUser: Boolean = true,
         override val children: List<NodeView> = emptyList()
     ) : NodeView
 

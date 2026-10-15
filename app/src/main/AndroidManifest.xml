@@ -16,6 +16,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Lets the operator opt this app out of Doze/App-Standby from inside the
+         app instead of hunting through system settings. Without the exemption
+         the phone freezes the long poll once the screen goes off, which the
+         relay sees as "offline" (measured: heartbeat gaps of 138 s, 151 s and
+         a whole-night 9705 s). Sideloaded, so Play's policy does not apply. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Location. ACCESS_BACKGROUND_LOCATION is required for reports sent while
          the app has no visible activity; without it we can only read a fix
          while the user has the app open. -->
@@ -58,6 +65,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="remote_control_agent" />
         </service>
+
+        <!-- Third layer of the `wake` command (SPEC.md section 3.2): a one-shot
+             translucent Activity that turns the panel on and clears a non-secure
+             keyguard. Invisible and immediately finished; `noHistory` +
+             `excludeFromRecents` keep it out of the task list. -->
+        <activity
+            android:name=".WakeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- ================= ACCESSIBILITY ================= -->
         <!-- The only "hands and eyes" we have: read the window tree, inject

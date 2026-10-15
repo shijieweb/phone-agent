@@ -32,6 +32,16 @@ sealed class Command {
     data class LongPress(val x: Int, val y: Int, val ms: Int) : Command()
     data class Swipe(val x1: Int, val y1: Int, val x2: Int, val y2: Int, val ms: Int) : Command()
     data class Key(val name: String) : Command()
+    /** `click SEL` — element-level click (SPEC.md section 3.1). */
+    data class Click(val selector: Selector) : Command()
+    /** `longclick SEL` — element-level long click (SPEC.md section 3.1). */
+    data class LongClick(val selector: Selector) : Command()
+    /** `scroll up|down [n] [SEL]` (SPEC.md section 3.1). */
+    data class Scroll(val direction: Direction, val count: Int, val selector: Selector?) : Command()
+    /** `ime enter` — send ACTION_IME_ENTER to the focused editable node. */
+    object ImeEnter : Command()
+    /** `wake` — turn the screen on, try to clear a non-secure keyguard. */
+    object Wake : Command()
     /** `text` keeps the rest of the line verbatim, spaces included. */
     data class Text(val value: String) : Command()
     object Apps : Command()
@@ -45,6 +55,9 @@ sealed class Command {
     /** The verb is known but the arguments cannot be used. */
     data class BadUsage(val detail: String) : Command()
 }
+
+/** Scroll direction for `scroll up|down`. */
+enum class Direction { UP, DOWN }
 
 object Commands {
 
@@ -67,6 +80,10 @@ object Commands {
 
     const val LOCLOOP_MIN_SECONDS = 30
     const val LOCLOOP_MAX_SECONDS = 3600
+
+    /** `scroll up|down [n] [SEL]`: default 1, cap 20 (SPEC.md section 3.1). */
+    const val SCROLL_COUNT_DEFAULT = 1
+    const val SCROLL_COUNT_MAX = 20
 
     private val KEY_NAMES = setOf("back", "home", "recents", "notifications", "quicksettings")
 
@@ -147,6 +164,32 @@ object Commands {
                 Command.Key(name)
             }
 
+            "click" -> {
+                // SPEC.md section 3.1: the selector is the whole rest of the line,
+                // verbatim, with only the separating whitespace dropped.
+                val selector = dropLeadingWhitespace(rest)
+                if (selector.isBlank()) return Command.BadUsage("usage: click SEL")
+                Command.Click(Selector.parse(selector))
+            }
+
+            "longclick" -> {
+                val selector = dropLeadingWhitespace(rest)
+                if (selector.isBlank()) return Command.BadUsage("usage: longclick SEL")
+                Command.LongClick(Selector.parse(selector))
+            }
+
+            "scroll" -> parseScroll(rest)
+
+            "ime" -> {
+                val args = splitArgs(rest)
+                if (args.isEmpty() || !args[0].equals("enter", ignoreCase = true)) {
+                    return Command.BadUsage("usage: ime enter")
+                }
+                Command.ImeEnter
+            }
+
+            "wake" -> Command.Wake
+
             "text" -> {
                 // Rest of the line, verbatim: only the separator whitespace is
                 // dropped, inner (and trailing) spaces are part of the payload.
@@ -178,6 +221,66 @@ object Commands {
 
             else -> Command.Unknown(head)
         }
+    }
+
+    /**
+     * `scroll up|down [n] [SEL]`.
+     *
+     * Positional, like the rest of the grammar: the first token is the
+     * direction, then an optional count, then everything left is the selector —
+     * verbatim, so `scroll down 3 list item` targets "list item".
+     *
+     * Ambiguity note: `scroll down 3` is a count because `3` parses as an
+     * integer. To scroll once on an element literally called "3", write a kind
+     * prefix (`scroll down text:3`), which cannot be mistaken for a count.
+     */
+    private fun parseScroll(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return Command.BadUsage("usage: scroll up|down [n] [SEL]")
+
+        val direction = when (tokens[0].text.lowercase()) {
+            "up" -> Direction.UP
+            "down" -> Direction.DOWN
+            else -> return Command.BadUsage("usage: scroll up|down [n] [SEL]")
+        }
+
+        var index = 1
+        var count = SCROLL_COUNT_DEFAULT
+        if (index < tokens.size) {
+            val parsed = tokens[index].text.toIntOrNull()
+            if (parsed != null) {
+                count = parsed.coerceIn(1, SCROLL_COUNT_MAX)
+                index++
+            }
+        }
+
+        // Slice the selector out of the original string so its internal spacing
+        // survives verbatim, exactly like `text` / `click` (SPEC.md section 3.1).
+        val selector = if (index < tokens.size) {
+            val from = tokens[index].start
+            val raw = rest.substring(from)
+            if (raw.isBlank()) null else Selector.parse(raw)
+        } else {
+            null
+        }
+
+        return Command.Scroll(direction, count, selector)
+    }
+
+    /** A whitespace-separated token plus where it starts, for verbatim slicing. */
+    private class TokenSpan(val text: String, val start: Int)
+
+    private fun tokenSpans(rest: String): List<TokenSpan> {
+        val spans = ArrayList<TokenSpan>()
+        var i = 0
+        while (i < rest.length) {
+            while (i < rest.length && rest[i].isWhitespace()) i++
+            if (i >= rest.length) break
+            val start = i
+            while (i < rest.length && !rest[i].isWhitespace()) i++
+            spans.add(TokenSpan(rest.substring(start, i), start))
+        }
+        return spans
     }
 
     private fun firstWhitespace(value: String): Int {
