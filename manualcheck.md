@@ -35,11 +35,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\aiagent\projects\vpsm
 
 ## 1. Install
 
-1. Download `phone-agent.apk` from `https://dsh.owen1.de5.net:19092/dl/phone-agent.apk`
-   (HTTP basic auth, user `dsh`). *(The download host is itself a name that gets
-   reset for the app's TLS stack on cellular, but the phone's **browser** fetches
-   it from the same address without trouble — verified on the phone. Only the
-   app's own connections are affected.)*
+1. Download `phone-agent.apk` from
+   `https://dsh.2-c.cc:19092/d/bb9d05ab128a85d9e3057ef61f136e9f/phone-agent.apk` (no auth).
+   *(The old `https://dsh.owen1.de5.net:19092/dl/phone-agent.apk` needed basic auth and was
+   retired server-side on 2026-10-17: `de5.net` is a free shared domain that the operator's
+   carrier resets by TLS SNI.)*
 2. Allow installing from this source, then install. The APK is signed with a
    debug key, so Android will show the usual "unknown developer" warning.
 3. Open the app.
