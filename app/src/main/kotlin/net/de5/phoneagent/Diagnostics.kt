@@ -742,7 +742,7 @@ internal object Diagnostics {
     private fun expectedAddressFor(host: String): String? =
         if (host.equals(RELAY_DIRECT_HOST, ignoreCase = true)) RELAY_DIRECT_IP else null
 
-    private const val RELAY_DIRECT_HOST = "dsh.owen1.de5.net"
+    private const val RELAY_DIRECT_HOST = "dsh.2-c.cc"
     private const val RELAY_DIRECT_IP = "212.50.232.54"
     private const val RELAY_DIRECT_PORT = 19092
 }

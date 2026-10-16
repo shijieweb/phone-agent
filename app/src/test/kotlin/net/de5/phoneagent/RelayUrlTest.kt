@@ -46,13 +46,14 @@ class RelayUrlTest {
 
     /**
      * Upgrading must not keep dialling an address the carrier resets. This app
-     * has shipped two defaults and wrote each into storage on first run, so a
-     * stored copy of *either* has to be treated as "not chosen by a human" and
+     * has shipped three defaults and wrote each into storage on first run, so a
+     * stored copy of *any* has to be treated as "not chosen by a human" and
      * moved to the current default.
      *
-     * The second one matters most right now: `mcp.owen1.de5.net` was the default
-     * as recently as v0.6.0, so every install in the field is holding it, and it
-     * is one of the names probe 10 proved gets reset.
+     * The newest entry matters most right now: `relay.2-c.cc` was the default as
+     * recently as v0.6.1, so installs in the field are holding it. It is not a
+     * blocked name, but it is a Cloudflare detour the operator has retired in
+     * favour of the direct route.
      */
     @Test
     fun everyRetiredDefaultMigratesToTheCurrentOne() {
@@ -74,18 +75,19 @@ class RelayUrlTest {
 
     /** The list is the contract; losing an entry strands the installs holding it. */
     @Test
-    fun bothHistoricalDefaultsAreStillListed() {
+    fun everyHistoricalDefaultIsStillListed() {
         assertTrue(Prefs.RETIRED_RELAY_BASES.contains("https://dsh.owen1.de5.net:19092"))
         assertTrue(Prefs.RETIRED_RELAY_BASES.contains("https://mcp.owen1.de5.net"))
+        assertTrue(Prefs.RETIRED_RELAY_BASES.contains("https://relay.2-c.cc"))
     }
 
     /**
      * The address the carrier resets must never be the default again — that is
-     * the whole reason the default changed twice.
+     * the whole reason the default changed three times.
      */
     @Test
     fun theCurrentDefaultIsNotARetiredOne() {
-        assertEquals("https://relay.2-c.cc", Prefs.DEFAULT_RELAY_BASE)
+        assertEquals("https://dsh.2-c.cc:19092", Prefs.DEFAULT_RELAY_BASE)
         assertFalse(Prefs.RETIRED_RELAY_BASES.any { it.equals(Prefs.DEFAULT_RELAY_BASE, true) })
     }
 
@@ -94,7 +96,9 @@ class RelayUrlTest {
         val typed = "https://example.invalid:8443"
         assertEquals(typed, resolveRelayBase(typed))
         assertEquals(typed, resolveRelayBase("  $typed  "))
-        assertEquals("https://relay.2-c.cc", resolveRelayBase("https://relay.2-c.cc"))
+        // `https://relay.2-c.cc` used to be kept here. As of v0.7.0 it is itself a
+        // retired default, so it migrates instead — covered above.
+        assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("https://relay.2-c.cc"))
     }
 
     /**

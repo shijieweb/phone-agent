@@ -65,26 +65,31 @@ class Prefs(context: Context) {
         const val KEY_LOCATION_INTERVAL = "location_interval"
 
         /**
-         * The Cloudflare-fronted endpoint on the operator's own domain. Not the
-         * direct `dsh.owen1.de5.net:19092` route, and not `mcp.owen1.de5.net`
-         * either: this device's carrier injects a forged RST into the first TLS
-         * flight of both of those names, so either one only ever yields
-         * "SocketException: Connection reset" here. Probe 10 settled it — same
-         * IP, same port, only the SNI changed: our names reset, an unrelated
-         * name completes the handshake.
+         * The direct route on the operator's *own paid* domain, no Cloudflare in
+         * front. The three names this app used before all lived under
+         * `de5.net` — a free domain handed out to anyone who asked, which is
+         * exactly why carriers put it on their TLS-SNI block list: the reset
+         * arrives 13–29 ms after the ClientHello, far inside one RTT, so it is
+         * injected near the client rather than by our server. Probe 10 settled
+         * it: same IP, same port, only the SNI changed — a `de5.net` name reset,
+         * an unrelated name completed the handshake. `2-c.cc` is registered to
+         * the operator alone, and the name is the only thing that was ever
+         * blocked; the port was never the problem.
          */
-        const val DEFAULT_RELAY_BASE = "https://relay.2-c.cc"
+        const val DEFAULT_RELAY_BASE = "https://dsh.2-c.cc:19092"
 
         /**
          * Addresses this app itself shipped as the default and wrote into
-         * storage on first run. A stored copy of either is not a human choice,
-         * so it must be migrated to [DEFAULT_RELAY_BASE] — otherwise an upgrade
-         * reproduces the exact handshake-reset failure the migration exists to
-         * fix. Anything not in this list is the operator's own and is kept.
+         * storage on first run. A stored copy of any of them is not a human
+         * choice, so it must be migrated to [DEFAULT_RELAY_BASE] — otherwise an
+         * upgrade reproduces the exact handshake-reset failure the migration
+         * exists to fix. Anything not in this list is the operator's own and is
+         * kept.
          */
         val RETIRED_RELAY_BASES = listOf(
             "https://dsh.owen1.de5.net:19092", // shipped up to v0.2.0
             "https://mcp.owen1.de5.net", // shipped v0.3.0–v0.6.0
+            "https://relay.2-c.cc", // shipped v0.6.1; Cloudflare detour, now retired
         )
         const val DEFAULT_AGENT_ID = "PHONE-MEIZU"
         const val DEFAULT_AUTO_START = true

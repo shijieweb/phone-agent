@@ -3,7 +3,7 @@ package net.de5.phoneagent
 /**
  * Relay base-URL handling.
  *
- * The operator types a base URL such as `https://dsh.owen1.de5.net:19092`, but
+ * The operator types a base URL such as `https://dsh.2-c.cc:19092`, but
  * trailing slashes are easy to add by accident and a naive concatenation then
  * produces `https://host//agent/hello`, which nginx resolves as a different
  * path. Every relay path therefore goes through [joinUrl].
@@ -23,11 +23,13 @@ internal fun joinUrl(base: String?, path: String): String =
  * Which relay address an install should actually use, given whatever is in its
  * settings.
  *
- * This app has shipped two defaults over its life, and both are addresses the
- * carrier resets mid-handshake: `dsh.owen1.de5.net:19092` up to v0.2.0, then
- * `mcp.owen1.de5.net` from v0.3.0. Each was written into storage on first run,
- * so an install holding either would faithfully dial a dead address after an
- * upgrade — reproducing the exact failure the migration exists to fix. A stored
+ * This app has shipped three defaults over its life, and the first two are
+ * addresses the carrier resets mid-handshake: `dsh.owen1.de5.net:19092` up to
+ * v0.2.0, then `mcp.owen1.de5.net` from v0.3.0. Each was written into storage on
+ * first run, so an install holding either would faithfully dial a dead address
+ * after an upgrade — reproducing the exact failure the migration exists to fix.
+ * The third, `relay.2-c.cc` (v0.6.1), still worked; it is retired because the
+ * operator moved off the Cloudflare detour to the direct route. A stored
  * copy of any retired default — or no stored value at all — therefore resolves
  * to the current default; anything the operator typed deliberately is left
  * alone.

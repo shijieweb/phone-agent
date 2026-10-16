@@ -42,15 +42,19 @@ POST /agent/poll     long poll (up to 25 s) for the next queued command
 POST /agent/result   report exit code, stdout, stderr
 ```
 
-The default relay is `https://relay.2-c.cc` — a Cloudflare-fronted name on the
-operator's own domain. The relay itself listens on loopback only; the tunnel is
-what makes it reachable.
+The default relay is `https://dsh.2-c.cc:19092` — a **direct** route on the
+operator's own paid domain, with no Cloudflare in front. The relay itself
+listens on loopback only; `nginx` on the VPS terminates TLS for that name and
+proxies it.
 
-> **Why not dial the server directly?** On the operator's mobile carrier, a TLS
-> connection to the direct address (`dsh.owen1.de5.net:19092`) is killed with a
-> forged TCP RST immediately after the ClientHello. Packet capture showed the
-> reset carrying a different TTL and IP ID than the phone's own packets, with no
-> server-side log entry at all — i.e. injected in transit.
+> **Why the default has changed three times.** Every address this app shipped
+> before v0.7.0 lived under `de5.net`, a free domain handed out to anyone who
+> asked — and it is exactly that shared-ness that gets a name onto a carrier's
+> TLS-SNI block list. A connection to one of those names is killed with a forged
+> TCP RST immediately after the ClientHello — 13–29 ms, far inside one RTT, so
+> the reset is injected near the client, not by our server (which logs nothing
+> and never sends it: the ClientHello arrives, our ServerHello and certificate
+> go out, and the RST comes *in*).
 >
 > The first fix — fronting the relay with Cloudflare on `mcp.owen1.de5.net` — was
 > not enough, because the blocking turned out not to be about the port, the TLS
@@ -60,12 +64,14 @@ what makes it reachable.
 > *our* `nginx` and returning our dummy certificate), while our names — and even
 > a bare no-SNI handshake — are reset. So the reset is aimed at **specific
 > names**, and the cure is to stop using one of them rather than to disguise the
-> connection.
+> connection. `2-c.cc` is registered to the operator alone, and its name was
+> never on that list — the same IP and non-standard port handshake fine under it.
 >
-> `Prefs.RETIRED_RELAY_BASES` records both addresses this app used to ship as its
-> default; an install still holding either migrates to the current default
-> automatically (see `resolveRelayBase`). A hand-typed address is never
-> rewritten.
+> `Prefs.RETIRED_RELAY_BASES` records all three addresses this app used to ship
+> as its default (`dsh.owen1.de5.net:19092`, `mcp.owen1.de5.net`, and the
+> Cloudflare detour `relay.2-c.cc`); an install still holding any of them
+> migrates to the current default automatically (see `resolveRelayBase`). A
+> hand-typed address is never rewritten.
 
 Delivery is **at-most-once** by design: a command is removed from the queue when
 handed out. A missed command can be re-sent; a double-executed destructive action
