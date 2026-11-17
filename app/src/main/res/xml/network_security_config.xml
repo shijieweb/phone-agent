@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext policy.
+
+  Android 9+ forbids cleartext HTTP by default for any app with targetSdk >= 28,
+  and this app shipped without any policy at all — so a LAN relay such as
+  `http://192.168.5.200:16100` dies with
+  `CLEARTEXT communication to 192.168.5.200 not permitted by network security policy`
+  before a single byte leaves the phone.
+
+  The fix is deliberately NOT a blanket `cleartextTrafficPermitted="true"`: the
+  public path carries the shared secret in a header, and a blanket opt-in would
+  let a typo (`http://` instead of `https://`) send that secret in the clear over
+  the internet. Only the private/loopback hosts below may speak plain HTTP; every
+  other host is still forced onto HTTPS by `base-config`.
+
+  `<domain>` takes exact host names or exact IP literals — Android's network
+  security config has no CIDR wildcard — so the LAN address the operator picked
+  is listed verbatim. Changing that address means re-publishing the APK.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <!-- 10.0.2.2 is the host machine as seen from the Android emulator. -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <!-- The operator's LAN address (reserved on the router, so it is stable). -->
+        <domain includeSubdomains="false">192.168.5.200</domain>
+    </domain-config>
+</network-security-config>
