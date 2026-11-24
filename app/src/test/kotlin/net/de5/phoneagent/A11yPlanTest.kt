@@ -65,8 +65,45 @@ class A11yPlanTest {
     @Test
     fun theReportSaysWhenTheLastRebuildRan() {
         val text = A11yPlan.report(true, true, false, "04-03 12:01:07 安装后自愈(3000ms): 已补写")
-        assertTrue(text, text.contains("最近自愈: 04-03 12:01:07 安装后自愈(3000ms)"))
+        assertTrue(text, text.contains("最近自愈: 04-03 12:01:07 [装包] 已补写"))
     }
+
+    @Test
+    fun theLastRepairIsLabelledWithItsTrigger() {
+        // The v0.4.3 investigation needed logcat to discover that the *heartbeat*
+        // had saved the phone, not the install rebuild. The label says it directly.
+        assertEquals(
+            "11-25 04:20:35 [心跳] 已强制重连无障碍服务（保留原有 0 条）",
+            A11yPlan.annotate("11-25 04:20:35 自愈: 已强制重连无障碍服务（保留原有 0 条）")
+        )
+        assertEquals(
+            "11-25 04:20:35 [启动] 已强制重连无障碍服务",
+            A11yPlan.annotate("11-25 04:20:35 启动自检: 已强制重连无障碍服务")
+        )
+        assertEquals(
+            "11-25 04:20:35 [装包] 已强制重连无障碍服务",
+            A11yPlan.annotate("11-25 04:20:35 安装后自愈(3000ms): 已强制重连无障碍服务")
+        )
+    }
+
+    @Test
+    fun anInstallLineIsNeverMislabelledAsAHeartbeat() {
+        // `安装后自愈` contains `自愈`; a substring map applied in the wrong order
+        // would call every install repair a heartbeat one.
+        assertTrue(A11yPlan.annotate("安装后自愈(3000ms): x").contains("[装包]"))
+    }
+
+    @Test
+    fun aLineFromNoKnownTriggerIsPassedThrough() {
+        assertEquals("11-25 04:20:35 别的东西", A11yPlan.annotate("11-25 04:20:35 别的东西"))
+    }
+
+    @Test
+    fun anAbsentLineSaysSoInsteadOfLookingHealthy() {
+        assertEquals(A11yPlan.NO_RECORD, A11yPlan.annotate(null))
+        assertEquals(A11yPlan.NO_RECORD, A11yPlan.annotate(""))
+    }
+
 
     @Test
     fun withNothingLoggedTheReportSaysSoInsteadOfLookingHealthy() {

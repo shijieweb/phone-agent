@@ -108,4 +108,22 @@ class BootPlanTest {
             steps
         )
     }
+
+    @Test
+    fun theSiblingPackageReplacedBroadcastAlsoRebuilds() {
+        // MY_PACKAGE_REPLACED and PACKAGE_REPLACED are delivered inconsistently
+        // across ROMs; either one must lead to a rebuild.
+        assertTrue(
+            BootPlan.steps(BootPlan.ACTION_PACKAGE_REPLACED, false, false, true)
+                .contains(BootPlan.Step.RebuildAccessibility)
+        )
+    }
+
+    @Test
+    fun aPlainBootNeverRebuilds() {
+        assertTrue(
+            BootPlan.steps("android.intent.action.BOOT_COMPLETED", false, true, true)
+                .none { it is BootPlan.Step.RebuildAccessibility }
+        )
+    }
 }

@@ -19,6 +19,16 @@ internal object BootPlan {
     /** As a plain string, so this file needs no Intent. */
     const val ACTION_MY_PACKAGE_REPLACED = "android.intent.action.MY_PACKAGE_REPLACED"
 
+    /**
+     * The sibling broadcast. `MY_PACKAGE_REPLACED` is the polite one — sent only
+     * to the replaced package — while `PACKAGE_REPLACED` is broadcast for every
+     * package and needs a `data` scheme filter. ROMs are inconsistent about
+     * which of the two they deliver, so both are declared. Flyme delivered
+     * neither for v0.4.3 (see [A11yStartup], which does not depend on a
+     * broadcast at all).
+     */
+    const val ACTION_PACKAGE_REPLACED = "android.intent.action.PACKAGE_REPLACED"
+
     sealed class Step {
         /** Re-apply the "keep the panel on" timeout the ROM just rewrote. */
         object RestoreStayOn : Step()
@@ -44,7 +54,9 @@ internal object BootPlan {
         // Only after a replacement, never after a plain boot: on boot Android
         // restores the entry itself, and writing it then would silently override
         // an operator who turned accessibility off on purpose.
-        if (action == ACTION_MY_PACKAGE_REPLACED) steps.add(Step.RebuildAccessibility)
+        if (action == ACTION_MY_PACKAGE_REPLACED || action == ACTION_PACKAGE_REPLACED) {
+            steps.add(Step.RebuildAccessibility)
+        }
         steps.add(Step.DiscoverAdbPort)
         if (StartPolicy.shouldAutoStart(autoStart, configured)) steps.add(Step.StartService)
         return steps

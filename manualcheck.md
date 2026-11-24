@@ -147,9 +147,11 @@ and compare against the expectation below.
 | `logs 50` | exit 0, up to 50 logcat lines. Without `READ_LOGS`: exit 6 naming `READ_LOGS` |
 | `a11y status` on a healthy phone | exit 0, three fact lines `无障碍总开关: 开` / `无障碍条目: 已列出` / `服务实例: 已连接`, a `最近自愈:` line, and `结论: 正常` |
 | `a11y status` with accessibility switched off in 设置 | `无障碍总开关: 关`, `结论: 总开关被关闭，执行 a11y heal` — the answer must name the switch, not the entry |
-| `a11y status` right after installing over an old build, before the rebuild fires | `无障碍条目: 已列出` + `服务实例: 未连接` + `结论: 条目在但服务未绑定…`. Within ~30 s the same command must flip to `已连接` without any manual step (this is the reinstall repair) |
+| `a11y status` right after installing over an old build, before the rebuild fires | `无障碍条目: 已列出` + `服务实例: 未连接` + `结论: 条目在但服务未绑定…` |
+| **install a new build, then within 60 s run `a11y status`** | `服务实例: 已连接` + `结论: 正常`, with `最近自愈: <time> [启动] 已强制重连…`. This is the v0.4.4 acceptance test: on Flyme the broadcast never arrives, so a `[启动]` label is the proof that the process-start trigger did the work. A `[装包]` label means that ROM delivered the broadcast instead — also fine. Seeing `(本次进程内无记录)` after 60 s is a **failure** |
 | `a11y status` on a phone where auto-start is switched **off** | the rebuild still happens: `最近自愈:` shows a timestamped `安装后自愈(…ms)` line within ~30 s of the upgrade. This is the v0.4.3 fix — v0.4.2 returned from the boot receiver before scheduling it |
 | `a11y status` before any rebuild in this process | `最近自愈: (本次进程内无记录)` — never a blank value, which would read as "fine" |
+| `a11y status` on a phone whose binding is healthy | `最近自愈:` carries a `[启动]` line (the start check always logs, even when it repairs nothing) — silence would make "check never ran" indistinguishable from "nothing to do" |
 | `a11y heal` with the entry missing | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
 | `a11y heal` with the entry listed but `服务实例: 未连接` | exit 0 and the binding comes back; it must **not** answer `无障碍条目已存在` and stop (the v0.4.2 dead end) |
 | `a11y rescue` | exit 0, stdout `已强制重连无障碍服务（保留原有 N 条）`; `a11y status` immediately after shows `服务实例: 已连接` within ~4 s. Other accessibility services are still listed |

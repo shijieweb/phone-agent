@@ -277,6 +277,16 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
+            <!-- The sibling of MY_PACKAGE_REPLACED: some ROMs send this one and
+                 not that one. It fires for every package on the phone, so the
+                 data scheme is required and BootReceiver compares the package
+                 name before doing anything. Neither broadcast is trusted alone:
+                 Flyme delivered neither for v0.4.3, which is why the rebuild is
+                 also run on process start (see A11yStartup). -->
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_REPLACED" />
+                <data android:scheme="package" />
+            </intent-filter>
         </receiver>
 
     </application>

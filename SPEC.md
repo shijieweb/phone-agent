@@ -701,11 +701,30 @@ a11y status | a11y heal | a11y rescue
   component is never duplicated.
 - **After every reinstall the entry must be rebuilt.** Installing a new APK keeps
   the secure setting but drops the binding, and Android rewrites the setting a few
-  seconds later. `BootReceiver` therefore schedules `A11yHeal` on
-  `ACTION_MY_PACKAGE_REPLACED` — retried at 3 s / 10 s / 30 s on its own thread,
-  stopping as soon as the binding is live — and **only** on a replacement, never
-  on a plain boot: Android restores the entry itself on boot, and writing it then
-  would silently override an operator who turned accessibility off on purpose.
+  seconds later. There are **three triggers**, and only the first is guaranteed:
+
+  | Trigger | Fires | Cost when healthy | Why it is here |
+  |---|---|---|---|
+  | **Process start** — `A11yHeal.checkNow` from `RcAgentService.onCreate` and `MainActivity.onCreate` | every time our process comes up | two setting reads + one log line | The process *always* starts; a broadcast may never arrive. This is the one that actually repairs the Meizu. |
+  | **Package replaced** — `BootReceiver` on `MY_PACKAGE_REPLACED` **and** `PACKAGE_REPLACED` (with the `package` data scheme, matched against our own package name) | only on ROMs that deliver them | one log line | Cheap, and correct where it works. Retried at 3 s / 10 s / 30 s because Android rewrites the setting a few seconds *after* the broadcast. |
+  | **Heartbeat** — `selfHealAccessibility` | every 5 min | nothing (throttled, reads two settings) | Last resort. It is what quietly saved v0.4.3 after ~15 s, which is how we learned the broadcast never came. |
+
+  All three share one rule (`A11yStartup.plan` → heal / rescue / nothing / skip)
+  and one single-repair lock, so a service start and an Activity start cannot run
+  two interleaved `delete → 2 s → write` sequences over the same setting. The
+  rebuild is **only** on a replacement, never on a plain boot: Android restores
+  the entry itself on boot, and writing it then would silently override an
+  operator who turned accessibility off on purpose.
+- **Flyme does not deliver `MY_PACKAGE_REPLACED`.** Measured on the Meizu
+  (Flyme AIOS 12.7 / Android 16): `adb logcat -c`, install v0.4.3 through the
+  system installer, wait 50 s → the only `[a11y]` lines were the *heartbeat's*
+  (`自愈: 已强制重连无障碍服务（保留原有 0 条）`), and grepping `换包|BootReceiver|MY_PACKAGE`
+  across `PhoneAgent:I` and `ActivityManager:I` returned nothing at all, while
+  `dumpsys package` showed the receiver enabled with the filter intact. The
+  broadcast is simply never sent to us. Do **not** try to fix this through the
+  ROM's autostart whitelist: that is a system setting we cannot change and should
+  not change. The fix is the first row of the table above — hang the check on our
+  own process start, because the process always starts and a broadcast may not.
 - Both the rebuild and the heartbeat self-heal first check
   `Admin.canWriteSecure`; without `WRITE_SECURE_SETTINGS` they log the skip and
   return instead of retrying a refusal every 15 s.
@@ -955,9 +974,14 @@ Buttons must not crash when the service was never started.
   accessibility heal checks `Admin.canWriteSecure` first and skips with one log
   line when the grant is missing, so a phone without it does not accumulate a
   refusal every 15 s (§3.15).
-- **A reinstall rebuilds the accessibility binding.** `ACTION_MY_PACKAGE_REPLACED`
-  → `A11yHeal.schedule(ctx)`, retried at 3 s / 10 s / 30 s until the service is
-  bound. This is deliberately not part of the boot path (§3.15).
+- **A reinstall rebuilds the accessibility binding**, through three independent
+  triggers so that no single missing signal leaves the phone unable to answer
+  `tree`: `onCreate` runs `A11yHeal.checkNow` (guaranteed — the process must
+  exist for anything to work), `BootReceiver` schedules `A11yHeal` on both
+  `MY_PACKAGE_REPLACED` and `PACKAGE_REPLACED` (retried at 3 s / 10 s / 30 s),
+  and the heartbeat covers the rest at a 5 min cadence. Flyme delivers neither
+  broadcast — see §3.15 for the measurement. None of this is part of the boot
+  path: on a plain boot Android restores the entry itself.
 - `stop` command → send the result, then `stopSelf()`.
 - Read config from `Prefs` **once at start**; if the URL or secret is blank,
   stop immediately and surface `未配置 relay 地址或口令` in the UI status.
@@ -1058,6 +1082,14 @@ framework** — do not mock `AccessibilityService`. Required cases:
      string, that the master switch goes 0 -> 1 around the write, that the 2 s
      sleep is actually requested, that other services keep their order, and
      that `repairAction` sends a listed-but-unbound service to the rescue).
+ 13. The v0.4.4 process-start trigger: `A11yStartup.plan` over all four states
+     (healthy → nothing, entry missing → heal, listed-but-unbound → rescue, no
+     `WRITE_SECURE_SETTINGS` → skip) including the case where a live binding
+     outranks the missing grant; `BootPlan` returning `RebuildAccessibility` for
+     **both** package-replaced actions and for neither on a plain boot; and
+     `A11yPlan.annotate` labelling each trigger `[装包]`/`[启动]`/`[心跳]` — with
+     the install spelling tested before the generic one, since `安装后自愈`
+     contains `自愈` and a wrong order would call every install repair a heartbeat.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -1070,8 +1102,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (358 cases at
-  v0.4.3-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (370 cases at
+  v0.4.4-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

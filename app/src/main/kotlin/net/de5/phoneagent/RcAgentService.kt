@@ -38,6 +38,20 @@ class RcAgentService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Check the accessibility binding the moment the process exists.
+     *
+     * This is the trigger that replaced the package-replacement broadcast: Flyme
+     * never delivered `MY_PACKAGE_REPLACED` to [BootReceiver] (v0.4.3 left zero
+     * `[boot]` lines on a clean reinstall), so the only reliable "the app has
+     * just started, look at the phone" signal is the start itself. Runs on its
+     * own thread — `onCreate` must not block, and the rescue path sleeps ~2 s.
+     */
+    override fun onCreate() {
+        super.onCreate()
+        A11yHeal.checkNow(this)
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Re-entry is decided by "does this instance already own workers", not by
         // the shared flag: an instance that is already running must not start a

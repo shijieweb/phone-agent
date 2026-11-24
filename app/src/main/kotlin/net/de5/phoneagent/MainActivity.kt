@@ -91,6 +91,12 @@ class MainActivity : Activity() {
 
         scroll.addView(root)
         setContentView(scroll)
+
+        // Same check the service runs on start: opening the settings screen after
+        // an update is a normal way to notice "everything looks on but tree
+        // fails", and the repair is cheap. Asynchronous, so the UI never waits on
+        // the ~2 s rescue sequence.
+        A11yHeal.checkNow(this)
     }
 
     override fun onResume() {

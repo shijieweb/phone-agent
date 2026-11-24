@@ -171,19 +171,27 @@ grammar, the node-tree format, and the screenshot blob/base64 paths.
 > **An upgrade rebuilds the accessibility binding by itself.** Installing over the
 > old APK keeps the secure setting but drops the binding, which looks exactly like
 > "accessibility is on" while every `tree`/`click` answers *accessibility service
-> not connected*. Since v0.4.2 the app re-appends itself at 3 s / 10 s / 30 s after
-> `ACTION_MY_PACKAGE_REPLACED` and stops as soon as it is bound. It needs
-> `WRITE_SECURE_SETTINGS` for that; without it the log says the rebuild was
+> not connected*. The app repairs this from **three independent triggers**, because
+> no single one is reliable:
+>
+> - **process start** — the guaranteed one. Every time the agent's process comes
+>   up it checks the binding and re-binds if needed. The process always starts;
+>   a broadcast may never arrive (Flyme never sent `MY_PACKAGE_REPLACED` at all).
+> - **package replaced** — `MY_PACKAGE_REPLACED` and its sibling
+>   `PACKAGE_REPLACED`, retried at 3 s / 10 s / 30 s. Works on most ROMs.
+> - **heartbeat** — every 5 min, as a last resort.
+>
+> All of it needs `WRITE_SECURE_SETTINGS`; without it the log says the rebuild was
 > skipped. `a11y status` tells you which of the three facts is wrong, and quotes
-> the newest rebuild from the log (`最近自愈:`, or `(本次进程内无记录)` when it never
-> ran):
+> the newest repair from the log with the trigger that produced it — `[装包]`,
+> `[启动]` or `[心跳]` — or `(本次进程内无记录)` when nothing has run yet:
 >
 > ```
 > a11y status
 > 无障碍总开关: 开
 > 无障碍条目: 已列出
 > 服务实例: 未连接
-> 最近自愈: (本次进程内无记录)
+> 最近自愈: 11-25 04:20:35 [启动] 已强制重连无障碍服务（保留原有 0 条）
 > 结论: 条目在但服务未绑定，执行 a11y rescue 强制重绑
 > ```
 >

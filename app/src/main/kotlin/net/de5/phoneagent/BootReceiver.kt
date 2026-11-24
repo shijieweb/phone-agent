@@ -19,16 +19,31 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context?, intent: Intent?) {
         val ctx = context ?: return
         val action = intent?.action ?: return
-        if (action != Intent.ACTION_BOOT_COMPLETED &&
-            action != Intent.ACTION_MY_PACKAGE_REPLACED &&
+        val packageReplaced = when (action) {
+            Intent.ACTION_MY_PACKAGE_REPLACED -> true
+            // The sibling broadcast fires for *every* package on the phone, so it
+            // is only ours when the data URI names us. Flyme sends neither this
+            // nor MY_PACKAGE_REPLACED; the process-start check (A11yStartup) is
+            // what actually covers that ROM.
+            BootPlan.ACTION_PACKAGE_REPLACED ->
+                intent.data?.schemeSpecificPart == ctx.packageName
+            else -> false
+        }
+        if (!packageReplaced &&
+            action != Intent.ACTION_BOOT_COMPLETED &&
             action != ACTION_QUICKBOOT_POWERON
         ) {
             return
         }
+        if (packageReplaced && action == BootPlan.ACTION_PACKAGE_REPLACED) {
+            // Normalise: BootPlan only needs to know "this is a replacement".
+            // Reported separately so a log reader can tell which broadcast arrived.
+            AgentLog.add("boot", "收到 PACKAGE_REPLACED（data=" + intent.data + "）")
+        }
 
         val prefs = Prefs(ctx)
         val steps = BootPlan.steps(
-            action,
+            if (packageReplaced) BootPlan.ACTION_MY_PACKAGE_REPLACED else action,
             prefs.stayOn,
             prefs.autoStart,
             prefs.isConfigured()
