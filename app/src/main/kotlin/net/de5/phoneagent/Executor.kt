@@ -192,6 +192,9 @@ class CommandExecutor(
             is Command.A11yHeal ->
                 a11yHeal()
 
+            is Command.A11yStatus ->
+                a11yStatus()
+
             is Command.Lock ->
                 lockNow()
 
@@ -221,6 +224,15 @@ class CommandExecutor(
 
             is Command.FilesMkdir ->
                 filesMkdir(command)
+
+            is Command.FilesFind ->
+                filesFind(command)
+
+            is Command.FilesDf ->
+                filesDf()
+
+            is Command.FilesPull ->
+                filesPull(command)
 
             is Command.NotifList ->
                 notifList(command)
@@ -269,6 +281,9 @@ class CommandExecutor(
 
             is Command.CallState ->
                 callState()
+
+            is Command.CallSpeaker ->
+                callSpeaker(command)
 
             is Command.Stop ->
                 stopAgent()
@@ -635,6 +650,17 @@ class CommandExecutor(
     private fun a11yHeal(): ExecutionResult =
         adminResult(Admin.enableAccessibilitySelfHeal(context))
 
+    /** `a11y status` — read-only, so it always answers with exit 0. */
+    private fun a11yStatus(): ExecutionResult = ExecutionResult(
+        EXIT_OK,
+        A11yPlan.report(
+            Admin.accessibilityEnabled(context),
+            Admin.isAccessibilityListed(context),
+            PhoneAccessibilityService.instance != null
+        ),
+        ""
+    )
+
     private fun lockNow(): ExecutionResult = adminResult(Admin.lockNow(context))
 
     private fun reboot(): ExecutionResult = adminResult(Admin.rebootNow(context))
@@ -747,6 +773,51 @@ class CommandExecutor(
             ExecutionResult(result.exit, result.stdout, result.stderr)
         }
 
+    private fun filesFind(command: Command.FilesFind): ExecutionResult =
+        FileOps.find(command.path, command.keyword, command.limit).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    private fun filesDf(): ExecutionResult =
+        FileOps.df().let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    /**
+     * `files pull PATH` — the only way bytes leave the phone.
+     *
+     * The blob name is generated before the upload so the answer can name what
+     * landed even when the relay rejects it; a missing uploader is its own
+     * sentence, because "no relay configured" is not a file problem.
+     */
+    private fun filesPull(command: Command.FilesPull): ExecutionResult {
+        val uploader = blobs
+            ?: return ExecutionResult(
+                EXIT_PERMISSION,
+                "",
+                "relay 客户端未就绪（files pull 依赖 blob 通道）"
+            )
+        val payload = FileOps.pullPayload(
+            command.path,
+            System.currentTimeMillis(),
+            ShotBlob.randomSuffix()
+        )
+        if (payload.exit != EXIT_OK) {
+            return ExecutionResult(payload.exit, "", payload.message)
+        }
+        val bytes = payload.bytes ?: return ExecutionResult(
+            EXIT_PERMISSION,
+            "",
+            "读取失败: " + payload.path
+        )
+        val upload = uploader.upload(payload.name, bytes)
+        if (!upload.ok) {
+            return ExecutionResult(EXIT_PERMISSION, "", PullPlan.failure(upload.error ?: "unknown error"))
+        }
+        AgentLog.add("files", "已上传 " + payload.path + " -> " + payload.name)
+        return ExecutionResult(EXIT_OK, PullPlan.json(payload.name, upload.bytes, payload.path), "")
+    }
+
     /**
      * `notif` — the listener is the grant, so "not connected" is reported with
      * the exact adb line rather than a permission error: an operator who has not
@@ -847,6 +918,9 @@ class CommandExecutor(
     private fun callHangup(): ExecutionResult = fromOps(CallOps.hangUp(context))
 
     private fun callState(): ExecutionResult = ExecutionResult(EXIT_OK, CallOps.state(context), "")
+
+    private fun callSpeaker(command: Command.CallSpeaker): ExecutionResult =
+        fromOps(CallOps.speaker(context, command.on))
 
     private fun stopAgent(): ExecutionResult {
         onStopRequested()

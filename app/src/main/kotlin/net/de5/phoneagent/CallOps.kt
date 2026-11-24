@@ -84,6 +84,61 @@ internal object CallOps {
     }
 
     /**
+     * Read or set the speakerphone.
+     *
+     * Two halves, and both are needed: `setSpeakerphoneOn` alone is ignored
+     * while the audio mode is MODE_NORMAL, so setting it also forces
+     * MODE_IN_COMMUNICATION — that is the mode a call UI would be in. Turning it
+     * off restores MODE_NORMAL, otherwise the route stays hijacked after the
+     * call ends and the next app gets no audio.
+     *
+     * [on] null is the report form: nothing is changed.
+     */
+    fun speaker(context: Context, on: Boolean?): String {
+        val audio = try {
+            context.getSystemService(AudioManager::class.java)
+        } catch (t: Throwable) {
+            null
+        } ?: return Admin.ERROR_PREFIX + "本机没有 AudioManager"
+        val offHook = isOffHook(audio)
+        if (on == null) {
+            val current = try {
+                audio.isSpeakerphoneOn
+            } catch (t: Throwable) {
+                return Admin.ERROR_PREFIX + "读取免提状态失败: " + describe(t)
+            }
+            return CallPlan.speaker(current, offHook)
+        }
+        return try {
+            if (on) {
+                audio.mode = AudioManager.MODE_IN_COMMUNICATION
+                audio.isSpeakerphoneOn = true
+            } else {
+                audio.isSpeakerphoneOn = false
+                audio.mode = AudioManager.MODE_NORMAL
+            }
+            AgentLog.add("call", if (on) "已开启免提" else "已关闭免提")
+            CallPlan.speakerSet(on, offHook)
+        } catch (t: SecurityException) {
+            Admin.ERROR_PREFIX + CallPlan.speakerDenied()
+        } catch (t: Throwable) {
+            Admin.ERROR_PREFIX + "切换免提失败: " + describe(t)
+        }
+    }
+
+    /** True when the audio route says a call is up; no permission needed. */
+    fun isOffHook(audio: AudioManager): Boolean {
+        val mode = try {
+            audio.mode
+        } catch (t: Throwable) {
+            AudioManager.MODE_NORMAL
+        }
+        return mode == AudioManager.MODE_IN_CALL ||
+            mode == AudioManager.MODE_IN_COMMUNICATION ||
+            mode == AudioManager.MODE_RINGTONE
+    }
+
+    /**
      * Off-hook is readable without any permission (the audio mode changes), but
      * "ringing" lives behind READ_PHONE_STATE, so it degrades to false rather
      * than failing the whole command.

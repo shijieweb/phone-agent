@@ -159,6 +159,7 @@ reach the `unknown command` branch.
 | `logs [lines]` | logcat tail, default 120, cap 500 |
 | `admin status` | authority report: Device Owner, admin, each development permission, installer app-op, accessibility |
 | `admin release` | drop Device Owner and remove ourselves as device admin |
+| `a11y status` | read-only: master switch, list entry, live binding — and the one repair that fits (see §3.15) |
 | `a11y heal` | re-append our accessibility service to `enabled_accessibility_services` |
 | `lock` | lock the screen (needs an active device admin) |
 | `reboot` | reboot — always exit 6: needs the signature-level `REBOOT` permission, which a sideloaded app cannot hold (see §3.5) |
@@ -170,6 +171,9 @@ reach the `unknown command` branch.
 | `files info PATH` | type, size and modification time of one entry (see §3.7) |
 | `files mkdir PATH` | create a directory and its parents (see §3.7) |
 | `files rm [apply] PATH` | **dry run** by default: names the path, its size and the `apply` line; `apply` deletes (see §3.7) |
+| `files find PATH KEYWORD [n]` | case-insensitive name search under `PATH`, default 50 hits, cap 200 (see §3.7) |
+| `files df` | total / used / free and the used percentage of `/sdcard` (see §3.7) |
+| `files pull PATH` | upload one file out through the blob channel, 16 MiB cap (see §3.7) |
 | `notif [list] [n] [q=TEXT]` | the active notifications, default 30, cap 200, optional case-insensitive filter (see §3.8) |
 | `say [-l zh\|en] [rate=PCT] [pitch=PCT] TEXT` | speak `TEXT` once through the system TTS engine; `zh` default (see §3.9) |
 | `screen stayon [on\|off]` | keep the panel awake across reboots; with no argument it only reports (see §3.14) |
@@ -446,6 +450,7 @@ Internal storage → Movies → tap it. No permission step, no USB cable.
 ```
 files ls [PATH] [n]      files cat PATH      files info PATH
 files mkdir PATH         files rm [apply] PATH
+files find PATH KEYWORD [n]      files df      files pull PATH
 ```
 
 - **The only tree any verb may touch is `/sdcard`** (`/storage/emulated/0` and
@@ -470,6 +475,30 @@ files mkdir PATH         files rm [apply] PATH
   A missing `MANAGE_EXTERNAL_STORAGE` app-op surfaces as `exit=6` naming the
   `appops set` line, never as "file not found".
 - `mkdir` succeeds when the directory already exists.
+- `find` walks `PATH` (default `/sdcard`) depth-first and keeps entries whose
+  **name** contains `KEYWORD`, case-insensitively. A trailing pure integer is the
+  hit cap, so the last non-numeric token is the keyword and everything before it
+  is the path — which is why `files find /sdcard/My Documents doc 5` works.
+  `/sdcard/Android/data` and `/sdcard/Android/obb` are never entered (the
+  platform denies them to a non-system app, so walking them only burns time), and
+  a symbolic link is reported as itself rather than followed — `/sdcard` contains
+  links back into itself and following one would loop until the scan cap.
+  The scan stops at 60 000 entries and says so
+  (`（已达到扫描上限，结果可能不完整）`); the answer is otherwise complete for the
+  tree it did walk. An empty keyword matches nothing rather than everything:
+  "list every file on the card" is `files ls`, not a search.
+- `df` reads `StatFs` on `/sdcard` and answers one line:
+  `总 116.4 GB 已用 88.1 GB 可用 28.3 GB (76%)`. Percent is rounded and clamped
+  to 0..100; an unreadable volume answers 0% instead of a division by zero.
+- `pull` is the only verb that moves bytes **out** of the phone: it reads the file
+  (refusing a directory, an empty file, and anything over `ShotBlob.MAX_BYTES`),
+  uploads it through the same relay blob channel screenshots use, and answers one
+  JSON line `{"name":"file-<millis>-<suffix>.<ext>","bytes":N,"path":"…"}`. The
+  extension is preserved (lower-cased, `a-z0-9` only, max 8 chars) so the server
+  side can name the download; a name that would violate the relay's
+  `^[A-Za-z0-9_.-]{1,80}$` rule loses its extension rather than failing. Without
+  a relay client the answer is `exit=6` and says the blob channel is missing —
+  not "file not found".
 
 ### 3.8 `notif`: the active notifications
 
@@ -591,7 +620,14 @@ call [apply] NUMBER | call answer | call hangup | call state | call speaker on|o
 - `state` reports `空闲 / 响铃中 / 通话中`. Ringing needs `READ_PHONE_STATE`;
   without it only the audio mode is available and the line says so.
 - `speaker on|off` sets `AudioManager` speakerphone (needs
-  `MODIFY_AUDIO_SETTINGS`).
+  `MODIFY_AUDIO_SETTINGS`). `on` switches the audio mode to
+  `MODE_IN_COMMUNICATION` **before** raising the speaker flag, because the flag is
+  ignored while the mode is still `MODE_NORMAL`; `off` clears the flag first and
+  then returns the mode to `MODE_NORMAL`, so the earpiece is not left routed to a
+  mode nothing is driving. `call speaker` with no argument is the report form:
+  `免提: 开|关（通话中|当前无通话）`, and it never changes anything. An unknown
+  value (`call speaker maybe`) is `exit=2` rather than a guess — silently picking
+  `on` would put a call on the loudspeaker in a meeting.
 - **What this can never do:** carry the call audio itself. Call audio travels
   through the modem and the audio HAL; a sideloaded app cannot read it —
   `CAPTURE_AUDIO_OUTPUT` is signature-level. `call` controls the *call*, it
@@ -624,6 +660,39 @@ screen stayon [on|off] | screen timeout MS | screen on | screen off
 - The same switch is a checkbox in the app (`屏幕常亮`), which calls the same
   code and then re-reads the stored flag, so a refused write leaves the box
   unchecked rather than lying.
+
+### 3.15 `a11y`: the three facts that fail independently
+
+```
+a11y status | a11y heal
+```
+
+- Accessibility breaks in three separate places, and each has its own repair:
+  the **master switch** (`Settings.Secure.ACCESSIBILITY_ENABLED`), our **entry**
+  in `enabled_accessibility_services`, and the **live binding**
+  (`PhoneAccessibilityService.instance`). A phone can be listed and switched on
+  and still bind nothing, which is exactly the state a fresh install leaves
+  behind — every `tree`/`click` then answers "accessibility service not
+  connected" while every setting looks correct.
+- `status` is read-only and always `exit=0`; it prints the three facts and one
+  `结论:` line that names the repair for the state it found:
+  `正常` / `条目缺失，执行 a11y heal 或 <adb line>` /
+  `总开关被关闭，执行 a11y heal` /
+  `条目在但服务未绑定，执行 a11y heal 强制重连`. A missing entry outranks a dead
+  binding, because "toggle the component" cannot work when there is no component
+  to toggle.
+- `heal` is the existing repair path (kept verbatim for v0.3.0 scripts): it
+  re-appends our component to the list and keeps every other entry.
+- **After every reinstall the entry must be rebuilt.** Installing a new APK keeps
+  the secure setting but drops the binding, and Android rewrites the setting a few
+  seconds later. `BootReceiver` therefore schedules `A11yHeal` on
+  `ACTION_MY_PACKAGE_REPLACED` — retried at 3 s / 10 s / 30 s on its own thread,
+  stopping as soon as the binding is live — and **only** on a replacement, never
+  on a plain boot: Android restores the entry itself on boot, and writing it then
+  would silently override an operator who turned accessibility off on purpose.
+- Both the rebuild and the heartbeat self-heal first check
+  `Admin.canWriteSecure`; without `WRITE_SECURE_SETTINGS` they log the skip and
+  return instead of retrying a refusal every 15 s.
 
 ### 3.1 Element selectors (`SEL`)
 
@@ -866,7 +935,13 @@ Buttons must not crash when the service was never started.
   throttled and both best-effort: accessibility (`selfHealAccessibility`, 5 min
   cadence) and the wireless-debugging port (`observeAdbPort`, 10 min cadence,
   read-only, only when the cache is 30 min stale — §3.4). Neither may block the
-  heartbeat or throw into it; both log to `AgentLog` and return.
+  heartbeat or throw into it; both log to `AgentLog` and return. The
+  accessibility heal checks `Admin.canWriteSecure` first and skips with one log
+  line when the grant is missing, so a phone without it does not accumulate a
+  refusal every 15 s (§3.15).
+- **A reinstall rebuilds the accessibility binding.** `ACTION_MY_PACKAGE_REPLACED`
+  → `A11yHeal.schedule(ctx)`, retried at 3 s / 10 s / 30 s until the service is
+  bound. This is deliberately not part of the boot path (§3.15).
 - `stop` command → send the result, then `stopSelf()`.
 - Read config from `Prefs` **once at start**; if the URL or secret is blank,
   stop immediately and surface `未配置 relay 地址或口令` in the UI status.
@@ -947,6 +1022,17 @@ framework** — do not mock `AccessibilityService`. Required cases:
    that merely contains one, `screen` all four sub-commands and their refusals,
    `sms`/`call` dry-run defaults, and `rec` (removed in v0.4.0) landing on
    `unknown command` rather than some other verb.
+11. The v0.4.2 additions, same split: `FindPlan` (case-insensitive name match, an
+    empty keyword matching nothing, the limit clamp, the two skipped trees across
+    all three root spellings, stable path ordering, the truncated and scan-capped
+    sentences), `DfPlan` (rounding, the 0% guard on an unreadable volume, no
+    negative sizes), `PullPlan` (extension extraction and its refusals, suffix
+    sanitising, every generated name passing `ShotBlob.isValidName`, the 16 MiB
+    sentence, JSON escaping), `A11yPlan` (all four verdicts and the precedence of
+    a missing entry), and the grammar: `files find` with and without a trailing
+    count, a path containing spaces, `files df` refusing arguments, `files pull`
+    verbatim, `call speaker` report/on/off/synonyms and its refusal of anything
+    else, `a11y status` vs `a11y heal`.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -959,8 +1045,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (287 cases at
-  v0.4.0-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (334 cases at
+  v0.4.2-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

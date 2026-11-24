@@ -343,10 +343,23 @@ class RcAgentService : Service() {
         val live = PhoneAccessibilityService.instance != null
         val listed = Admin.isAccessibilityListed(this)
         if (live && listed) return
-        val outcome = if (!listed) {
+        // A dead binding with no grant cannot be repaired from inside the app, and
+        // retrying every heartbeat would only fill the log with the same refusal.
+        if (!Admin.canWriteSecure(this)) {
+            AgentLog.add("a11y", "跳过自愈: 缺 WRITE_SECURE_SETTINGS（instance=" + live + " listed=" + listed + "）")
+            return
+        }
+        var outcome = if (!listed) {
             Admin.enableAccessibilitySelfHeal(this)
         } else {
             Admin.forceReconnectAccessibility(this)
+        }
+        // Toggling the component can still lose the race against a dying process
+        // (the entry comes back but nothing binds), so the append path is the
+        // second opinion — it is also the only one that works when the list was
+        // rewritten by the system between the two reads above.
+        if (outcome.startsWith(Admin.ERROR_PREFIX) && !listed) {
+            outcome = Admin.enableAccessibilitySelfHeal(this)
         }
         AgentLog.add("a11y", "自愈: " + outcome)
         if (!outcome.startsWith(Admin.ERROR_PREFIX)) note = "已执行无障碍自愈: " + outcome

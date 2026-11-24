@@ -42,6 +42,19 @@ class BootReceiver : BroadcastReceiver() {
             // Background start restrictions: there is nothing to retry here.
         }
 
+        // Installing a new APK drops our accessibility entry: the setting survives
+        // but the binding does not, and every tree/click then answers
+        // "accessibility service not connected". Android rewrites the secure
+        // setting a few seconds after this broadcast, so the rebuild is retried at
+        // 3 s / 10 s / 30 s on its own thread (SPEC.md section 7).
+        //
+        // Only after a replacement, never after a plain boot: on boot Android
+        // restores the entry itself, and writing it then would silently override an
+        // operator who turned accessibility off on purpose.
+        if (action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+            A11yHeal.schedule(ctx)
+        }
+
         // The wireless-debugging port is new after every boot and nothing stores
         // it, so rediscover it in the background (SPEC.md section 3.4). This
         // returns immediately; the discovery itself runs ~20 s later, once Wi-Fi

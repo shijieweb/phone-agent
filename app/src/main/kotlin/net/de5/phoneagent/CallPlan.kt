@@ -10,7 +10,8 @@ package net.de5.phoneagent
 internal object CallPlan {
 
     const val USAGE =
-        "usage: call [apply] NUMBER | call answer | call hangup | call state"
+        "usage: call [apply] NUMBER | call answer | call hangup | call state | " +
+            "call speaker [on|off]"
 
     /** Android's dialer intent caps the number far below this. */
     const val NUMBER_MAX = 40
@@ -53,6 +54,20 @@ internal object CallPlan {
             offHook -> "通话中"
             else -> "空闲"
         }
+
+    /** `call speaker` report form: the current route plus the call state. */
+    fun speaker(on: Boolean, offHook: Boolean): String =
+        "免提: " + (if (on) "开" else "关") + "（" + stateOf(offHook) + "）"
+
+    fun speakerSet(on: Boolean, offHook: Boolean): String =
+        "已" + (if (on) "开启" else "关闭") + "免提（" + stateOf(offHook) + "）"
+
+    fun speakerDenied(): String =
+        "切换免提要 MODIFY_AUDIO_SETTINGS（未授予：adb shell pm grant " +
+            "net.de5.phoneagent android.permission.MODIFY_AUDIO_SETTINGS）"
+
+    /** The call state alone, for the parentheses above. */
+    fun stateOf(offHook: Boolean): String = if (offHook) "通话中" else "当前无通话"
 
     fun failure(reason: String): String = "拨号失败: " + reason
 

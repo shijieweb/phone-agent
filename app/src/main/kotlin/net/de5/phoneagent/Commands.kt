@@ -102,6 +102,15 @@ sealed class Command {
     object AdminRelease : Command()
     /** `a11y heal` — rewrite ENABLED_ACCESSIBILITY_SERVICES to include us. */
     object A11yHeal : Command()
+
+    /**
+     * `a11y status` — read-only: master switch, our entry, live binding.
+     *
+     * `status` already carries one `acc` boolean, which cannot tell "the entry
+     * was removed" from "the process died"; this names all three facts and the
+     * one repair that fits.
+     */
+    object A11yStatus : Command()
     /** `lock` — lock the screen now. */
     object Lock : Command()
     /** `reboot` — reboot the device (Device Owner only). */
@@ -153,6 +162,26 @@ sealed class Command {
 
     /** `files mkdir PATH` — create a directory (and its parents). */
     data class FilesMkdir(val path: String) : Command()
+
+    /**
+     * `files find PATH KEYWORD [n]` — recursive name search (SPEC.md §3.7).
+     *
+     * [keyword] is a plain substring, matched case-insensitively: the operator
+     * types `mp4`, not a regex, and a regex over a phone's whole storage is a
+     * way to make the agent hang.
+     */
+    data class FilesFind(val path: String, val keyword: String, val limit: Int) : Command()
+
+    /** `files df` — total / used / free on the shared volume. */
+    object FilesDf : Command()
+
+    /**
+     * `files pull PATH` — upload one file to the relay as a blob.
+     *
+     * This is the only way a file leaves the phone: the relay carries the bytes
+     * and the answer is one JSON line naming what landed.
+     */
+    data class FilesPull(val path: String) : Command()
 
     /** `notif [list] [n] [q=TEXT]` — the active notifications (SPEC.md section 3.8). */
     data class NotifList(val limit: Int, val query: String?) : Command()
@@ -218,6 +247,15 @@ sealed class Command {
 
     /** `call state` — idle / ringing / off-hook. */
     object CallState : Command()
+
+    /**
+     * `call speaker [on|off]` — read or set the speakerphone (SPEC.md §3.13).
+     *
+     * [on] is null for the report form. Allowed outside a call too, because an
+     * operator usually wants the route ready *before* the call connects; the
+     * answer then says which state the phone is in.
+     */
+    data class CallSpeaker(val on: Boolean?) : Command()
 
     // ------------------------------------- controller built-in protocol (#rc:)
 
@@ -293,7 +331,8 @@ object Commands {
     /** Shared shapes of the new verb usage errors, so the text never drifts. */
     private val FILES_USAGE = Command.BadUsage(
         "usage: files ls [PATH] [n] | files cat PATH | files info PATH | " +
-            "files rm [apply] PATH | files mkdir PATH"
+            "files rm [apply] PATH | files mkdir PATH | files find PATH KEYWORD [n] | " +
+            "files df | files pull PATH"
     )
     private val NOTIF_USAGE = Command.BadUsage("usage: notif [list] [n] [q=TEXT]")
     private val SAY_USAGE = Command.BadUsage(SayPlan.USAGE)
@@ -504,10 +543,15 @@ object Commands {
             }
 
             "a11y" -> {
-                if (splitArgs(rest).firstOrNull()?.lowercase() == "heal") {
-                    Command.A11yHeal
+                val parts = splitArgs(rest)
+                if (parts.size != 1) {
+                    Command.BadUsage(A11yPlan.USAGE)
                 } else {
-                    Command.BadUsage("usage: a11y heal")
+                    when (parts[0].lowercase()) {
+                        "status" -> Command.A11yStatus
+                        "heal" -> Command.A11yHeal
+                        else -> Command.BadUsage(A11yPlan.USAGE)
+                    }
                 }
             }
 
@@ -810,6 +854,37 @@ object Commands {
                 Command.FilesRemove(target, apply)
             }
 
+            // The count comes off the *end*, the keyword is the token before it,
+            // and everything left is the path — the only split that survives a
+            // directory with a space in its name ("My Documents").
+            "find" -> {
+                val inner = tokenSpans(body)
+                var limit = FindPlan.LIMIT_DEFAULT
+                var end = inner.size
+                if (end >= 3) {
+                    val parsed = inner[end - 1].text.toIntOrNull()
+                    if (parsed != null) {
+                        limit = FindPlan.clampLimit(parsed)
+                        end -= 1
+                    }
+                }
+                if (end < 2) return FILES_USAGE
+                val keyword = inner[end - 1].text
+                val path = body.substring(0, inner[end - 1].start).trim()
+                if (path.isEmpty() || keyword.isEmpty()) return FILES_USAGE
+                Command.FilesFind(path, keyword, limit)
+            }
+
+            "df" -> {
+                if (body.isNotBlank()) return FILES_USAGE
+                Command.FilesDf
+            }
+
+            "pull" -> {
+                if (body.isBlank()) return FILES_USAGE
+                Command.FilesPull(body)
+            }
+
             else -> FILES_USAGE
         }
     }
@@ -999,6 +1074,15 @@ object Commands {
             "answer" -> return if (tokens.size > 1) CALL_USAGE else Command.CallAnswer
             "hangup" -> return if (tokens.size > 1) CALL_USAGE else Command.CallHangup
             "state" -> return if (tokens.size > 1) CALL_USAGE else Command.CallState
+            "speaker" -> {
+                if (tokens.size == 1) return Command.CallSpeaker(null)
+                if (tokens.size > 2) return CALL_USAGE
+                return when (tokens[1].text.lowercase()) {
+                    "on", "1", "true" -> Command.CallSpeaker(true)
+                    "off", "0", "false" -> Command.CallSpeaker(false)
+                    else -> CALL_USAGE
+                }
+            }
         }
         var index = 0
         var apply = false

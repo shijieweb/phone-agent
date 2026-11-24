@@ -573,6 +573,24 @@ internal object Admin {
         }
     }
 
+    /**
+     * True when the accessibility master switch is on.
+     *
+     * Separate from [isAccessibilityListed] because the two fail independently:
+     * a listed entry with the switch off is a phone where nothing is bound, and
+     * the repair ("turn the switch back on") is different from the repair for a
+     * missing entry ("append ourselves back to the list").
+     */
+    fun accessibilityEnabled(ctx: Context): Boolean = try {
+        Settings.Secure.getInt(
+            ctx.contentResolver,
+            Settings.Secure.ACCESSIBILITY_ENABLED,
+            0
+        ) == 1
+    } catch (t: Throwable) {
+        false
+    }
+
     /** True when our accessibility service is listed in secure settings. */
     fun isAccessibilityListed(ctx: Context): Boolean = try {
         val current = Settings.Secure.getString(

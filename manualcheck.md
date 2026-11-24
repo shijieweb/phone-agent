@@ -145,6 +145,9 @@ and compare against the expectation below.
 | `settings get secure enabled_accessibility_services` | exit 0, stdout `<key> = <value>`; the value must list this app's service |
 | `settings put global airplane_mode_on 0` | exit 0, stdout `已设置 global airplane_mode_on = 0`. Without `WRITE_SECURE_SETTINGS`: exit 6 with the exact `pm grant` line |
 | `logs 50` | exit 0, up to 50 logcat lines. Without `READ_LOGS`: exit 6 naming `READ_LOGS` |
+| `a11y status` on a healthy phone | exit 0, three lines `无障碍总开关: 开` / `无障碍条目: 已列出` / `服务实例: 已连接` and `结论: 正常` |
+| `a11y status` with accessibility switched off in 设置 | `无障碍总开关: 关`, `结论: 总开关被关闭，执行 a11y heal` — the answer must name the switch, not the entry |
+| `a11y status` right after installing over an old build, before the rebuild fires | `无障碍条目: 已列出` + `服务实例: 未连接` + `结论: 条目在但服务未绑定…`. Within ~30 s the same command must flip to `已连接` without any manual step (this is the v0.4.2 reinstall repair) |
 | `a11y heal` | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
 | `install <url>` | exit 0, stdout `已拉起安装确认页（需确认安装）: …`; the system installer appears. Ctrl path: `confirm 安装` (dry run — check the node) then `confirm apply 安装` |
 | `confirm 安装` | exit 0, stdout `dry-run: would confirm "安装" via=… pkg=com.android.packageinstaller node=… at=…` — the installer is **not** pressed (it takes one look, no polling) |
@@ -171,6 +174,14 @@ and compare against the expectation below.
 | `files rm /sdcard/tmp-check` | exit 0, dry run: names the absolute path and the `files rm apply …` line. **The directory must still exist** |
 | `files rm apply /sdcard/tmp-check` | exit 0, the directory is gone |
 | `files rm apply /sdcard` | exit 2 — a root is refused unconditionally |
+| `files find /sdcard mp4` | exit 0, first line `查找 /sdcard 关键字=mp4 命中 N 项`, then `d\|-` rows ending in the full path. Spot-check one hit in 文件管理 — it must exist |
+| `files find /sdcard DCIM jpg 5` | at most 5 rows; with more hits the answer ends `… 还有 N 项未列出` |
+| `files find /sdcard zzzznomatch` | exit 0, `查找 /sdcard 关键字=zzzznomatch 命中 0 项` — an empty answer, not an error |
+| `files find /sdcard/Android mp4` | `data`/`obb` are never entered: no row's path starts with `/sdcard/Android/data` or `/sdcard/Android/obb` |
+| `files find ../etc passwd` | exit 2, `路径不可用: /etc（只允许 /sdcard 内的路径）` |
+| `files df` | exit 0, one line `总 X 已用 Y 可用 Z (P%)`; compare with 设置 → 存储 — total and free must be within a few hundred MB |
+| `files pull /sdcard/DCIM/<a photo>.jpg` | exit 0, one JSON line `{"name":"file-<millis>-<suffix>.jpg","bytes":N,"path":"…"}`; fetch `/ctl/blob/<name>` and the byte count and the picture must match the phone's file |
+| `files pull /sdcard/DCIM` | exit 2 with the reason (a directory cannot be pulled) — never a JSON line |
 | `notif` with notification access granted | exit 0, `通知 N 条`, then `- pkg \| title \| text` lines; a music player shows a leading `*` (ongoing) |
 | `notif 3` | at most 3 lines plus `（只显示前 3 条）` |
 | `notif q=<a word from a visible notification>` | only matching lines; an unmatched word answers `没有匹配的通知` |
@@ -203,7 +214,9 @@ and compare against the expectation below.
 | `call answer` while ringing | exit 0, `已接听`; the call connects. Without `ANSWER_PHONE_CALLS`: exit 6 naming the `pm grant` line |
 | `call hangup` during a call | exit 0, `已挂断`; the call ends |
 | `call state` | `通话状态: 空闲` / `响铃中` / `通话中` matching the phone |
-| `call speaker on` during a call | audio moves to the loudspeaker; `call speaker off` moves it back |
+| `call speaker` with no argument | exit 0, `免提: 开\|关（通话中\|当前无通话）` — read-only, the route must not change |
+| `call speaker on` during a call | audio moves to the loudspeaker; `call speaker off` moves it back. Without `MODIFY_AUDIO_SETTINGS`: exit 6 naming the `pm grant` line |
+| `call speaker maybe` | exit 2 with the usage line — it must not pick a route for you |
 | `admin status` after the v0.4.0 grants | the `扩展权限:` block lists each permission with `已授予/未授予` plus 所有文件访问 / 悬浮窗 / 勿扰权限 / 通知使用权, each carrying the adb line when it is off |
 
 ### Family scenario: a film on the tablet (the reason `dl` exists)

@@ -1,5 +1,6 @@
 package net.de5.phoneagent
 
+import android.os.StatFs
 import java.io.File
 
 /**
@@ -12,7 +13,32 @@ import java.io.File
  */
 internal object FileOps {
 
+    /**
+     * How many directory entries one `files find` may visit.
+     *
+     * A cap on *entries visited*, not on matches: a search that returns nothing
+     * still has to finish, and an uncapped walk over a full card is how the
+     * relay poll starts timing out.
+     */
+    const val SCAN_MAX_FILES = 60_000
+
     class Result(val exit: Int, val stdout: String, val stderr: String)
+
+    /**
+     * A file staged for upload: either [bytes] plus the blob name it will take,
+     * or a finished refusal in [message].
+     *
+     * Reading and uploading are separated because the upload needs the relay
+     * client, which only the executor has — and because a file that is too large
+     * must be refused *before* 16 MB is pulled into memory.
+     */
+    class Payload(
+        val exit: Int,
+        val bytes: ByteArray?,
+        val path: String,
+        val name: String,
+        val message: String
+    )
 
     private fun ok(text: String) = Result(EXIT_OK, text, "")
 
@@ -161,6 +187,124 @@ internal object FileOps {
         if (!made) return fail(EXIT_PERMISSION, "创建失败: " + file.absolutePath)
         AgentLog.add("files", "已创建目录 " + file.absolutePath)
         return ok("已创建目录: " + file.absolutePath)
+    }
+
+    /**
+     * Recursive name search under one directory.
+     *
+     * Three deliberate stops: the walk never enters `Android/data` or
+     * `Android/obb` ([FindPlan.skipped], they are unreadable to us and would
+     * look like "not there"), never follows a symlink (a loop would hang the
+     * agent), and stops after [SCAN_MAX_FILES] entries so one `files find /sdcard
+     * mp4` cannot walk a 200 GB card for minutes on a phone that is also
+     * answering a relay poll.
+     */
+    fun find(input: String, keyword: String, limit: Int): Result {
+        val root = resolve(input) ?: return refused(input)
+        if (!root.exists()) return fail(EXIT_NOT_FOUND, "目录不存在: " + root.absolutePath)
+        if (!root.isDirectory) return fail(EXIT_NOT_FOUND, "不是目录: " + root.absolutePath)
+        val hits = ArrayList<FindPlan.Hit>()
+        var scanned = 0
+        var capped = false
+        val stack = ArrayDeque<File>()
+        stack.addLast(root)
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            val children = try {
+                current.listFiles()
+            } catch (t: Throwable) {
+                null
+            } ?: continue
+            for (child in children) {
+                if (scanned >= SCAN_MAX_FILES) {
+                    capped = true
+                    break
+                }
+                scanned++
+                if (FindPlan.skipped(child.absolutePath)) continue
+                val isDir = child.isDirectory
+                if (FindPlan.matches(child.name, keyword)) {
+                    hits.add(
+                        FindPlan.Hit(
+                            child.absolutePath,
+                            isDir,
+                            if (isDir) 0L else child.length()
+                        )
+                    )
+                }
+                if (isDir && !isSymlink(child)) stack.addLast(child)
+            }
+            if (capped) break
+        }
+        return ok(FindPlan.report(root.absolutePath, keyword, hits, limit, capped))
+    }
+
+    /**
+     * `files df` — the shared volume's capacity.
+     *
+     * StatFs on the root itself (not on `/data`) because the operator is asking
+     * about the storage they can see in a file manager.
+     */
+    fun df(): Result {
+        val root = File(FileGuard.ROOT)
+        return try {
+            val stat = StatFs(root.absolutePath)
+            val total = stat.blockCountLong * stat.blockSizeLong
+            val free = stat.availableBlocksLong * stat.blockSizeLong
+            val used = (total - free).coerceAtLeast(0L)
+            ok(DfPlan.report(total, used, free))
+        } catch (t: Throwable) {
+            fail(EXIT_PERMISSION, DfPlan.failure(describe(t)))
+        }
+    }
+
+    /**
+     * Stage one file for `files pull`.
+     *
+     * Everything that can refuse is refused here, in the order an operator can
+     * act on: wrong path, missing, a directory, too large — then the bytes.
+     */
+    fun pullPayload(input: String, millis: Long, suffix: String): Payload {
+        val file = resolve(input) ?: return Payload(
+            EXIT_USAGE, null, input, "",
+            "路径不可用: " + input + "（只允许 /sdcard 内的路径）"
+        )
+        if (!file.exists()) {
+            return Payload(EXIT_NOT_FOUND, null, file.absolutePath, "", "文件不存在: " + file.absolutePath)
+        }
+        if (file.isDirectory) {
+            return Payload(
+                EXIT_USAGE, null, file.absolutePath, "",
+                "这是目录，无法上传: " + file.absolutePath + "（先打包，或改用 files find 定位单个文件）"
+            )
+        }
+        val size = file.length()
+        if (size > ShotBlob.MAX_BYTES) {
+            return Payload(EXIT_USAGE, null, file.absolutePath, "", PullPlan.tooLarge(size))
+        }
+        if (size <= 0L) {
+            return Payload(EXIT_USAGE, null, file.absolutePath, "", "文件是空的: " + file.absolutePath)
+        }
+        val bytes = try {
+            file.readBytes()
+        } catch (t: Throwable) {
+            return Payload(EXIT_PERMISSION, null, file.absolutePath, "", "读取失败: " + describe(t))
+        }
+        val name = PullPlan.name(millis, suffix, PullPlan.extensionOf(file.absolutePath))
+        return Payload(EXIT_OK, bytes, file.absolutePath, name, "")
+    }
+
+    /**
+     * True for a symbolic link.
+     *
+     * The walk must not follow one: `/sdcard` is full of links back into itself
+     * (`/sdcard/sdcard`, app-specific aliases), and a cycle would make
+     * `files find` run until the scan cap on every single call.
+     */
+    private fun isSymlink(file: File): Boolean = try {
+        java.nio.file.Files.isSymbolicLink(file.toPath())
+    } catch (t: Throwable) {
+        false
     }
 
     /** Recursive size, for the dry-run sentence; a walk failure just stops counting. */
