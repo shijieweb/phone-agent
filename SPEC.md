@@ -159,8 +159,9 @@ reach the `unknown command` branch.
 | `logs [lines]` | logcat tail, default 120, cap 500 |
 | `admin status` | authority report: Device Owner, admin, each development permission, installer app-op, accessibility |
 | `admin release` | drop Device Owner and remove ourselves as device admin |
-| `a11y status` | read-only: master switch, list entry, live binding — and the one repair that fits (see §3.15) |
-| `a11y heal` | re-append our accessibility service to `enabled_accessibility_services` |
+| `a11y status` | read-only: master switch, list entry, live binding, last rebuild — and the one repair that fits (see §3.15) |
+| `a11y heal` | inspect, then repair: append a missing entry, or rescue a listed-but-unbound one |
+| `a11y rescue` | force the full re-bind: switch off → delete the list → 2 s → write back → switch on |
 | `lock` | lock the screen (needs an active device admin) |
 | `reboot` | reboot — always exit 6: needs the signature-level `REBOOT` permission, which a sideloaded app cannot hold (see §3.5) |
 | `adbinfo` | read-only wireless-debugging report: `adb_wifi_enabled`, wlan IP, mDNS port, `connect` string, 200 ms TCP probe (see §3.4) |
@@ -664,7 +665,7 @@ screen stayon [on|off] | screen timeout MS | screen on | screen off
 ### 3.15 `a11y`: the three facts that fail independently
 
 ```
-a11y status | a11y heal
+a11y status | a11y heal | a11y rescue
 ```
 
 - Accessibility breaks in three separate places, and each has its own repair:
@@ -674,15 +675,30 @@ a11y status | a11y heal
   and still bind nothing, which is exactly the state a fresh install leaves
   behind — every `tree`/`click` then answers "accessibility service not
   connected" while every setting looks correct.
-- `status` is read-only and always `exit=0`; it prints the three facts and one
-  `结论:` line that names the repair for the state it found:
-  `正常` / `条目缺失，执行 a11y heal 或 <adb line>` /
+- `status` is read-only and always `exit=0`; it prints the three facts, one
+  `最近自愈:` line and one `结论:` line that names the repair for the state it
+  found: `正常` / `条目缺失，执行 a11y heal 或 <adb line>` /
   `总开关被关闭，执行 a11y heal` /
-  `条目在但服务未绑定，执行 a11y heal 强制重连`. A missing entry outranks a dead
+  `条目在但服务未绑定，执行 a11y rescue 强制重绑`. A missing entry outranks a dead
   binding, because "toggle the component" cannot work when there is no component
   to toggle.
-- `heal` is the existing repair path (kept verbatim for v0.3.0 scripts): it
-  re-appends our component to the list and keeps every other entry.
+- `最近自愈:` quotes the newest `[a11y]` line from the in-app log (timestamp
+  included) so the rebuild is auditable from the phone alone. When nothing has
+  been logged in this process it prints `(本次进程内无记录)` rather than an empty
+  value — the v0.4.2 bug was invisible precisely because "never ran" rendered as
+  nothing at all.
+- `heal` inspects first and then runs the repair that fits: a **missing entry**
+  is appended (every other entry kept), a **listed entry with a dead binding** is
+  sent to the rescue path. `heal` therefore never answers "无障碍条目已存在" and
+  stops — that answer was the v0.4.2 dead end.
+- `rescue` always does the full re-bind, for the case where the operator has
+  already read `status` and decided. The sequence is the only one that works on
+  Flyme/Android 16: `accessibility_enabled = 0` → **delete**
+  `enabled_accessibility_services` → wait 2 s → write the list back → `= 1`.
+  Writing an empty string instead of deleting is refused by the system
+  (`Bad arguments`), which is why v0.4.2's reconnect silently did nothing. Other
+  accessibility services are preserved in their original order, and our own
+  component is never duplicated.
 - **After every reinstall the entry must be rebuilt.** Installing a new APK keeps
   the secure setting but drops the binding, and Android rewrites the setting a few
   seconds later. `BootReceiver` therefore schedules `A11yHeal` on
@@ -1032,7 +1048,16 @@ framework** — do not mock `AccessibilityService`. Required cases:
     a missing entry), and the grammar: `files find` with and without a trailing
     count, a path containing spaces, `files df` refusing arguments, `files pull`
     verbatim, `call speaker` report/on/off/synonyms and its refusal of anything
-    else, `a11y status` vs `a11y heal`.
+    else, `a11y status` vs `a11y heal` vs `a11y rescue`.
+ 12. The v0.4.3 repairs, both of which failed silently before: `BootPlan` (the
+     step list keeps `RebuildAccessibility` when `autoStart=false` — the v0.4.2
+     rebuild never ran because the auto-start gate returned early — while
+     `StartService` alone stays gated; a plain boot never rebuilds; `stayOn`
+     restores the timeout; the full order) and `A11yOps` (a fake `SecureSink`
+     proves the list is **deleted** rather than overwritten with an empty
+     string, that the master switch goes 0 -> 1 around the write, that the 2 s
+     sleep is actually requested, that other services keep their order, and
+     that `repairAction` sends a listed-but-unbound service to the rescue).
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -1045,8 +1070,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (334 cases at
-  v0.4.2-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (358 cases at
+  v0.4.3-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

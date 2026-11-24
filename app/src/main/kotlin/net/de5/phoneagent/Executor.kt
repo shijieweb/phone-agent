@@ -192,6 +192,9 @@ class CommandExecutor(
             is Command.A11yHeal ->
                 a11yHeal()
 
+            is Command.A11yRescue ->
+                a11yRescue()
+
             is Command.A11yStatus ->
                 a11yStatus()
 
@@ -647,8 +650,37 @@ class CommandExecutor(
 
     private fun adminRelease(): ExecutionResult = adminResult(Admin.releaseOwner(context))
 
-    private fun a11yHeal(): ExecutionResult =
-        adminResult(Admin.enableAccessibilitySelfHeal(context))
+    /**
+     * `a11y heal` — inspect, then run the repair that fits.
+     *
+     * v0.4.2 called [Admin.enableAccessibilitySelfHeal] unconditionally, which
+     * only appends a missing entry; on a phone whose entry is present and whose
+     * binding is dead it answered "无障碍条目已存在" and changed nothing. That is
+     * the failure this command was written for, so the state is read first and a
+     * dead binding goes to the rescue path.
+     */
+    private fun a11yHeal(): ExecutionResult {
+        val live = PhoneAccessibilityService.instance != null
+        val listed = Admin.isAccessibilityListed(context)
+        val text = offMain(A11Y_TIMEOUT_MS) {
+            Admin.repairAccessibility(context, listed, live)
+        } ?: return ExecutionResult(EXIT_TIMEOUT, "", "无障碍修复超时（" + A11Y_TIMEOUT_MS + "ms）")
+        return adminResult(text)
+    }
+
+    /**
+     * `a11y rescue` — always the toggle.
+     *
+     * Runs off the poll thread: the sequence deliberately sleeps ~2 s between
+     * releasing and re-adding the component (see [A11yOps.RESCUE_SLEEP_MS]), and
+     * blocking the poll loop would delay the result POST for every other command.
+     */
+    private fun a11yRescue(): ExecutionResult {
+        val text = offMain(A11Y_TIMEOUT_MS) {
+            Admin.forceReconnectAccessibility(context)
+        } ?: return ExecutionResult(EXIT_TIMEOUT, "", "强制重绑超时（" + A11Y_TIMEOUT_MS + "ms）")
+        return adminResult(text)
+    }
 
     /** `a11y status` — read-only, so it always answers with exit 0. */
     private fun a11yStatus(): ExecutionResult = ExecutionResult(
@@ -656,7 +688,8 @@ class CommandExecutor(
         A11yPlan.report(
             Admin.accessibilityEnabled(context),
             Admin.isAccessibilityListed(context),
-            PhoneAccessibilityService.instance != null
+            PhoneAccessibilityService.instance != null,
+            AgentLog.lastLine("a11y")
         ),
         ""
     )
@@ -1005,8 +1038,48 @@ class CommandExecutor(
         return holder.get()
     }
 
+    /**
+     * Run [block] on a worker thread and wait for it.
+     *
+     * For repairs that must sleep (the accessibility rescue waits ~2 s for the
+     * framework to release the binding): doing that inline would stall the poll
+     * loop, so the result POST for every other queued command would be late too.
+     *
+     * @return the block's result, or null when it timed out or threw.
+     */
+    private fun <T> offMain(timeoutMs: Long, block: () -> T): T? {
+        val latch = CountDownLatch(1)
+        val holder = AtomicReference<T?>(null)
+        val thread = Thread {
+            holder.set(
+                try {
+                    block()
+                } catch (t: Throwable) {
+                    null
+                }
+            )
+            latch.countDown()
+        }
+        thread.isDaemon = true
+        thread.name = "rc-repair"
+        try {
+            thread.start()
+        } catch (t: Throwable) {
+            return null
+        }
+        try {
+            if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) return null
+        } catch (t: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return null
+        }
+        return holder.get()
+    }
+
     companion object {
         private const val TREE_TIMEOUT_MS = 15_000L
+        /** The accessibility rescue sleeps ~2 s on purpose; leave room for it. */
+        private const val A11Y_TIMEOUT_MS = 15_000L
         private const val TEXT_TIMEOUT_MS = 10_000L
         /** Element actions walk the tree and may dispatch a gesture. */
         private const val ELEMENT_TIMEOUT_MS = 15_000L

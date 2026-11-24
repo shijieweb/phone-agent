@@ -100,8 +100,23 @@ sealed class Command {
     object AdminStatus : Command()
     /** `admin release` — drop Device Owner and remove ourselves as admin. */
     object AdminRelease : Command()
-    /** `a11y heal` — rewrite ENABLED_ACCESSIBILITY_SERVICES to include us. */
+    /**
+     * `a11y heal` — run whichever repair the current state needs.
+     *
+     * It used to mean only "append a missing entry", which answers "条目已存在"
+     * and changes nothing on the state that actually breaks a phone after an
+     * update (listed, switch on, binding dead).
+     */
     object A11yHeal : Command()
+
+    /**
+     * `a11y rescue` — release and re-add the binding unconditionally.
+     *
+     * The difference from [A11yHeal] is intent, not implementation: `heal`
+     * inspects first and picks, `rescue` always runs the toggle, because the
+     * operator has already read `a11y status` and decided.
+     */
+    object A11yRescue : Command()
 
     /**
      * `a11y status` — read-only: master switch, our entry, live binding.
@@ -550,6 +565,7 @@ object Commands {
                     when (parts[0].lowercase()) {
                         "status" -> Command.A11yStatus
                         "heal" -> Command.A11yHeal
+                        "rescue" -> Command.A11yRescue
                         else -> Command.BadUsage(A11yPlan.USAGE)
                     }
                 }

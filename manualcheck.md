@@ -145,10 +145,15 @@ and compare against the expectation below.
 | `settings get secure enabled_accessibility_services` | exit 0, stdout `<key> = <value>`; the value must list this app's service |
 | `settings put global airplane_mode_on 0` | exit 0, stdout `已设置 global airplane_mode_on = 0`. Without `WRITE_SECURE_SETTINGS`: exit 6 with the exact `pm grant` line |
 | `logs 50` | exit 0, up to 50 logcat lines. Without `READ_LOGS`: exit 6 naming `READ_LOGS` |
-| `a11y status` on a healthy phone | exit 0, three lines `无障碍总开关: 开` / `无障碍条目: 已列出` / `服务实例: 已连接` and `结论: 正常` |
+| `a11y status` on a healthy phone | exit 0, three fact lines `无障碍总开关: 开` / `无障碍条目: 已列出` / `服务实例: 已连接`, a `最近自愈:` line, and `结论: 正常` |
 | `a11y status` with accessibility switched off in 设置 | `无障碍总开关: 关`, `结论: 总开关被关闭，执行 a11y heal` — the answer must name the switch, not the entry |
-| `a11y status` right after installing over an old build, before the rebuild fires | `无障碍条目: 已列出` + `服务实例: 未连接` + `结论: 条目在但服务未绑定…`. Within ~30 s the same command must flip to `已连接` without any manual step (this is the v0.4.2 reinstall repair) |
-| `a11y heal` | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
+| `a11y status` right after installing over an old build, before the rebuild fires | `无障碍条目: 已列出` + `服务实例: 未连接` + `结论: 条目在但服务未绑定…`. Within ~30 s the same command must flip to `已连接` without any manual step (this is the reinstall repair) |
+| `a11y status` on a phone where auto-start is switched **off** | the rebuild still happens: `最近自愈:` shows a timestamped `安装后自愈(…ms)` line within ~30 s of the upgrade. This is the v0.4.3 fix — v0.4.2 returned from the boot receiver before scheduling it |
+| `a11y status` before any rebuild in this process | `最近自愈: (本次进程内无记录)` — never a blank value, which would read as "fine" |
+| `a11y heal` with the entry missing | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
+| `a11y heal` with the entry listed but `服务实例: 未连接` | exit 0 and the binding comes back; it must **not** answer `无障碍条目已存在` and stop (the v0.4.2 dead end) |
+| `a11y rescue` | exit 0, stdout `已强制重连无障碍服务（保留原有 N 条）`; `a11y status` immediately after shows `服务实例: 已连接` within ~4 s. Other accessibility services are still listed |
+| `settings get secure enabled_accessibility_services` right after `a11y rescue` | exit 0, our component is present exactly once and no entry was lost |
 | `install <url>` | exit 0, stdout `已拉起安装确认页（需确认安装）: …`; the system installer appears. Ctrl path: `confirm 安装` (dry run — check the node) then `confirm apply 安装` |
 | `confirm 安装` | exit 0, stdout `dry-run: would confirm "安装" via=… pkg=com.android.packageinstaller node=… at=…` — the installer is **not** pressed (it takes one look, no polling) |
 | `confirm apply t=30 安装` | exit 0, stdout `confirmed "安装" via=action\|ancestor\|gesture pkg=com.android.packageinstaller node=… at=… attempts=…`; the install proceeds |

@@ -36,9 +36,12 @@ class A11yPlanTest {
     }
 
     @Test
-    fun aListedEntryWithNoBindingAsksForAReconnect() {
+    fun aListedEntryWithNoBindingAsksForARescue() {
+        // `a11y heal` cannot fix this state — it appends a missing entry and this
+        // entry is present. Sending the operator there wasted a real debugging
+        // round on the Meizu, so the verdict names `rescue`.
         assertEquals(
-            "条目在但服务未绑定，执行 a11y heal 强制重连",
+            "条目在但服务未绑定，执行 a11y rescue 强制重绑",
             A11yPlan.verdict(true, true, false)
         )
     }
@@ -57,6 +60,27 @@ class A11yPlanTest {
         val text = A11yPlan.report(false, false, false)
         assertTrue(text, text.contains("无障碍总开关: 关"))
         assertTrue(text, text.contains("无障碍条目: 缺失"))
+    }
+
+    @Test
+    fun theReportSaysWhenTheLastRebuildRan() {
+        val text = A11yPlan.report(true, true, false, "04-03 12:01:07 安装后自愈(3000ms): 已补写")
+        assertTrue(text, text.contains("最近自愈: 04-03 12:01:07 安装后自愈(3000ms)"))
+    }
+
+    @Test
+    fun withNothingLoggedTheReportSaysSoInsteadOfLookingHealthy() {
+        // The v0.4.2 bug was invisible precisely because "no record" rendered as
+        // nothing at all; an empty line would read as "fine".
+        for (last in listOf(null, "")) {
+            val text = A11yPlan.report(true, true, false, last)
+            assertTrue(text, text.contains("最近自愈: (本次进程内无记录)"))
+        }
+    }
+
+    @Test
+    fun theUsageLineListsTheThirdVerb() {
+        assertEquals("usage: a11y status|heal|rescue", A11yPlan.USAGE)
     }
 
     @Test

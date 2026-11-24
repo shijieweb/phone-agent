@@ -58,6 +58,24 @@ internal object AgentLog {
         return sb.toString()
     }
 
+    /**
+     * The newest line written under [tag], without the `[tag]` marker, or null.
+     *
+     * `a11y status` prints this so an operator can tell whether the post-install
+     * rebuild actually ran without going through logcat.
+     */
+    @Synchronized
+    fun lastLine(tag: String): String? {
+        val marker = "[" + tag + "] "
+        val iterator = lines.descendingIterator()
+        while (iterator.hasNext()) {
+            val line = iterator.next()
+            val at = line.indexOf(marker)
+            if (at >= 0) return line.substring(0, at) + line.substring(at + marker.length)
+        }
+        return null
+    }
+
     @Synchronized
     fun size(): Int = lines.size
 

@@ -526,50 +526,78 @@ internal object Admin {
     }
 
     /**
-     * Force the accessibility service to reconnect.
+     * Force the accessibility service to reconnect (the `a11y rescue` sequence).
      *
      * An entry that is already in the list can still be dead: Android drops the
-     * binding after a crash loop while leaving the setting in place, and nothing
-     * short of toggling the component re-creates it. Toggling the list entry and
-     * the master switch is what walking the settings UI would do.
+     * binding after a crash loop or an update while leaving the setting in place,
+     * and nothing short of releasing and re-adding the component re-creates it.
+     *
+     * **Blocking for ~2 s** (see [A11yOps.RESCUE_SLEEP_MS]), so the caller must
+     * not be the poll thread or the main thread. The sequence itself lives in
+     * [A11yOps] so it can be unit-tested without a device.
      */
     fun forceReconnectAccessibility(ctx: Context): String {
         if (!canWriteSecure(ctx)) {
-            return error("自愈需要 WRITE_SECURE_SETTINGS（未授予）")
+            return error(
+                "强制重绑需要 WRITE_SECURE_SETTINGS（未授予：先执行 adb shell pm grant " +
+                    ctx.packageName + " android.permission.WRITE_SECURE_SETTINGS）"
+            )
         }
         return try {
-            val resolver = ctx.contentResolver
-            val current = Settings.Secure.getString(
-                resolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            ) ?: ""
-            val entries = current.split(':')
-                .filter { it.isNotBlank() }
-                .filterNot { it.equals(A11Y_COMPONENT, ignoreCase = true) }
-            val without = entries.joinToString(":")
-            Settings.Secure.putString(
-                resolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-                without
-            )
-            Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0)
-            val back = if (entries.isEmpty()) {
-                A11Y_COMPONENT
-            } else {
-                entries.joinToString(":") + ":" + A11Y_COMPONENT
-            }
-            Settings.Secure.putString(
-                resolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-                back
-            )
-            Settings.Secure.putInt(resolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
-            AgentLog.add("a11y", "已强制重连无障碍服务")
-            "已强制重连无障碍服务（保留原有 " + entries.size + " 条）"
+            val outcome = A11yOps.reconnect(secureSink(ctx), { ms -> Thread.sleep(ms) })
+            AgentLog.add("a11y", outcome)
+            outcome
         } catch (t: SecurityException) {
             error("写无障碍设置被拒绝（无 WRITE_SECURE_SETTINGS）")
+        } catch (t: InterruptedException) {
+            Thread.currentThread().interrupt()
+            error("强制重连被中断")
         } catch (t: Throwable) {
             error("强制重连失败: " + describe(t))
+        }
+    }
+
+    /**
+     * Run the repair that fits the state actually observed.
+     *
+     * This is what `a11y heal` should always have been: appending a missing entry
+     * and reviving a dead binding are different operations, and v0.4.2 answered
+     * "条目已存在" for the second one without touching anything — which is why
+     * `a11y heal` could not rescue the phone it was written for.
+     */
+    fun repairAccessibility(ctx: Context, listed: Boolean, live: Boolean): String =
+        when (A11yOps.repairAction(listed, live)) {
+            A11yOps.ACTION_HEAL -> enableAccessibilitySelfHeal(ctx)
+            A11yOps.ACTION_RESCUE -> forceReconnectAccessibility(ctx)
+            else -> "无障碍已连接，无需修复"
+        }
+
+    /** The four `Settings.Secure` operations [A11yOps] needs, over a resolver. */
+    private fun secureSink(ctx: Context): SecureSink {
+        val resolver = ctx.contentResolver
+        return object : SecureSink {
+            override fun getString(key: String): String? =
+                Settings.Secure.getString(resolver, key)
+
+            override fun putString(key: String, value: String) {
+                Settings.Secure.putString(resolver, key, value)
+            }
+
+            override fun putInt(key: String, value: Int) {
+                Settings.Secure.putInt(resolver, key, value)
+            }
+
+            override fun getInt(key: String, def: Int): Int =
+                Settings.Secure.getInt(resolver, key, def)
+
+            /**
+             * A real delete. Writing an empty string instead is rejected by the
+             * framework ("Bad arguments") and leaves the old binding alive, so the
+             * "clear" half of a reconnect would be a no-op.
+             */
+            override fun delete(key: String) {
+                resolver.delete(Settings.Secure.getUriFor(key), null, null)
+            }
         }
     }
 

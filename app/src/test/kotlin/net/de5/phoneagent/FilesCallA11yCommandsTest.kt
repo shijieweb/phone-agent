@@ -119,6 +119,14 @@ class FilesCallA11yCommandsTest {
     }
 
     @Test
+    fun a11yRescueParses() {
+        assertEquals(Command.A11yRescue, Commands.parse("a11y rescue"))
+        assertEquals(Command.A11yRescue, Commands.parse("a11y RESCUE"))
+        assertEquals(Command.A11yHeal, Commands.parse("a11y heal"))
+        assertTrue(Commands.parse("a11y rescue now") is Command.BadUsage)
+    }
+
+    @Test
     fun a11yRefusesAnythingElse() {
         assertTrue(Commands.parse("a11y") is Command.BadUsage)
         assertTrue(Commands.parse("a11y on") is Command.BadUsage)

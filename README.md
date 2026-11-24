@@ -22,7 +22,7 @@ nothing needs to be exposed on the phone's network.
 | Location | `loc`, `locloop <seconds>`, `locstop` |
 | Elements | `click [apply] SEL`, `longclick [apply] SEL`, `scroll`, `ime enter`, `confirm [apply] [t=N] <text>` — **dry run by default**: they report the node they *would* press; add `apply` to really press it |
 | Apps | `install <url>` (opens the system installer), `uninstall <pkg>` |
-| Privileged | `settings`, `logs`, `a11y status\|heal`, `admin status\|release`, `lock` (works), `reboot` (always exit 6 — see below) |
+| Privileged | `settings`, `logs`, `a11y status\|heal\|rescue`, `admin status\|release`, `lock` (works), `reboot` (always exit 6 — see below) |
 | Wireless ADB | `adbinfo` (IP + mDNS port + `adb connect` string), `adbheal [t=N]` (bounce wireless debugging off/on, then rediscover — this drops a live adb session). The port is also rediscovered on its own ~20 s after boot, and when the cache is 30 min stale, so `adb connect` keeps working without a command |
 | Files | `dl <url> [name]` — download into `/sdcard/Movies` and media-scan it so VLC lists it (cap 2 GB, `t=` timeout) |
 | Storage | `files ls [path] [n]`, `files cat`, `files info`, `files mkdir`, `files rm [apply]`, `files find path keyword [n]`, `files df`, `files pull path` — **`/sdcard` only**, never outside it; `rm` is a dry run until `apply`; `pull` is the only verb that moves bytes out (16 MiB blob cap) |
@@ -174,15 +174,24 @@ grammar, the node-tree format, and the screenshot blob/base64 paths.
 > not connected*. Since v0.4.2 the app re-appends itself at 3 s / 10 s / 30 s after
 > `ACTION_MY_PACKAGE_REPLACED` and stops as soon as it is bound. It needs
 > `WRITE_SECURE_SETTINGS` for that; without it the log says the rebuild was
-> skipped. `a11y status` tells you which of the three facts is wrong:
+> skipped. `a11y status` tells you which of the three facts is wrong, and quotes
+> the newest rebuild from the log (`最近自愈:`, or `(本次进程内无记录)` when it never
+> ran):
 >
 > ```
 > a11y status
 > 无障碍总开关: 开
 > 无障碍条目: 已列出
 > 服务实例: 未连接
-> 结论: 条目在但服务未绑定，执行 a11y heal 强制重连
+> 最近自愈: (本次进程内无记录)
+> 结论: 条目在但服务未绑定，执行 a11y rescue 强制重绑
 > ```
+>
+> `a11y heal` inspects and then repairs (append a missing entry, or rescue a
+> listed-but-unbound one); `a11y rescue` always does the full re-bind —
+> switch off, **delete** the list, wait 2 s, write it back, switch on. Deleting
+> matters: writing an empty string is refused by the system (`Bad arguments`), so
+> the v0.4.2 reconnect did nothing.
 
 On Flyme (Meizu) also allow **自启动**, set the battery profile to **无限制**, and
 enable **允许后台活动** — otherwise the system will kill the agent.

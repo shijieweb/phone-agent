@@ -42,11 +42,16 @@ internal object A11yHeal {
                     return@Thread
                 }
                 waited = delay
-                if (PhoneAccessibilityService.instance != null && Admin.isAccessibilityListed(app)) {
+                val live = PhoneAccessibilityService.instance != null
+                val listed = Admin.isAccessibilityListed(app)
+                if (live && listed) {
                     AgentLog.add("a11y", "安装后自愈: " + delay + "ms 已就绪，不再重试")
                     return@Thread
                 }
-                val outcome = Admin.enableAccessibilitySelfHeal(app)
+                // "The entry is there but nothing is bound" is the state an update
+                // actually leaves behind, and appending an entry that already
+                // exists does nothing. Pick the repair from the state instead.
+                val outcome = Admin.repairAccessibility(app, listed, live)
                 AgentLog.add("a11y", "安装后自愈(" + delay + "ms): " + outcome)
             }
         }

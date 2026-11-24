@@ -349,18 +349,12 @@ class RcAgentService : Service() {
             AgentLog.add("a11y", "跳过自愈: 缺 WRITE_SECURE_SETTINGS（instance=" + live + " listed=" + listed + "）")
             return
         }
-        var outcome = if (!listed) {
-            Admin.enableAccessibilitySelfHeal(this)
-        } else {
-            Admin.forceReconnectAccessibility(this)
-        }
-        // Toggling the component can still lose the race against a dying process
-        // (the entry comes back but nothing binds), so the append path is the
-        // second opinion — it is also the only one that works when the list was
-        // rewritten by the system between the two reads above.
-        if (outcome.startsWith(Admin.ERROR_PREFIX) && !listed) {
-            outcome = Admin.enableAccessibilitySelfHeal(this)
-        }
+        // One rule, shared with `a11y heal` and the post-install rebuild: a
+        // missing entry is appended, a listed-but-dead binding is toggled. The
+        // toggle blocks ~2 s (the framework needs it to release the binding), and
+        // this thread only has to keep a 15 s heartbeat, so that is affordable
+        // here — it would not be on the poll thread.
+        val outcome = Admin.repairAccessibility(this, listed, live)
         AgentLog.add("a11y", "自愈: " + outcome)
         if (!outcome.startsWith(Admin.ERROR_PREFIX)) note = "已执行无障碍自愈: " + outcome
     }
