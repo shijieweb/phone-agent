@@ -32,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var secretEdit: EditText
     private lateinit var toggleButton: Button
     private lateinit var autoStartBox: CheckBox
+    private lateinit var stayOnBox: CheckBox
     private lateinit var statusView: TextView
 
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -68,6 +69,12 @@ class MainActivity : Activity() {
             prefs.autoStart = checked
             refreshStatus()
         }
+        // Same switch the `screen stayon` command flips, so the operator can set
+        // it while holding the phone and still find it in force after a reboot.
+        stayOnBox = addCheckBox(root, "屏幕常亮", prefs.stayOn) { checked ->
+            applyStayOn(checked)
+        }
+        addLabel(root, "屏幕常亮会关闭自动熄屏（需要 WRITE_SECURE_SETTINGS）")
         addLabel(root, StartPolicy.HINT)
         addButton(root, "请求权限") { requestAgentPermissions() }
         addButton(root, "打开无障碍设置") { openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS) }
@@ -157,6 +164,22 @@ class MainActivity : Activity() {
         autoStartBox.isChecked = prefs.autoStart
     }
 
+    /**
+     * The checkbox is a view of [ScreenOps], never a second source of truth: it
+     * asks the same code the command does and then re-reads what actually
+     * happened, so a refused write leaves the box unchecked instead of lying.
+     */
+    private fun applyStayOn(checked: Boolean) {
+        val result = try {
+            ScreenOps.stayOn(this, checked)
+        } catch (t: Throwable) {
+            "错误: " + describe(t)
+        }
+        statusView.text = result
+        stayOnBox.isChecked = prefs.stayOn
+        refreshStatus()
+    }
+
     private fun requestAgentPermissions() {
         askedBackgroundLocation = false
         // POST_NOTIFICATIONS only exists from API 33. On 31/32 it is granted at
@@ -205,6 +228,7 @@ class MainActivity : Activity() {
             "\n电池白名单: " + Battery.flag(this)
         toggleButton.text = if (RcAgentService.running) "停止" else "启动"
         if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
+        if (stayOnBox.isChecked != prefs.stayOn) stayOnBox.isChecked = prefs.stayOn
     }
 
     /**

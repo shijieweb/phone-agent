@@ -24,6 +24,16 @@ class BootReceiver : BroadcastReceiver() {
         // One pure rule decides this, shared with the start button so the two can
         // never disagree (SPEC.md section 7).
         val prefs = Prefs(ctx)
+
+        // "Keep the panel on" is re-applied *before* the start check and with no
+        // relay involved: the ROM rewrites screen_off_timeout on every boot, and
+        // the operator's reason for setting it (a phone that must answer at 3
+        // a.m.) has nothing to do with whether the relay is configured yet.
+        if (prefs.stayOn) {
+            val result = ScreenOps.reapplyStayOn(ctx)
+            AgentLog.add("boot", "常亮恢复: " + result)
+        }
+
         if (!StartPolicy.shouldAutoStart(prefs.autoStart, prefs.isConfigured())) return
 
         try {

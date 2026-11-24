@@ -69,8 +69,100 @@
     <uses-permission android:name="android.permission.REBOOT" />
     <uses-permission android:name="android.permission.DEVICE_POWER" />
 
+    <!-- ============== v0.4.0 DEVICE SURFACE ==============
+         What the seven new groups need, and — the point of this block — which
+         grant each one actually takes. Three different mechanisms, and using the
+         wrong one is how a command ships looking implemented but dead:
+
+         pm grant (dangerous / development runtime permissions):
+             READ_SMS, SEND_SMS, RECEIVE_SMS, READ_CALL_LOG, WRITE_CALL_LOG,
+             CALL_PHONE, ANSWER_PHONE_CALLS, READ_PHONE_STATE, READ_PHONE_NUMBERS,
+             READ_CONTACTS, RECORD_AUDIO, READ_MEDIA_AUDIO, READ_MEDIA_IMAGES,
+             READ_MEDIA_VIDEO, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE,
+             READ_CALENDAR, WRITE_CALENDAR, BODY_SENSORS, ACTIVITY_RECOGNITION,
+             SYSTEM_ALERT_WINDOW*  (*appop, see below)
+
+         appops (a system toggle, pm grant silently does nothing):
+             MANAGE_EXTERNAL_STORAGE — `files` reads other apps' files.
+             SYSTEM_ALERT_WINDOW — overlay.
+             ACCESS_NOTIFICATION_POLICY — Do Not Disturb.
+         The exact adb lines live in Admin.extendedReport (printed by
+         `admin status`), because an XML comment cannot contain a double dash.
+
+         user toggle in settings (no adb shortcut that is portable):
+             notification listener ("通知使用权") for `notif`; the adb form
+             `cmd notification allow_listener` exists on most ROMs.
+
+         signature|privileged, declared for a future priv-app build only and
+         NEVER relied on: SET_ANIMATION_SCALE (the anim command writes
+         Settings.Global instead, which only needs WRITE_SECURE_SETTINGS),
+         MODIFY_PHONE_STATE. -->
+
+    <!-- Calls: dial, answer, hang up, and the state report. -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
+    <uses-permission android:name="android.permission.MODIFY_PHONE_STATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
+    <!-- SMS: list and send. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+
+    <!-- Contacts and calendar: read-only surfaces the operator asks about. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.READ_CALENDAR" />
+    <uses-permission android:name="android.permission.WRITE_CALENDAR" />
+
+    <!-- Audio: `rec` records, `say` needs nothing beyond a TTS engine. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- Media read for `files` and future gallery work. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
+    <!-- Legacy storage spellings: on API 31/32 READ_EXTERNAL_STORAGE is still
+         the runtime grant that makes /sdcard readable; on 33+ the per-type
+         READ_MEDIA_* above take over. Both are declared so the same APK works on
+         the Android 12 tablet and the Android 16 phone. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- Overlay and Do Not Disturb: both are app-ops, not runtime grants. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
+
+    <!-- Animation scales. Declared so a priv-app build could use it; the anim
+         command writes Settings.Global through WRITE_SECURE_SETTINGS instead. -->
+    <uses-permission android:name="android.permission.SET_ANIMATION_SCALE" />
+
+    <!-- Sensor and activity surfaces: cheap to hold, and they answer "is the
+         phone moving / what is it doing" without another app's help. -->
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.FLASHLIGHT" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Clipboard and screen wake lock for the `text`/`wake` paths already in
+         use; declared here so the whole surface is in one block. -->
+    <uses-permission android:name="android.permission.READ_CLIPBOARD" />
+    <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
+
     <application
         android:allowBackup="false"
+        android:requestLegacyExternalStorage="false"
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:networkSecurityConfig="@xml/network_security_config"
@@ -126,6 +218,22 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- ============ NOTIFICATION LISTENER ============
+             The only way to read other apps' notifications. Not a runtime
+             permission: either the operator turns on "通知使用权" or the grant is
+             `adb shell cmd notification allow_listener
+             net.de5.phoneagent/net.de5.phoneagent.NotifListenerService`.
+             `notif` prints that exact line whenever the listener is not bound. -->
+        <service
+            android:name=".NotifListenerService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
         <!-- ================= DEVICE ADMIN / OWNER =================

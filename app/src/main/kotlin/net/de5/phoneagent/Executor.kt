@@ -207,6 +207,69 @@ class CommandExecutor(
             is Command.Dl ->
                 dl(command)
 
+            is Command.FilesList ->
+                filesList(command)
+
+            is Command.FilesCat ->
+                filesCat(command)
+
+            is Command.FilesInfo ->
+                filesInfo(command)
+
+            is Command.FilesRemove ->
+                filesRemove(command)
+
+            is Command.FilesMkdir ->
+                filesMkdir(command)
+
+            is Command.NotifList ->
+                notifList(command)
+
+            is Command.Say ->
+                say(command)
+
+            is Command.ScreenStayOn ->
+                screenStayOn(command)
+
+            is Command.ScreenTimeout ->
+                screenTimeout(command)
+
+            is Command.ScreenOn ->
+                screenOn()
+
+            is Command.ScreenOff ->
+                screenOff()
+
+            is Command.SmsList ->
+                smsList(command)
+
+            is Command.SmsSend ->
+                smsSend(command)
+
+            is Command.AnimGet ->
+                animGet()
+
+            is Command.AnimSet ->
+                animSet(command)
+
+            is Command.AnimSave ->
+                animSave()
+
+            is Command.AnimRestore ->
+                animRestore()
+
+            is Command.CallDial ->
+                callDial(command)
+
+            is Command.CallAnswer ->
+                callAnswer()
+
+            is Command.CallHangup ->
+                callHangup()
+
+            is Command.CallState ->
+                callState()
+
             is Command.Stop ->
                 stopAgent()
 
@@ -642,6 +705,148 @@ class CommandExecutor(
             }
         }
     }
+
+
+    /**
+     * The seven device-surface groups (SPEC.md sections 3.7-3.13).
+     *
+     * Every one of them is a thin adapter: the wording and the clamps live in
+     * the *Plan / *Ops pair, so a test can prove the text without a device. The
+     * only decision made here is which exit code a sentence maps to, and that is
+     * one helper ([fromOps]) for all of them.
+     */
+    private fun fromOps(text: String, denied: Int = EXIT_PERMISSION): ExecutionResult =
+        if (text.startsWith(Admin.ERROR_PREFIX)) {
+            ExecutionResult(denied, "", text)
+        } else {
+            ExecutionResult(EXIT_OK, text, "")
+        }
+
+    private fun filesList(command: Command.FilesList): ExecutionResult =
+        FileOps.list(command.path, command.limit).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    private fun filesCat(command: Command.FilesCat): ExecutionResult =
+        FileOps.cat(command.path).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    private fun filesInfo(command: Command.FilesInfo): ExecutionResult =
+        FileOps.info(command.path).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    private fun filesRemove(command: Command.FilesRemove): ExecutionResult =
+        FileOps.remove(command.path, command.apply).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    private fun filesMkdir(command: Command.FilesMkdir): ExecutionResult =
+        FileOps.mkdir(command.path).let { result ->
+            ExecutionResult(result.exit, result.stdout, result.stderr)
+        }
+
+    /**
+     * `notif` — the listener is the grant, so "not connected" is reported with
+     * the exact adb line rather than a permission error: an operator who has not
+     * run it yet has nothing to fix in settings.
+     */
+    private fun notifList(command: Command.NotifList): ExecutionResult {
+        val items = NotifOps.snapshot()
+        val text = NotifPlan.report(items, command.limit, command.query)
+        return ExecutionResult(EXIT_OK, text, "")
+    }
+
+    private fun say(command: Command.Say): ExecutionResult = fromOps(
+        SayOps.speak(
+            context,
+            SayPlan.clipText(command.text),
+            command.rate,
+            command.pitch,
+            command.lang
+        )
+    )
+
+    /**
+     * `screen stayon [on|off]` — the sticky switch.
+     *
+     * Reported as `exit=6` when the write is refused, because the only reason it
+     * can be refused is a missing WRITE_SECURE_SETTINGS: the operator has
+     * something to run, and the message names it.
+     */
+    private fun screenStayOn(command: Command.ScreenStayOn): ExecutionResult =
+        fromOps(ScreenOps.stayOn(context, command.on))
+
+    private fun screenTimeout(command: Command.ScreenTimeout): ExecutionResult =
+        fromOps(ScreenOps.setTimeout(context, command.ms))
+
+    private fun screenOn(): ExecutionResult = fromOps(ScreenOps.turnOn(context))
+
+    private fun screenOff(): ExecutionResult = fromOps(ScreenOps.turnOff(context))
+
+    private fun smsList(command: Command.SmsList): ExecutionResult {
+        val items = SmsOps.list(context, command.limit)
+        if (items.isEmpty() && !Admin.granted(context, android.Manifest.permission.READ_SMS)) {
+            return ExecutionResult(EXIT_PERMISSION, "", SmsPlan.denied("READ_SMS 未授予"))
+        }
+        return ExecutionResult(EXIT_OK, SmsPlan.report(items, command.limit), "")
+    }
+
+    /**
+     * `sms send [apply] NUMBER TEXT` — dry run by default.
+     *
+     * The dry run is the whole safety mechanism: the body goes to a real person
+     * and cannot be recalled, so the operator sees the exact number and the
+     * exact text before anything is sent.
+     */
+    private fun smsSend(command: Command.SmsSend): ExecutionResult {
+        if (!command.apply) {
+            return ExecutionResult(
+                EXIT_OK,
+                "将发送短信到 " + command.number + ": " + SmsPlan.clip(command.text) +
+                    "（dry-run：未发送，确认后执行 sms send apply " + command.number + " " +
+                    SmsPlan.clip(command.text) + "）",
+                ""
+            )
+        }
+        if (!Admin.granted(context, android.Manifest.permission.SEND_SMS)) {
+            return ExecutionResult(
+                EXIT_PERMISSION,
+                "",
+                "发送短信需要 SEND_SMS（未授予：adb shell pm grant net.de5.phoneagent " +
+                    "android.permission.SEND_SMS）"
+            )
+        }
+        val failure = SmsOps.send(context, command.number, SmsPlan.clip(command.text))
+        if (failure != null) return ExecutionResult(EXIT_PERMISSION, "", failure)
+        return ExecutionResult(EXIT_OK, SmsPlan.sent(command.number, SmsPlan.clip(command.text).length), "")
+    }
+
+    private fun animGet(): ExecutionResult = ExecutionResult(EXIT_OK, AnimOps.state(context), "")
+
+    private fun animSet(command: Command.AnimSet): ExecutionResult = fromOps(AnimOps.set(context, command.value))
+
+    private fun animSave(): ExecutionResult = ExecutionResult(EXIT_OK, AnimOps.save(context), "")
+
+    private fun animRestore(): ExecutionResult = fromOps(AnimOps.restore(context))
+
+    /**
+     * `call [apply] NUMBER` — dry run by default, same reasoning as `sms send`:
+     * a wrong digit rings a stranger.
+     */
+    private fun callDial(command: Command.CallDial): ExecutionResult {
+        if (!command.apply) {
+            return ExecutionResult(EXIT_OK, CallPlan.dryRun(command.number), "")
+        }
+        return fromOps(CallOps.dial(context, command.number))
+    }
+
+    private fun callAnswer(): ExecutionResult = fromOps(CallOps.answer(context))
+
+    private fun callHangup(): ExecutionResult = fromOps(CallOps.hangUp(context))
+
+    private fun callState(): ExecutionResult = ExecutionResult(EXIT_OK, CallOps.state(context), "")
 
     private fun stopAgent(): ExecutionResult {
         onStopRequested()

@@ -117,7 +117,92 @@ internal object Admin {
                 .append('=').append(if (granted(ctx, permission)) "已授予" else "未授予")
         }
         sb.append("\n无障碍条目: ").append(if (isAccessibilityListed(ctx)) "已列出" else "缺失")
+        sb.append(extendedReport(ctx))
         return sb.toString()
+    }
+
+    /**
+     * The v0.4.0 surface, grouped by **how the grant is actually given**.
+     *
+     * The grouping is the whole point: an operator who runs `pm grant` on
+     * MANAGE_EXTERNAL_STORAGE gets a silent success and no capability, and then
+     * reports the app as broken. These three lists are the three mechanisms, and
+     * [extendedReport] prints one line per entry with the measured state.
+     */
+    private val PM_GRANT_PERMISSIONS = listOf(
+        android.Manifest.permission.READ_SMS,
+        android.Manifest.permission.SEND_SMS,
+        android.Manifest.permission.READ_PHONE_STATE,
+        android.Manifest.permission.READ_CALL_LOG,
+        android.Manifest.permission.CALL_PHONE,
+        android.Manifest.permission.ANSWER_PHONE_CALLS,
+        android.Manifest.permission.READ_CONTACTS,
+        android.Manifest.permission.RECORD_AUDIO,
+        android.Manifest.permission.READ_CALENDAR,
+        android.Manifest.permission.ACCESS_FINE_LOCATION
+    )
+
+    /** An app-op: `pm grant` accepts the command and changes nothing. */
+    private const val APPOP_MANAGE_STORAGE = "MANAGE_EXTERNAL_STORAGE"
+
+    /**
+     * The readable-by-measurement part of the extended surface.
+     *
+     * Each line is "name=已授予/未授予（怎么给）" so the operator can act without
+     * a second document: the hint is the exact adb command.
+     */
+    fun extendedReport(ctx: Context): String {
+        val sb = StringBuilder()
+        sb.append("\n扩展权限:")
+        for (permission in PM_GRANT_PERMISSIONS) {
+            sb.append("\n  ").append(shortName(permission))
+                .append('=').append(if (granted(ctx, permission)) "已授予" else "未授予")
+        }
+        sb.append("\n  所有文件访问=").append(if (hasAllFilesAccess(ctx)) "已开启" else "未开启")
+            .append("（appops: adb shell appops set --uid ").append(ctx.packageName)
+            .append(' ').append(APPOP_MANAGE_STORAGE).append(" allow）")
+        sb.append("\n  悬浮窗=").append(if (canDrawOverlays(ctx)) "已允许" else "未允许")
+            .append("（adb shell appops set ").append(ctx.packageName)
+            .append(" SYSTEM_ALERT_WINDOW allow）")
+        sb.append("\n  勿扰权限=").append(if (hasDndAccess(ctx)) "已授予" else "未授予")
+            .append("（adb shell cmd notification allow_dnd ").append(ctx.packageName).append(')')
+        sb.append("\n  通知使用权=").append(if (isNotificationListenerEnabled(ctx)) "已开启" else "未开启")
+            .append("（adb shell cmd notification allow_listener ").append(ctx.packageName)
+            .append('/').append(ctx.packageName).append(".NotifListenerService）")
+        sb.append("\n  短信/通话权限只能用 pm grant，所有文件访问只能用 appops，")
+        sb.append("通知使用权与勿扰只能在设置里开（或上面的 cmd notification）")
+        return sb.toString()
+    }
+
+    /** MANAGE_EXTERNAL_STORAGE is an app-op; Environment answers it directly. */
+    fun hasAllFilesAccess(ctx: Context): Boolean = try {
+        android.os.Environment.isExternalStorageManager()
+    } catch (t: Throwable) {
+        false
+    }
+
+    fun canDrawOverlays(ctx: Context): Boolean = try {
+        Settings.canDrawOverlays(ctx)
+    } catch (t: Throwable) {
+        false
+    }
+
+    fun hasDndAccess(ctx: Context): Boolean = try {
+        val manager = ctx.getSystemService(android.app.NotificationManager::class.java)
+        manager != null && manager.isNotificationPolicyAccessGranted
+    } catch (t: Throwable) {
+        false
+    }
+
+    /** True when our listener component appears in the enabled listener list. */
+    fun isNotificationListenerEnabled(ctx: Context): Boolean = try {
+        val flat = Settings.Secure.getString(
+            ctx.contentResolver,
+            "enabled_notification_listeners"
+        ) ?: ""
+        flat.contains(ctx.packageName)
+    } catch (t: Throwable) {
+        false
     }
 
     private fun shortName(permission: String): String =

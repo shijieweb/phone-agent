@@ -165,6 +165,24 @@ reach the `unknown command` branch.
 | `adbinfo` | read-only wireless-debugging report: `adb_wifi_enabled`, wlan IP, mDNS port, `connect` string, 200 ms TCP probe (see §3.4) |
 | `adbheal [t=SECONDS]` | turn wireless debugging on if it is off, wait up to `t` s (default 20, max 60) for the port, then report the same fields as `adbinfo` |
 | `dl [t=SECONDS] URL [NAME]` | download `URL` into `/sdcard/Movies/[NAME]`, then media-scan it; timeout default 600 s, cap 3600 (see §3.6) |
+| `files ls [PATH] [n]` | list one directory inside `/sdcard`, default 100 entries, cap 500 (see §3.7) |
+| `files cat PATH` | print a text file, refusing > 64 KiB or binary (see §3.7) |
+| `files info PATH` | type, size and modification time of one entry (see §3.7) |
+| `files mkdir PATH` | create a directory and its parents (see §3.7) |
+| `files rm [apply] PATH` | **dry run** by default: names the path, its size and the `apply` line; `apply` deletes (see §3.7) |
+| `notif [list] [n] [q=TEXT]` | the active notifications, default 30, cap 200, optional case-insensitive filter (see §3.8) |
+| `say [-l zh\|en] [rate=PCT] [pitch=PCT] TEXT` | speak `TEXT` once through the system TTS engine; `zh` default (see §3.9) |
+| `screen stayon [on\|off]` | keep the panel awake across reboots; with no argument it only reports (see §3.14) |
+| `screen timeout MS` | one explicit panel timeout, clamped 15000..2147483647 (see §3.14) |
+| `screen on` / `screen off` | light or darken the panel now (see §3.14) |
+| `anim [get]` | the three animation scales (see §3.11) |
+| `anim set on\|off\|SCALE` | write all three scales; `off` is what makes the UI snap (see §3.11) |
+| `anim save` / `anim restore` | remember / write back the three scales (see §3.11) |
+| `sms [list [n]]` | the inbox for the last 7 days, newest first, default 20, cap 100 (see §3.12) |
+| `sms send [apply] NUMBER TEXT` | **dry run** by default; `apply` really sends (see §3.12) |
+| `call [apply] NUMBER` | **dry run** by default; `apply` opens `ACTION_CALL` (or `ACTION_DIAL` without `CALL_PHONE`) (see §3.13) |
+| `call answer` / `call hangup` / `call state` | call control and the current call state (see §3.13) |
+| `call speaker on\|off` | speakerphone for the current call (see §3.13) |
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
@@ -423,6 +441,190 @@ for players that consult the legacy media index.
 `已下载 film.mp4 <n> 字节 → /sdcard/Movies/film.mp4` → open VLC on the tablet →
 Internal storage → Movies → tap it. No permission step, no USB cable.
 
+### 3.7 `files`: read and clean up inside /sdcard only
+
+```
+files ls [PATH] [n]      files cat PATH      files info PATH
+files mkdir PATH         files rm [apply] PATH
+```
+
+- **The only tree any verb may touch is `/sdcard`** (`/storage/emulated/0` and
+  `/storage/self/primary` are the same tree and are accepted spellings).
+  `FileGuard.resolve` resolves `..` **lexically, before** the containment
+  check, so `/sdcard/../etc/passwd` is refused as an escape rather than handed
+  to the filesystem. A NUL byte is refused. A relative path is taken relative
+  to `/sdcard` (`files ls DCIM` means `/sdcard/DCIM`).
+- A path that escapes or cannot be used answers `exit=2`, stderr
+  `路径不可用: <path>（只允许 /sdcard 内的路径）`.
+- `ls` prints a header stating how many entries the directory really has —
+  `<path> (N 项)`, plus `，只显示前 K 项` when truncated — then one row per
+  entry: `d|-` + size + `yyyy-MM-dd HH:mm` + name (`/` suffix for a directory).
+  Directories first, then case-insensitive name. Default `n=100`, cap 500.
+  A trailing **pure integer** is the count, so a directory literally named
+  `2024` still resolves (`files ls 2024` lists it, `files ls DCIM 20` counts).
+- `cat` refuses more than 64 KiB (`CAT_MAX_BYTES`) and refuses a file
+  containing a NUL byte (binary); both answer `exit=2` with the reason.
+- `rm` is **dry run by default**: it prints the absolute path and the size and
+  the exact `files rm apply PATH` line that would delete it. `apply` deletes
+  recursively. A root (`/sdcard` itself) is refused unconditionally.
+  A missing `MANAGE_EXTERNAL_STORAGE` app-op surfaces as `exit=6` naming the
+  `appops set` line, never as "file not found".
+- `mkdir` succeeds when the directory already exists.
+
+### 3.8 `notif`: the active notifications
+
+```
+notif [list] [n] [q=TEXT]
+```
+
+- Backed by a `NotificationListenerService` (`NotifListenerService`), which
+  only sees anything after the operator grants notification access:
+  `adb shell cmd notification allow_listener
+  net.de5.phoneagent/net.de5.phoneagent.NotifListenerService`
+  (or 设置 → 通知使用权 by hand).
+- One line per notification: `- pkg | title | text`, a leading `*` instead of
+  `-` when the notification is ongoing. Newlines are flattened and runs of
+  whitespace collapse to one space, because a multi-line chat body would
+  otherwise break the one-line-per-notification shape. Title clipped to 80
+  chars, body to 160.
+- Default `n=30`, cap 200. `q=` is a case-insensitive substring over package,
+  title and body; the query keeps its inner spacing (`notif q=微信 消息` searches
+  the two-word phrase).
+- With the listener not connected the answer is `exit=0` and a sentence that
+  contains the exact grant line — an operator who has not run it yet has
+  nothing to fix in the app. No match at all answers `没有匹配的通知`.
+
+### 3.9 `say`: speak one sentence
+
+```
+say [-l zh|en] [rate=PERCENT] [pitch=PERCENT] TEXT
+```
+
+- `TEXT` is the rest of the line **verbatim** (inner spaces kept). Leading
+  flags are consumed before the text; a sentence that merely *contains*
+  `-l en` keeps it (`say hi -l en` speaks "hi -l en" in Chinese).
+- `-l` / `--lang` / `-l=en` all work. Two voices only: `zh` (default) and
+  `en`. Every spelling of the wish lands on one of them (`zh`, `zh-CN`,
+  `zh_Hans`, `cn`, `中文`, `汉语` → `zh`; `en`, `en-GB`, `English`, `英文`,
+  `英语` → `en`). An unknown language is **refused** (`exit=2`) rather than
+  silently falling back: reading English in a Chinese voice sounds like a
+  broken phone, not a wrong flag.
+- `rate` is a percentage of normal speech, clamped 20..400 (default 100);
+  `pitch` clamped 50..200 (default 100). Out-of-range values are clamped, not
+  rejected — the operator asked for "faster", not for an error.
+- `TEXT` is clipped to 2000 chars. The executor waits
+  `chars/4 + 5` seconds, clamped 5..120, then answers whether the utterance
+  finished; a stuck engine is a reported timeout, never a hung poll loop.
+- The system TTS engine is used (no bundled voice). A missing voice data pack
+  answers with the path to install it (设置 → 语言和输入 → 文字转语音).
+- A new engine instance is created and shut down per utterance: a cached engine
+  keeps a permanent service binding, which is exactly how an agent ends up
+  "silent after a week".
+
+### 3.10 `admin status`: the extended-permission section
+
+`admin status` keeps its existing lines and appends a `扩展权限:` block:
+
+- one `<PERMISSION>=已授予|未授予` line for each permission `pm grant` can
+  actually hand over (`READ_SMS`, `SEND_SMS`, `READ_PHONE_STATE`,
+  `READ_CALL_LOG`, `CALL_PHONE`, `ANSWER_PHONE_CALLS`, `READ_CONTACTS`,
+  `RECORD_AUDIO`, `READ_CALENDAR`, `ACCESS_FINE_LOCATION`);
+- `所有文件访问`, `悬浮窗`, `勿扰权限`, `通知使用权`, each with the adb line that
+  turns it on when it is off.
+
+The point is that every one of these has a *different* door (runtime grant,
+app-op, or a settings screen the user must tap), and the operator should not
+have to guess which.
+
+### 3.11 `anim`: the three animation scales
+
+```
+anim [get] | anim set on|off|SCALE | anim save | anim restore
+```
+
+- The keys are `window_animation_scale`, `transition_animation_scale`,
+  `animator_duration_scale` in `Settings.Global`. They are **floats stored as
+  strings** and stay strings end to end: re-encoding `"0.5"` through a Float
+  would rewrite a value the operator set by hand.
+- `set` accepts `on` (`"1"`), `off` (`"0"`) or a number in 0..10, normalised to
+  one decimal (`0.5`). Out of range or non-numeric → `exit=2`.
+- The write goes through `WRITE_SECURE_SETTINGS` (the same door as
+  `settings put`), not through `SET_ANIMATION_SCALE`, which is
+  `signature|privileged` and is declared in the manifest only for completeness.
+  A refusal answers `exit=6` with the `pm grant` line.
+- `save` remembers the three current values in prefs; `restore` writes them
+  back and refuses with a plain sentence when nothing was ever saved.
+
+### 3.12 `sms`: the inbox, and one guarded send
+
+```
+sms [list [n]] | sms send [apply] NUMBER TEXT
+```
+
+- `list` reads `content://sms` for the **last 7 days only** (cap 90), newest
+  first. One line per message: `< address body` for received, `> address body`
+  for sent. Body clipped to 200 chars. Default `n=20`, cap 100.
+- Without `READ_SMS` the answer is `exit=6` naming the exact `pm grant` line,
+  and it never pretends the inbox is empty.
+- `send` is **dry run by default**: it prints the number and the exact body and
+  the `sms send apply …` line that would send it. The body goes to a real person
+  and cannot be recalled, so the operator sees it first.
+- The number is normalised at **parse time** (spaces, dashes and parentheses
+  stripped, a leading `+` kept, at least 3 digits) so a typo never reaches the
+  telephony stack. The body keeps its inner spacing verbatim.
+- Multi-part bodies go through `sendMultipartTextMessage`. `SEND_SMS` is
+  checked before anything is sent.
+
+### 3.13 `call`: dial, answer, hang up
+
+```
+call [apply] NUMBER | call answer | call hangup | call state | call speaker on|off
+```
+
+- `call NUMBER` is **dry run by default** — a real phone rings on the other end,
+  which is irreversible in the only way that matters.
+- With `CALL_PHONE` granted, `apply` uses `ACTION_CALL`; without it,
+  `ACTION_DIAL` (which only opens the dialer) and the answer says so with the
+  `pm grant` line.
+- `answer` uses `TelecomManager.acceptRingingCall()`, which needs
+  `ANSWER_PHONE_CALLS` or `MODIFY_PHONE_STATE`; `hangup` uses `endCall()`.
+- `state` reports `空闲 / 响铃中 / 通话中`. Ringing needs `READ_PHONE_STATE`;
+  without it only the audio mode is available and the line says so.
+- `speaker on|off` sets `AudioManager` speakerphone (needs
+  `MODIFY_AUDIO_SETTINGS`).
+- **What this can never do:** carry the call audio itself. Call audio travels
+  through the modem and the audio HAL; a sideloaded app cannot read it —
+  `CAPTURE_AUDIO_OUTPUT` is signature-level. `call` controls the *call*, it
+  does not listen to it.
+
+### 3.14 `screen`: keep the panel awake, and turn it on or off
+
+```
+screen stayon [on|off] | screen timeout MS | screen on | screen off
+```
+
+- `screen stayon on` writes `Settings.System.SCREEN_OFF_TIMEOUT = 2147483647`
+  ("never") **and** stores `stay_on = true` in prefs; `off` restores 60000 (the
+  Android default). `screen stayon` with no argument is the **report** form:
+  `常亮: 开|关 当前超时=…`, so it never changes anything.
+- The prefs flag exists because the ROM rewrites `screen_off_timeout` on every
+  boot: `BootReceiver` re-applies it **before** the auto-start check and
+  independently of whether the relay is configured — the reason to set it (a
+  phone that must answer at 3 a.m.) has nothing to do with the relay.
+- `screen timeout MS` writes one explicit timeout, clamped 15000..2147483647,
+  and clears `stay_on` — a hand-typed timeout is the newer decision, so a
+  reboot must not put "never" back.
+- `screen on` lights the panel (`PowerManager` + `ACQUIRE_CAUSES_WAKEUP`); if
+  the ROM refuses a background wake it answers `已请求亮屏，但屏幕仍是熄的`
+  instead of claiming success. `screen off` goes through the device-admin lock
+  (`lockNow`), because `PowerManager.goToSleep` needs the signature-level
+  `DEVICE_POWER`; the sentence says it also locked.
+- Every write needs `WRITE_SECURE_SETTINGS`; a refusal is `exit=6` with the
+  `pm grant` line.
+- The same switch is a checkbox in the app (`屏幕常亮`), which calls the same
+  code and then re-reads the stored flag, so a refused write leaves the box
+  unchecked rather than lying.
+
 ### 3.1 Element selectors (`SEL`)
 
 The whole rest of the line after the command name is the selector, **verbatim**
@@ -622,6 +824,10 @@ layout file). Fields:
 - `开机自动启动` checkbox → binds `Prefs.autoStart`, written on every change; the
   button updates it too, and the box is re-synced on refresh so it never shows a
   stale value
+- `屏幕常亮` checkbox → the same switch as `screen stayon` (§3.14). It calls
+  `ScreenOps.stayOn` — never a second write path — and then re-reads
+  `Prefs.stayOn`, so a refused write leaves the box unchecked instead of showing
+  a state that is not in force.
 - A hint line under them (`StartPolicy.HINT`): 停止后不会自动启动，除非重新点「启动」；
   勾选「开机自动启动」时，重启或装新版会自己拉起。
 - `请求权限` button → requests `POST_NOTIFICATIONS`,
@@ -726,6 +932,21 @@ framework** — do not mock `AccessibilityService`. Required cases:
 8. Dry-run line: `via=action|ancestor|gesture` is chosen from the inspection
    (no clickable target → `gesture`, clickable ancestor → `ancestor`), and
    `at=?` when the node has no usable bounds.
+9. The v0.4.0 device-surface plans, each a pure object proven on a plain JVM:
+   `FileGuard` (lexical `..` resolution, escape refusal, the three root
+   spellings, size/time formatting, listing truncation), `NotifPlan`
+   (newline flattening, clipping, the `*` ongoing marker, filtering),
+   `SayPlan` (every language spelling, unknown language → null, rate/pitch
+   clamps, `waitSeconds` bounds), `ScreenPlan` (the `Int.MAX_VALUE` sentinel,
+   the 15 s floor, the `永不`/`60s`/`ms` renderings, the report line),
+   `SmsPlan` (number normalisation, body clipping), `AnimPlan` (scale
+   normalisation, one-decimal formatting), `CallPlan` (number normalisation,
+   dry-run wording).
+10. The v0.4.0 grammar in `Commands.parse`: `files` verb dispatch and the
+   trailing-count rule, `notif` limit/`q=`, `say` leading flags vs a payload
+   that merely contains one, `screen` all four sub-commands and their refusals,
+   `sms`/`call` dry-run defaults, and `rec` (removed in v0.4.0) landing on
+   `unknown command` rather than some other verb.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -738,7 +959,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures**.
+- `./gradlew test` passes with the §10 tests, **0 failures** (287 cases at
+  v0.4.0-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

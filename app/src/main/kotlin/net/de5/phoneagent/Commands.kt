@@ -126,6 +126,99 @@ sealed class Command {
      */
     data class Dl(val url: String, val name: String?, val timeoutSeconds: Int) : Command()
 
+    // ------------------------------------------------- file / device surface
+
+    /**
+     * `files ls [PATH] [n]` — list one directory (SPEC.md section 3.7).
+     *
+     * [path] is null for the root. [limit] is capped by [FileGuard.LIMIT_MAX] in
+     * the parser, so a listing can never be asked for more rows than the relay
+     * can carry.
+     */
+    data class FilesList(val path: String?, val limit: Int) : Command()
+
+    /** `files cat PATH` — print a text file, capped at [FileGuard.CAT_MAX_BYTES]. */
+    data class FilesCat(val path: String) : Command()
+
+    /** `files info PATH` — size, type and modification time of one entry. */
+    data class FilesInfo(val path: String) : Command()
+
+    /**
+     * `files rm [apply] PATH` — delete one file or directory tree.
+     *
+     * Dry run by default, like every other destructive verb here: a phone nobody
+     * is holding makes a wrong delete unarguable.
+     */
+    data class FilesRemove(val path: String, val apply: Boolean = false) : Command()
+
+    /** `files mkdir PATH` — create a directory (and its parents). */
+    data class FilesMkdir(val path: String) : Command()
+
+    /** `notif [list] [n] [q=TEXT]` — the active notifications (SPEC.md section 3.8). */
+    data class NotifList(val limit: Int, val query: String?) : Command()
+
+    /** `say [-l zh|en] [rate=PCT] [pitch=PCT] TEXT` — speak once (SPEC.md §3.9). */
+    data class Say(
+        val text: String,
+        val rate: Int,
+        val pitch: Int,
+        val lang: String = SayPlan.LANG_DEFAULT
+    ) : Command()
+
+    /**
+     * `screen stayon [on|off]` — keep the panel awake across reboots (§3.14).
+     *
+     * [on] is null for the report form: `screen stayon` asks, it does not decide.
+     */
+    data class ScreenStayOn(val on: Boolean?) : Command()
+
+    /** `screen timeout MS` — one explicit panel timeout, clamped to a usable range. */
+    data class ScreenTimeout(val ms: Int) : Command()
+
+    /** `screen on` — light the panel now. */
+    object ScreenOn : Command()
+
+    /** `screen off` — darken the panel now (via the device-admin lock). */
+    object ScreenOff : Command()
+
+    /** `sms [list] [n]` — the most recent messages (SPEC.md section 3.12). */
+    data class SmsList(val limit: Int) : Command()
+
+    /**
+     * `sms send [apply] NUMBER TEXT` — send one SMS.
+     *
+     * Dry run by default: the body goes to a real person, and there is no undo.
+     */
+    data class SmsSend(val number: String, val text: String, val apply: Boolean = false) : Command()
+
+    /** `anim [get]` — read the three animation scales (SPEC.md section 3.11). */
+    object AnimGet : Command()
+
+    /** `anim set on|off|SCALE` — write all three. */
+    data class AnimSet(val value: String) : Command()
+
+    /** `anim save` — remember the current three values in prefs. */
+    object AnimSave : Command()
+
+    /** `anim restore` — put the remembered values back. */
+    object AnimRestore : Command()
+
+    /**
+     * `call [apply] NUMBER` — open the dialer on a number (SPEC.md section 3.13).
+     *
+     * Dry run by default: a wrong number rings a stranger's phone.
+     */
+    data class CallDial(val number: String, val apply: Boolean = false) : Command()
+
+    /** `call answer` — accept the ringing call (needs ANSWER_PHONE_CALLS). */
+    object CallAnswer : Command()
+
+    /** `call hangup` — end the current call (needs ANSWER_PHONE_CALLS). */
+    object CallHangup : Command()
+
+    /** `call state` — idle / ringing / off-hook. */
+    object CallState : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -196,6 +289,18 @@ object Commands {
 
     /** Shared shape of every `dl` usage error. */
     private val DL_USAGE = Command.BadUsage("usage: dl [t=SECONDS] URL [NAME]")
+
+    /** Shared shapes of the new verb usage errors, so the text never drifts. */
+    private val FILES_USAGE = Command.BadUsage(
+        "usage: files ls [PATH] [n] | files cat PATH | files info PATH | " +
+            "files rm [apply] PATH | files mkdir PATH"
+    )
+    private val NOTIF_USAGE = Command.BadUsage("usage: notif [list] [n] [q=TEXT]")
+    private val SAY_USAGE = Command.BadUsage(SayPlan.USAGE)
+    private val SCREEN_USAGE = Command.BadUsage(ScreenPlan.USAGE)
+    private val SMS_USAGE = Command.BadUsage(SmsPlan.USAGE)
+    private val ANIM_USAGE = Command.BadUsage(AnimPlan.USAGE)
+    private val CALL_USAGE = Command.BadUsage(CallPlan.USAGE)
 
     /** Shared shapes of the element-verb usage errors, so the text never drifts. */
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
@@ -422,6 +527,20 @@ object Commands {
 
             "dl" -> parseDl(rest)
 
+            "files" -> parseFiles(rest)
+
+            "notif" -> parseNotif(rest)
+
+            "say" -> parseSay(rest)
+
+            "screen" -> parseScreen(rest)
+
+            "sms" -> parseSms(rest)
+
+            "anim" -> parseAnim(rest)
+
+            "call" -> parseCall(rest)
+
             "stop" -> Command.Stop
 
             else -> Command.Unknown(head)
@@ -631,6 +750,266 @@ object Commands {
         val nameStart = tokens[index].start + tokens[index].text.length
         val name = dropLeadingWhitespace(rest.substring(nameStart)).trim()
         return Command.Dl(url, if (name.isEmpty()) null else name, timeout)
+    }
+
+
+    /**
+     * `files ls [PATH] [n] | files cat PATH | files info PATH | files rm [apply] PATH |
+     * files mkdir PATH` (SPEC.md section 3.7).
+     *
+     * The path is always the rest of the line verbatim, because real names
+     * contain spaces ("My Documents"). Only `ls` takes a trailing count, and it
+     * is recognised only as a *pure integer last token* — a directory literally
+     * called "2024" therefore still resolves, by passing the count first
+     * (`files ls DCIM 20` vs `files ls 2024` reading the directory).
+     *
+     * No path is resolved here: [FileGuard.resolve] is the single place that
+     * decides what is reachable, and it runs in the executor so an invalid path
+     * is a runtime error with its own sentence rather than a parse failure.
+     */
+    private fun parseFiles(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return FILES_USAGE
+        val verb = tokens[0].text.lowercase()
+        val body = dropLeadingWhitespace(rest.substring(tokens[0].start + tokens[0].text.length))
+        return when (verb) {
+            "ls" -> {
+                val inner = tokenSpans(body)
+                var limit = FileGuard.LIMIT_DEFAULT
+                var path = body.trim()
+                if (inner.size >= 2) {
+                    val last = inner[inner.size - 1]
+                    val parsed = last.text.toIntOrNull()
+                    if (parsed != null) {
+                        limit = FileGuard.clampLimit(parsed)
+                        path = body.substring(0, last.start).trim()
+                    }
+                }
+                Command.FilesList(if (path.isEmpty()) null else path, limit)
+            }
+
+            "cat", "info", "mkdir" -> {
+                if (body.isBlank()) return FILES_USAGE
+                when (verb) {
+                    "cat" -> Command.FilesCat(body)
+                    "info" -> Command.FilesInfo(body)
+                    else -> Command.FilesMkdir(body)
+                }
+            }
+
+            "rm" -> {
+                var target = body
+                var apply = false
+                val cut = firstWhitespace(target)
+                val head = if (cut < 0) target else target.substring(0, cut)
+                if (head.equals("apply", ignoreCase = true)) {
+                    apply = true
+                    target = if (cut < 0) "" else dropLeadingWhitespace(target.substring(cut))
+                }
+                if (target.isBlank()) return FILES_USAGE
+                Command.FilesRemove(target, apply)
+            }
+
+            else -> FILES_USAGE
+        }
+    }
+
+    /**
+     * `notif [list] [n] [q=TEXT]` (SPEC.md section 3.8).
+     *
+     * The query keeps its inner spacing verbatim, so `notif q=微信 消息` searches
+     * for the two-word phrase instead of two separate words.
+     */
+    private fun parseNotif(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        var index = 0
+        if (index < tokens.size && tokens[index].text.equals("list", ignoreCase = true)) {
+            index++
+        }
+        var limit = NotifPlan.LIMIT_DEFAULT
+        if (index < tokens.size) {
+            val parsed = tokens[index].text.toIntOrNull()
+            if (parsed != null) {
+                limit = NotifPlan.clampLimit(parsed)
+                index++
+            }
+        }
+        if (index >= tokens.size) return Command.NotifList(limit, null)
+        val head = tokens[index].text
+        if (head.length <= 2 || !head.startsWith("q=", ignoreCase = true)) return NOTIF_USAGE
+        val query = rest.substring(tokens[index].start + 2).trim()
+        if (query.isEmpty()) return NOTIF_USAGE
+        return Command.NotifList(limit, query)
+    }
+
+    /**
+     * `say [-l zh|en] [rate=PERCENT] [pitch=PERCENT] TEXT` (SPEC.md §3.9).
+     *
+     * Only *leading* flags are consumed, so a sentence that happens to start
+     * with the word keeps its text; the payload is the rest of the line
+     * verbatim, spaces included. `-l` also accepts `-l=en`, because both
+     * spellings come naturally to a person typing into a chat box.
+     */
+    private fun parseSay(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return SAY_USAGE
+        var index = 0
+        var rate = SayPlan.RATE_DEFAULT
+        var pitch = SayPlan.PITCH_DEFAULT
+        var lang = SayPlan.LANG_DEFAULT
+        while (index < tokens.size) {
+            val head = tokens[index].text
+            val lower = head.lowercase()
+            if (lower == "-l" || lower == "--lang") {
+                if (index + 1 >= tokens.size) return SAY_USAGE
+                lang = SayPlan.lang(tokens[index + 1].text) ?: return SAY_USAGE
+                index += 2
+                continue
+            }
+            if (lower.startsWith("-l=") && head.length > 3) {
+                lang = SayPlan.lang(head.substring(3)) ?: return SAY_USAGE
+                index++
+                continue
+            }
+            if (lower.startsWith("rate=") && head.length > 5) {
+                val parsed = head.substring(5).toIntOrNull() ?: return SAY_USAGE
+                rate = SayPlan.clampRate(parsed)
+                index++
+                continue
+            }
+            if (lower.startsWith("pitch=") && head.length > 6) {
+                val parsed = head.substring(6).toIntOrNull() ?: return SAY_USAGE
+                pitch = SayPlan.clampPitch(parsed)
+                index++
+                continue
+            }
+            break
+        }
+        if (index >= tokens.size) return SAY_USAGE
+        val text = rest.substring(tokens[index].start)
+        if (text.isBlank()) return SAY_USAGE
+        return Command.Say(text, rate, pitch, lang)
+    }
+
+    /**
+     * `screen stayon [on|off] | screen timeout MS | screen on | screen off` (§3.14).
+     *
+     * `stayon` takes an *optional* argument because the report form is the one an
+     * operator types when they cannot remember what they set.
+     */
+    private fun parseScreen(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return SCREEN_USAGE
+        when (tokens[0].text.lowercase()) {
+            "on" -> return if (tokens.size > 1) SCREEN_USAGE else Command.ScreenOn
+            "off" -> return if (tokens.size > 1) SCREEN_USAGE else Command.ScreenOff
+            "stayon", "stay-on" -> {
+                if (tokens.size == 1) return Command.ScreenStayOn(null)
+                if (tokens.size > 2) return SCREEN_USAGE
+                return when (tokens[1].text.lowercase()) {
+                    "on", "1", "true" -> Command.ScreenStayOn(true)
+                    "off", "0", "false" -> Command.ScreenStayOn(false)
+                    else -> SCREEN_USAGE
+                }
+            }
+
+            "timeout" -> {
+                if (tokens.size != 2) return SCREEN_USAGE
+                val parsed = tokens[1].text.toLongOrNull() ?: return SCREEN_USAGE
+                return Command.ScreenTimeout(ScreenPlan.clampTimeout(parsed))
+            }
+
+            else -> return SCREEN_USAGE
+        }
+    }
+
+    /**
+     * `sms [list] [n] | sms send [apply] NUMBER TEXT` (SPEC.md section 3.12).
+     *
+     * The number is normalised at parse time so a typo never reaches the
+     * telephony stack; the body keeps its inner spacing verbatim.
+     */
+    private fun parseSms(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return SMS_USAGE
+        return when (tokens[0].text.lowercase()) {
+            "list" -> {
+                if (tokens.size > 2) return SMS_USAGE
+                if (tokens.size == 1) return Command.SmsList(SmsPlan.LIMIT_DEFAULT)
+                val parsed = tokens[1].text.toIntOrNull() ?: return SMS_USAGE
+                Command.SmsList(SmsPlan.clampLimit(parsed))
+            }
+
+            "send" -> {
+                var index = 1
+                var apply = false
+                if (index < tokens.size && tokens[index].text.equals("apply", ignoreCase = true)) {
+                    apply = true
+                    index++
+                }
+                if (index >= tokens.size) return SMS_USAGE
+                val number = SmsPlan.normalizeNumber(tokens[index].text) ?: return SMS_USAGE
+                val afterNumber = tokens[index].start + tokens[index].text.length
+                val body = dropLeadingWhitespace(rest.substring(afterNumber)).trim()
+                if (body.isEmpty()) return SMS_USAGE
+                Command.SmsSend(number, body, apply)
+            }
+
+            else -> SMS_USAGE
+        }
+    }
+
+    /** `anim [get] | anim set on|off|SCALE | anim save | anim restore` (§3.11). */
+    private fun parseAnim(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return Command.AnimGet
+        return when (tokens[0].text.lowercase()) {
+            "get" -> {
+                if (tokens.size > 1) ANIM_USAGE else Command.AnimGet
+            }
+
+            "set" -> {
+                if (tokens.size != 2) return ANIM_USAGE
+                val value = AnimPlan.scale(tokens[1].text) ?: return ANIM_USAGE
+                Command.AnimSet(value)
+            }
+
+            "save" -> {
+                if (tokens.size > 1) ANIM_USAGE else Command.AnimSave
+            }
+
+            "restore" -> {
+                if (tokens.size > 1) ANIM_USAGE else Command.AnimRestore
+            }
+
+            else -> ANIM_USAGE
+        }
+    }
+
+    /**
+     * `call [apply] NUMBER | call answer | call hangup | call state` (§3.13).
+     *
+     * `answer`, `hangup` and `state` are reserved words, so a number can never
+     * be mistaken for one of them; anything else must normalise to a number.
+     */
+    private fun parseCall(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return CALL_USAGE
+        when (tokens[0].text.lowercase()) {
+            "answer" -> return if (tokens.size > 1) CALL_USAGE else Command.CallAnswer
+            "hangup" -> return if (tokens.size > 1) CALL_USAGE else Command.CallHangup
+            "state" -> return if (tokens.size > 1) CALL_USAGE else Command.CallState
+        }
+        var index = 0
+        var apply = false
+        if (tokens[0].text.equals("apply", ignoreCase = true)) {
+            apply = true
+            index = 1
+        }
+        if (index >= tokens.size) return CALL_USAGE
+        if (tokens.size - index != 1) return CALL_USAGE
+        val number = CallPlan.normalize(tokens[index].text) ?: return CALL_USAGE
+        return Command.CallDial(number, apply)
     }
 
     /** A dotted, non-empty application id: what `uninstall` accepts. */

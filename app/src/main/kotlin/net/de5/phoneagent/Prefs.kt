@@ -53,6 +53,45 @@ class Prefs(context: Context) {
             sp.edit().putInt(KEY_LOCATION_INTERVAL, value).apply()
         }
 
+    /**
+     * The three animation scales as they were when `anim save` ran.
+     *
+     * Null means "never saved", which `anim restore` reports as an error rather
+     * than silently writing a guess: restoring a wrong scale is worse than
+     * refusing, because the phone then animates at a speed its owner never chose.
+     */
+    var animWindow: String?
+        get() = sp.getString(KEY_ANIM_WINDOW, null)
+        set(value) {
+            sp.edit().putString(KEY_ANIM_WINDOW, value).apply()
+        }
+
+    var animTransition: String?
+        get() = sp.getString(KEY_ANIM_TRANSITION, null)
+        set(value) {
+            sp.edit().putString(KEY_ANIM_TRANSITION, value).apply()
+        }
+
+    var animAnimator: String?
+        get() = sp.getString(KEY_ANIM_ANIMATOR, null)
+        set(value) {
+            sp.edit().putString(KEY_ANIM_ANIMATOR, value).apply()
+        }
+
+    /**
+     * "Keep the panel on" (`screen stayon on`).
+     *
+     * Stored because `Settings.System.SCREEN_OFF_TIMEOUT` does not survive a
+     * reboot: the ROM rewrites it from its own default on every boot, so the
+     * decision has to live somewhere we control and be re-applied by
+     * [BootReceiver].
+     */
+    var stayOn: Boolean
+        get() = sp.getBoolean(KEY_STAY_ON, false)
+        set(value) {
+            sp.edit().putBoolean(KEY_STAY_ON, value).apply()
+        }
+
     /** The agent cannot dial out without both of these. */
     fun isConfigured(): Boolean = relayBase.isNotBlank() && secret.isNotBlank()
 
@@ -63,6 +102,10 @@ class Prefs(context: Context) {
         const val KEY_AGENT_ID = "agent_id"
         const val KEY_AUTO_START = "auto_start"
         const val KEY_LOCATION_INTERVAL = "location_interval"
+        const val KEY_ANIM_WINDOW = "anim_window"
+        const val KEY_ANIM_TRANSITION = "anim_transition"
+        const val KEY_ANIM_ANIMATOR = "anim_animator"
+        const val KEY_STAY_ON = "stay_on"
 
         /**
          * The direct route on the operator's *own paid* domain, no Cloudflare in

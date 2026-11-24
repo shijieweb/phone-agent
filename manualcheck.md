@@ -53,6 +53,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File D:\aiagent\projects\vpsm
 | 3 | Location — all the time | same button | second dialog; **must** pick "始终允许" |
 | 4 | Accessibility | "打开无障碍设置" button | find "phone-agent", enable it → status line shows `无障碍: 已连接` |
 | 5 | Battery unrestricted | "打开电池优化设置" button | pick "不优化" / "无限制" |
+| 6 | Screen stay-on (optional) | `屏幕常亮` checkbox | ticks itself only if the write landed; if it springs back, step 2.6 below is missing |
+| 7 | v0.4.0 device surfaces | one USB session, see 2.5–2.7 | `admin status` prints `扩展权限:` and says which of them are on |
+
+### 2.5 The three doors that `pm grant` cannot open
+
+Each of these is a *different* kind of permission; run the one line and confirm
+the state flips in `admin status` (the `扩展权限:` block, SPEC.md §3.10).
+
+| Surface | Command | Expect |
+| --- | --- | --- |
+| `files` | `adb shell appops set net.de5.phoneagent MANAGE_EXTERNAL_STORAGE allow` | `所有文件访问=已开启`; `files ls` lists `/sdcard` |
+| `notif` | `adb shell cmd notification allow_listener net.de5.phoneagent/net.de5.phoneagent.NotifListenerService` | `通知使用权=已开启`; `notif` lists live notifications |
+| `anim`, `screen` | `adb shell pm grant net.de5.phoneagent android.permission.WRITE_SECURE_SETTINGS` | `WRITE_SECURE_SETTINGS=已授予`; `screen stayon on` succeeds |
+
+### 2.6 The ordinary runtime grants (one line, all of them)
+
+```
+adb shell "pm grant net.de5.phoneagent android.permission.READ_SMS; pm grant net.de5.phoneagent android.permission.SEND_SMS; pm grant net.de5.phoneagent android.permission.READ_PHONE_STATE; pm grant net.de5.phoneagent android.permission.READ_CALL_LOG; pm grant net.de5.phoneagent android.permission.CALL_PHONE; pm grant net.de5.phoneagent android.permission.ANSWER_PHONE_CALLS; pm grant net.de5.phoneagent android.permission.READ_CONTACTS; pm grant net.de5.phoneagent android.permission.RECORD_AUDIO; pm grant net.de5.phoneagent android.permission.READ_CALENDAR"
+```
+
+### 2.7 What no grant can buy
+
+`call` can dial, answer, hang up and switch the speaker, but it cannot carry the
+call audio: that path runs through the modem and the audio HAL, and reading it
+back needs `CAPTURE_AUDIO_OUTPUT` (signature-level). `RECORD_AUDIO` records the
+microphone, which is **not** a call recording. `SET_ANIMATION_SCALE` and
+`MODIFY_PHONE_STATE` are `signature|privileged`; they are declared only for
+completeness and no command depends on them.
 
 On a sideloaded app Android may refuse step 4 with *"受限设置"*. If that
 happens, connect USB once and run:
@@ -120,7 +148,7 @@ and compare against the expectation below.
 | `a11y heal` | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
 | `install <url>` | exit 0, stdout `已拉起安装确认页（需确认安装）: …`; the system installer appears. Ctrl path: `confirm 安装` (dry run — check the node) then `confirm apply 安装` |
 | `confirm 安装` | exit 0, stdout `dry-run: would confirm "安装" via=… pkg=com.android.packageinstaller node=… at=…` — the installer is **not** pressed (it takes one look, no polling) |
-| `confirm apply t=30 安装` | exit 0, stdout `confirmed "安装" via=action|ancestor|gesture pkg=com.android.packageinstaller node=… at=… attempts=…`; the install proceeds |
+| `confirm apply t=30 安装` | exit 0, stdout `confirmed "安装" via=action\|ancestor\|gesture pkg=com.android.packageinstaller node=… at=… attempts=…`; the install proceeds |
 | `uninstall <pkg>` | exit 0, stdout `已拉起卸载确认页（需确认卸载）: <pkg>` (or `包未安装…（无需卸载）`); then `confirm apply 确定` |
 | `lock` | exit 0, stdout `已锁屏`; the screen locks |
 | `reboot` | exit 6 `重启需要系统签名权限（REBOOT），侧载应用无法申请；平板已设 DO 也不够，只能手动重启或 root`. There is no configuration that makes this succeed — see SPEC.md §3.5 |
@@ -133,6 +161,50 @@ and compare against the expectation below.
 | `stop` then look at the app | the status line says `服务: 已停止`, the button reads `启动`, and the `开机自动启动` checkbox is **unchecked** (stop cleared it) |
 | press `启动` | service runs and the checkbox is ticked again — start re-arms auto-start |
 | reboot after `stop` | the agent stays down; nothing starts it (this is the whole point of the toggle). After a `启动` press, a reboot brings it back as before |
+| `files ls` | exit 0, first line `/sdcard (N 项)`, then `d\|-` rows with size and `yyyy-MM-dd HH:mm`. Open 文件管理 and compare the count |
+| `files ls DCIM 5` | at most 5 rows plus `，只显示前 5 项` when DCIM has more |
+| `files ls ../etc` | exit 2, `路径不可用: /etc（只允许 /sdcard 内的路径）` — **must not** list anything |
+| `files info /sdcard/DCIM` | exit 0, four lines: path, `类型: 目录`, `大小: -`, `修改: …` |
+| `files cat <a small text file>` | exit 0, the file's text verbatim |
+| `files cat <a video or a >64 KiB log>` | exit 2 with the reason (binary / too large) — never a truncated dump |
+| `files mkdir /sdcard/tmp-check` | exit 0; the directory appears in 文件管理. Run it twice: the second is still exit 0 |
+| `files rm /sdcard/tmp-check` | exit 0, dry run: names the absolute path and the `files rm apply …` line. **The directory must still exist** |
+| `files rm apply /sdcard/tmp-check` | exit 0, the directory is gone |
+| `files rm apply /sdcard` | exit 2 — a root is refused unconditionally |
+| `notif` with notification access granted | exit 0, `通知 N 条`, then `- pkg \| title \| text` lines; a music player shows a leading `*` (ongoing) |
+| `notif 3` | at most 3 lines plus `（只显示前 3 条）` |
+| `notif q=<a word from a visible notification>` | only matching lines; an unmatched word answers `没有匹配的通知` |
+| `notif` with notification access **revoked** | exit 0, one sentence containing `cmd notification allow_listener` — no stack trace, no empty success |
+| `say 你好` | exit 0, stdout `已朗读 2 字（lang=zh rate=100 pitch=100）` and the phone **says it out loud** |
+| `say -l en hello world` | the English voice reads "hello world"; the report says `lang=en` |
+| `say rate=200 pitch=90 测试` | faster and lower than the default, and the report echoes both numbers |
+| `say -l fr bonjour` | exit 2 (usage) — an unknown language is refused, never read with a Chinese voice |
+| `say` with no text | exit 2, usage `say [-l zh\|en] [rate=PERCENT] [pitch=PERCENT] TEXT` |
+| `screen stayon on` | exit 0, `已开启常亮（屏幕超时=永不）`; 设置 → 显示 → 休眠 shows 永不; the panel stays lit for 5 minutes untouched |
+| `screen stayon` | exit 0, `常亮: 开 当前超时=永不` — and nothing changes |
+| `screen stayon off` | exit 0, `已关闭常亮（屏幕超时=60s）`; 休眠 is back to 1 分钟 |
+| `screen timeout 120000` | exit 0, `已设置屏幕超时=120s`; then `screen stayon` reports `常亮: 关 当前超时=120s` (a hand-typed timeout clears the flag) |
+| `screen timeout 1` | clamped: `已设置屏幕超时=15s` |
+| `screen on` while the panel is dark | the panel lights up; if the ROM refuses, the sentence says `但屏幕仍是熄的` — that is a reported restriction, not a crash |
+| `screen off` | the panel goes dark **and the phone locks** (device admin must be active) |
+| reboot with `stayon on` | after boot, **before** the agent even connects, `screen stayon` reports `常亮: 开` and 休眠 is 永不 — the re-apply runs from `BootReceiver` |
+| tick `屏幕常亮` in the app | the checkbox stays ticked and 休眠 becomes 永不; untick it and both revert. With `WRITE_SECURE_SETTINGS` revoked the box springs back unchecked — it never shows a state that is not in force |
+| `anim` | exit 0, one line `window=… transition=… animator=…` matching 设置 → 开发者选项 |
+| `anim set off` | exit 0, `已把三项动画缩放设为 0`; opening an app has no animation |
+| `anim set 0.5` | the three scales read `0.5` in developer options |
+| `anim set 99` | exit 2 (usage) — out of range is refused |
+| `anim save` then `anim set off` then `anim restore` | restore puts back the values `save` reported; without a prior `save`, restore answers `没有保存过动画设置` |
+| `sms` | exit 0, `短信 N 条`, then `<` (received) / `>` (sent) lines, newest first; messages older than 7 days must not appear |
+| `sms send 13800000000 测试` | exit 0, **dry run**: `将发送短信到 13800000000: 测试（dry-run…）` and **no SMS is sent** |
+| `sms send apply 13800000000 测试` | the SMS arrives on that phone; stdout `已发送短信到 13800000000（2 字）` |
+| `sms send abc 测试` | exit 2 — a number that does not normalise is refused before anything is sent |
+| `call 13800000000` | exit 0, `将拨号 13800000000（dry-run：未真正拨出…）` and **no call is placed** |
+| `call apply 13800000000` | the dialer opens on that number and the call is placed (with `CALL_PHONE`) |
+| `call answer` while ringing | exit 0, `已接听`; the call connects. Without `ANSWER_PHONE_CALLS`: exit 6 naming the `pm grant` line |
+| `call hangup` during a call | exit 0, `已挂断`; the call ends |
+| `call state` | `通话状态: 空闲` / `响铃中` / `通话中` matching the phone |
+| `call speaker on` during a call | audio moves to the loudspeaker; `call speaker off` moves it back |
+| `admin status` after the v0.4.0 grants | the `扩展权限:` block lists each permission with `已授予/未授予` plus 所有文件访问 / 悬浮窗 / 勿扰权限 / 通知使用权, each carrying the adb line when it is off |
 
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
@@ -238,3 +310,8 @@ downloads, no background syncing.
 needs (`REBOOT`) is signature-level, and the Device Owner door needs a
 factory-reset provisioning this build never asks for. See SPEC.md §3.5. `lock`
 does work, because a device admin can be activated by hand.
+
+`call` controls a call but never carries its audio — see 2.7. `files` cannot
+leave `/sdcard`, and `files rm` is a dry run until `apply`; there is no move,
+no copy and no arbitrary path. `sms send` and `call NUMBER` are dry runs until
+`apply`, because both reach a real person and neither can be recalled.

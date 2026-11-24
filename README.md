@@ -25,6 +25,13 @@ nothing needs to be exposed on the phone's network.
 | Privileged | `settings`, `logs`, `a11y heal`, `admin status\|release`, `lock` (works), `reboot` (always exit 6 — see below) |
 | Wireless ADB | `adbinfo` (IP + mDNS port + `adb connect` string), `adbheal [t=N]` (bounce wireless debugging off/on, then rediscover — this drops a live adb session). The port is also rediscovered on its own ~20 s after boot, and when the cache is 30 min stale, so `adb connect` keeps working without a command |
 | Files | `dl <url> [name]` — download into `/sdcard/Movies` and media-scan it so VLC lists it (cap 2 GB, `t=` timeout) |
+| Storage | `files ls [path] [n]`, `files cat`, `files info`, `files mkdir`, `files rm [apply]` — **`/sdcard` only**, never outside it; `rm` is a dry run until `apply` |
+| Notifications | `notif [n] [q=text]` — the active notifications, once notification access is granted |
+| Voice | `say [-l zh\|en] [rate=N] [pitch=N] <text>` — speak one sentence through the system TTS engine (Chinese by default) |
+| Screen | `screen stayon [on\|off]` (sticky across reboots), `screen timeout <ms>`, `screen on`, `screen off`; the same stay-on switch is a checkbox in the app |
+| SMS | `sms [list [n]]`, `sms send [apply] <number> <text>` — sending is a dry run until `apply` |
+| Calls | `call [apply] <number>` (dry run until `apply`), `call answer`, `call hangup`, `call state`, `call speaker on\|off` |
+| Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative: pressing it in the app also clears "start on boot", so
@@ -57,6 +64,29 @@ see which button it would press before letting it press anything.
 What `adb shell pm grant` *can* hand over is `WRITE_SECURE_SETTINGS`, `READ_LOGS`,
 `DUMP` and `PACKAGE_USAGE_STATS`; `admin status` reports each one's real state and
 every command that needs one fails with `exit=6` and the exact grant line.
+
+**Call audio is out of reach, and `call` does not pretend otherwise.** `call` can
+place, answer, hang up and switch the speaker, but it cannot carry the call
+itself: call audio goes through the modem and the audio HAL, and reading it back
+needs `CAPTURE_AUDIO_OUTPUT`, which is signature-level. Recording the microphone
+(`RECORD_AUDIO`) is a different thing and is not a call recording.
+
+Three of the v0.4.0 surfaces have doors that `pm grant` cannot open, so
+`admin status` prints the exact line for each:
+
+- `files` — `adb shell appops set net.de5.phoneagent MANAGE_EXTERNAL_STORAGE allow`
+  (or 设置 → 所有文件访问)
+- `notif` — `adb shell cmd notification allow_listener
+  net.de5.phoneagent/net.de5.phoneagent.NotifListenerService`
+  (or 设置 → 通知使用权)
+- `anim`, `screen` — `adb shell pm grant net.de5.phoneagent
+  android.permission.WRITE_SECURE_SETTINGS` (same door as `settings put`)
+
+`call answer`, `sms`, and reading the call log are ordinary runtime grants
+(`ANSWER_PHONE_CALLS`, `READ_SMS`/`SEND_SMS`, `READ_CALL_LOG`) and `pm grant`
+works. `SET_ANIMATION_SCALE` and `MODIFY_PHONE_STATE` are `signature|privileged`;
+they are declared in the manifest for completeness, but no command depends on
+them — `anim` writes `Settings.Global` through `WRITE_SECURE_SETTINGS`.
 
 **No reboot, either.** `reboot` always answers exit 6, and no setup changes that:
 `PowerManager.reboot` needs `REBOOT`, which is `signature|privileged` (the same
