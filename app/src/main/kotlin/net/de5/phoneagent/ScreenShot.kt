@@ -60,6 +60,28 @@ object ShotLadder {
     }
 }
 
+/** One encoded JPEG plus the geometry and quality that produced it. */
+data class ShotJpeg(
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val quality: Int
+) {
+    val size: Int get() = bytes.size
+}
+
+/** Result of [ScreenShot.captureJpeg]: either the JPEG or the failure to report. */
+sealed class ShotCapture {
+    class Ok(val jpeg: ShotJpeg) : ShotCapture()
+    class Failed(val result: ExecutionResult) : ShotCapture()
+}
+
+/** Raw bitmap or the error to report — internal to [ScreenShot]. */
+sealed class Grabbed {
+    class Ok(val bitmap: Bitmap) : Grabbed()
+    class Failed(val result: ExecutionResult) : Grabbed()
+}
+
 /**
  * Accessibility screenshot -> downscaled JPEG -> base64 (SPEC.md section 4).
  *
@@ -76,7 +98,50 @@ object ScreenShot {
     /** The platform hands the bitmap back here, off the main thread. */
     private val callbackExecutor: Executor = Executors.newSingleThreadExecutor()
 
+    /**
+     * Base64 path, unchanged since v0.2: the re-encode ladder guarantees the
+     * stdout payload always fits the relay's 200 000 char budget.
+     */
     fun capture(service: AccessibilityService, maxPx: Int, quality: Int): ExecutionResult {
+        return when (val grabbed = grabBitmap(service)) {
+            is Grabbed.Failed -> grabbed.result
+            is Grabbed.Ok -> try {
+                encodeWithLadder(grabbed.bitmap, maxPx, quality)
+            } finally {
+                grabbed.bitmap.recycle()
+            }
+        }
+    }
+
+    /**
+     * Blob path: one screenshot, one JPEG, no ladder.
+     *
+     * The bytes are meant to travel through `PUT /agent/blob` where no 200 000
+     * char ceiling applies, so downscaling further would only cost quality.
+     */
+    fun captureJpeg(service: AccessibilityService, maxPx: Int, quality: Int): ShotCapture {
+        val grabbed = grabBitmap(service)
+        if (grabbed is Grabbed.Failed) return ShotCapture.Failed(grabbed.result)
+        val source = (grabbed as Grabbed.Ok).bitmap
+        return try {
+            val scaled = scale(source, maxPx)
+                ?: return ShotCapture.Failed(ExecutionResult(EXIT_USAGE, "", "screenshot scale failed"))
+            val width = scaled.width
+            val height = scaled.height
+            val bytes = encodeJpeg(scaled, quality)
+            if (scaled !== source) scaled.recycle()
+            if (bytes.isEmpty()) {
+                ShotCapture.Failed(ExecutionResult(EXIT_USAGE, "", "screenshot encode failed"))
+            } else {
+                ShotCapture.Ok(ShotJpeg(bytes, width, height, quality.coerceIn(QUALITY_MIN, QUALITY_MAX)))
+            }
+        } finally {
+            source.recycle()
+        }
+    }
+
+    /** Screenshot + wrap + recycle, shared by both output paths. */
+    private fun grabBitmap(service: AccessibilityService): Grabbed {
         val latch = CountDownLatch(1)
         var shot: AccessibilityService.ScreenshotResult? = null
         var failure: Int = 0
@@ -104,30 +169,27 @@ object ScreenShot {
             }
         }
 
-        if (!posted) return ExecutionResult(EXIT_TIMEOUT, "", "screenshot could not be dispatched")
+        if (!posted) return Grabbed.Failed(ExecutionResult(EXIT_TIMEOUT, "", "screenshot could not be dispatched"))
         if (!latch.await(CAPTURE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            return ExecutionResult(EXIT_TIMEOUT, "", "screenshot timed out")
+            return Grabbed.Failed(ExecutionResult(EXIT_TIMEOUT, "", "screenshot timed out"))
         }
 
         val result = shot
-        if (result == null) return errorResult(failure)
+        if (result == null) return Grabbed.Failed(errorResult(failure))
 
         val buffer: HardwareBuffer? = result.hardwareBuffer
         if (buffer == null) {
-            return ExecutionResult(EXIT_USAGE, "", "screenshot hardware buffer unavailable")
+            return Grabbed.Failed(ExecutionResult(EXIT_USAGE, "", "screenshot hardware buffer unavailable"))
         }
 
         // SPEC.md section 4: wrap, close the hardware buffer immediately, then
         // scale down.
         val source: Bitmap? = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
         buffer.close()
-        if (source == null) return ExecutionResult(EXIT_USAGE, "", "screenshot decode failed")
-
-        return try {
-            encodeWithLadder(source, maxPx, quality)
-        } finally {
-            source.recycle()
+        if (source == null) {
+            return Grabbed.Failed(ExecutionResult(EXIT_USAGE, "", "screenshot decode failed"))
         }
+        return Grabbed.Ok(source)
     }
 
     private fun encodeWithLadder(source: Bitmap, maxPx: Int, quality: Int): ExecutionResult {

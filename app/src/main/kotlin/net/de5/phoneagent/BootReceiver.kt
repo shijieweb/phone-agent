@@ -21,15 +21,22 @@ class BootReceiver : BroadcastReceiver() {
             return
         }
 
+        // One pure rule decides this, shared with the start button so the two can
+        // never disagree (SPEC.md section 7).
         val prefs = Prefs(ctx)
-        if (!prefs.autoStart) return
-        if (!prefs.isConfigured()) return
+        if (!StartPolicy.shouldAutoStart(prefs.autoStart, prefs.isConfigured())) return
 
         try {
             ctx.startForegroundService(Intent(ctx, RcAgentService::class.java))
         } catch (t: Throwable) {
             // Background start restrictions: there is nothing to retry here.
         }
+
+        // The wireless-debugging port is new after every boot and nothing stores
+        // it, so rediscover it in the background (SPEC.md section 3.4). This
+        // returns immediately; the discovery itself runs ~20 s later, once Wi-Fi
+        // is actually up.
+        BootHeal.schedule(ctx)
     }
 
     companion object {

@@ -17,6 +17,7 @@ class ClickInspectionTest {
 
     private class FakeNode(
         override val className: String? = null,
+        override val packageName: String? = null,
         override val text: String? = null,
         override val desc: String? = null,
         override val resId: String? = null,

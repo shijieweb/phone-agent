@@ -28,5 +28,10 @@
         <domain includeSubdomains="false">10.0.2.2</domain>
         <!-- The operator's LAN address (reserved on the router, so it is stable). -->
         <domain includeSubdomains="false">192.168.5.200</domain>
+        <!-- Public relay on the Seoul VPS (2026-11-23): the operator moved the
+             relay off the dead BandwagonHost to 43.166.6.110 and drives it by
+             IP, so this host must also be allowed to speak plain HTTP. The
+             entry is protected by the shared 64-hex X-RC-Secret header. -->
+        <domain includeSubdomains="false">43.166.6.110</domain>
     </domain-config>
 </network-security-config>

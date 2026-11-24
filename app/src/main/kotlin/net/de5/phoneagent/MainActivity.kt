@@ -11,6 +11,7 @@ import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -30,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var idEdit: EditText
     private lateinit var secretEdit: EditText
     private lateinit var toggleButton: Button
+    private lateinit var autoStartBox: CheckBox
     private lateinit var statusView: TextView
 
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -62,6 +64,11 @@ class MainActivity : Activity() {
 
         addButton(root, "保存") { save() }
         toggleButton = addButton(root, "启动") { toggleAgent() }
+        autoStartBox = addCheckBox(root, "开机自动启动", prefs.autoStart) { checked ->
+            prefs.autoStart = checked
+            refreshStatus()
+        }
+        addLabel(root, StartPolicy.HINT)
         addButton(root, "请求权限") { requestAgentPermissions() }
         addButton(root, "打开无障碍设置") { openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS) }
         addButton(root, "加入电池白名单") { requestBatteryExemption() }
@@ -113,16 +120,20 @@ class MainActivity : Activity() {
         refreshStatus()
     }
 
+    /**
+     * Start/stop, plus the auto-start flag — both directions, one decision.
+     *
+     * The flag is written *before* the service is touched: if the stop is slow
+     * or throws, auto-start is already off and a reboot cannot resurrect the
+     * agent the operator just switched off.
+     */
     private fun toggleAgent() {
-        if (RcAgentService.running) {
-            try {
-                stopService(Intent(this, RcAgentService::class.java))
-            } catch (t: Throwable) {
-                statusView.text = "停止失败: " + (t.message ?: "")
-            }
-        } else {
+        val decision = StartPolicy.onToggle(RcAgentService.running)
+        prefs.autoStart = decision.autoStart
+        if (decision.start) {
             if (!prefs.isConfigured()) {
                 statusView.text = "未配置 relay 地址或口令"
+                syncAutoStartBox()
                 return
             }
             try {
@@ -130,20 +141,35 @@ class MainActivity : Activity() {
             } catch (t: Throwable) {
                 statusView.text = "启动失败: " + (t.message ?: "")
             }
+        } else {
+            try {
+                stopService(Intent(this, RcAgentService::class.java))
+            } catch (t: Throwable) {
+                statusView.text = "停止失败: " + (t.message ?: "")
+            }
         }
+        syncAutoStartBox()
         refreshStatus()
+    }
+
+    /** The checkbox mirrors the stored flag, so a button press never lies about it. */
+    private fun syncAutoStartBox() {
+        autoStartBox.isChecked = prefs.autoStart
     }
 
     private fun requestAgentPermissions() {
         askedBackgroundLocation = false
-        requestPermissions(
-            arrayOf(
-                Manifest.permission.POST_NOTIFICATIONS,
-                Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
-            ),
-            REQ_PERMISSIONS
+        // POST_NOTIFICATIONS only exists from API 33. On 31/32 it is granted at
+        // install time; naming it in a runtime request makes some ROMs drop the
+        // whole array, which would also lose the location grants.
+        val wanted = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            wanted.add(0, Manifest.permission.POST_NOTIFICATIONS)
+        }
+        requestPermissions(wanted.toTypedArray(), REQ_PERMISSIONS)
     }
 
     private fun openSettings(action: String) {
@@ -178,6 +204,7 @@ class MainActivity : Activity() {
         statusView.text = RcAgentService.snapshot() +
             "\n电池白名单: " + Battery.flag(this)
         toggleButton.text = if (RcAgentService.running) "停止" else "启动"
+        if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
     }
 
     /**
@@ -228,6 +255,26 @@ class MainActivity : Activity() {
             )
         )
         return edit
+    }
+
+    private fun addCheckBox(
+        parent: LinearLayout,
+        text: String,
+        checked: Boolean,
+        onChanged: (Boolean) -> Unit
+    ): CheckBox {
+        val box = CheckBox(this)
+        box.text = text
+        box.isChecked = checked
+        box.setOnCheckedChangeListener { _, value -> onChanged(value) }
+        parent.addView(
+            box,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        return box
     }
 
     private fun addButton(parent: LinearLayout, text: String, onClick: () -> Unit): Button {

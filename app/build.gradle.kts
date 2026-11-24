@@ -39,7 +39,7 @@ android {
 
     defaultConfig {
         applicationId = "net.de5.phoneagent"
-        minSdk = 33
+        minSdk = 31
         targetSdk = 34
         versionCode = (project.findProperty("APP_VERSION_CODE") as String? ?: "2").toInt()
         versionName = project.findProperty("APP_VERSION_NAME") as String? ?: "0.2.0"

@@ -1,7 +1,9 @@
 package net.de5.phoneagent
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -16,6 +18,7 @@ class ElementActionLogicTest {
 
     private class FakeNode(
         override val className: String? = null,
+        override val packageName: String? = null,
         override val text: String? = null,
         override val desc: String? = null,
         override val resId: String? = null,
@@ -100,6 +103,87 @@ class ElementActionLogicTest {
         assertNull(ElementActions.centreOf(NodeBounds(-100, -100, 10, 10)))
     }
 
+    // ------------------------------------------------------- confirm scanning
+
+    /**
+     * The bug this section exists for: `confirm zzqq_no_such_button` reported
+     * success on a real tablet by tapping our own status line, because the
+     * matcher only looked at text and the gesture fallback then tapped whatever
+     * bounds the match happened to have. A label that cannot receive a click is
+     * not a candidate.
+     */
+    @Test
+    fun plainTextWithNoClickableAncestorIsNotACandidate() {
+        val status = node(
+            className = "android.widget.TextView",
+            text = "服务: 运行中 / 无障碍: 已开启",
+            bounds = NodeBounds(0, 900, 2000, 1000)
+        )
+        val scan = ElementActions.scanLabelIn("zzqq_no_such_button", listOf(status))
+        assertNull(scan.first)
+        assertEquals(0, scan.matches)
+
+        val inert = ElementActions.scanLabelIn("运行中", listOf(status))
+        assertNull(inert.first)
+        assertEquals(1, inert.matches)
+        assertEquals(1, inert.inertMatches)
+    }
+
+    @Test
+    fun aClickableButtonIsACandidate() {
+        val button = node(
+            className = "android.widget.Button",
+            text = "安装",
+            bounds = NodeBounds(100, 100, 300, 200),
+            clickable = true
+        )
+        val scan = ElementActions.scanLabelIn("安装", listOf(button))
+        assertNotNull(scan.first)
+        assertEquals(0, scan.first!!.hit!!.ancestorDepth)
+        assertEquals(0, scan.inertMatches)
+    }
+
+    @Test
+    fun aLabelInsideAClickableRowResolvesToTheRow() {
+        // The label is not clickable by itself; its parent list row is. This is
+        // the normal shape of a settings list on every ROM.
+        val label = node(text = "继续安装", bounds = NodeBounds(10, 10, 300, 100))
+        val row = FakeNode(
+            clickable = true,
+            bounds = NodeBounds(0, 0, 1000, 200),
+            children = listOf(label)
+        )
+        val scan = ElementActions.scanLabelIn("继续安装", listOf(row))
+        assertNotNull(scan.first)
+        val hit = scan.first!!.hit!!
+        assertEquals("继续安装", hit.node.text)
+        assertTrue("depth must be > 0 when the click goes to an ancestor", hit.ancestorDepth > 0)
+        assertEquals(0, scan.inertMatches)
+    }
+
+    @Test
+    fun theInstallerPackageWinsOverAnIdenticalLabelElsewhere() {
+        val otherApp = node(
+            className = "android.widget.Button",
+            text = "安装",
+            bounds = NodeBounds(0, 1600, 400, 1700),
+            clickable = true,
+            packageName = "com.example.someapp"
+        )
+        val installer = node(
+            className = "android.widget.Button",
+            text = "安装",
+            bounds = NodeBounds(1200, 900, 1900, 1000),
+            clickable = true,
+            packageName = "com.android.packageinstaller"
+        )
+        // The decoy comes first in walk order; the installer's button must still win.
+        val scan = ElementActions.scanLabelIn("安装", listOf(otherApp, installer))
+        assertNotNull(scan.first)
+        assertEquals("com.android.packageinstaller", scan.first!!.hit!!.node.packageName)
+        assertEquals(2, scan.matches)
+    }
+
     private fun node(
         className: String? = null,
         text: String? = null,
@@ -108,9 +192,11 @@ class ElementActionLogicTest {
         bounds: NodeBounds? = null,
         clickable: Boolean = false,
         scrollable: Boolean = false,
+        packageName: String? = null,
         children: List<NodeView> = emptyList()
     ): FakeNode = FakeNode(
         className = className,
+        packageName = packageName,
         text = text,
         desc = desc,
         resId = resId,

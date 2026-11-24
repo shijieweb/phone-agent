@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Device-admin policy declaration.
+
+  What actually matters here is that this file exists and is referenced from the
+  .AgentDeviceAdmin receiver: an app can only become Device Owner through
+  `dpm set-device-owner` (or an NFC/QR provisioning flow) if it declares a
+  DeviceAdminReceiver with a device-admin policy file. On a Device Owner these
+  <uses-policies> entries are *declarations*, not limits - a DO can still drive
+  settings, install and uninstall packages, lock and reboot the device through
+  DevicePolicyManager regardless of this list.
+
+  `wipe-data` is declared because a DO fallback needs it if the operator ever
+  asks for a factory reset path; nothing in this build calls wipeData().
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+        <wipe-data />
+        <reset-password />
+        <limit-password />
+        <watch-login />
+        <expire-password />
+        <encrypted-storage />
+        <disable-camera />
+    </uses-policies>
+</device-admin>

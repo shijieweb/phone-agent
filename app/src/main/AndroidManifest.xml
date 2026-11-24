@@ -35,6 +35,40 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
+    <!-- Lets the installer UI read the APK we hand it as content:// (see
+         ApkProvider). Without this app-op the system shows its own warning and
+         refuses, which is reported as a normal error by `install`. -->
+    <!-- `adbinfo` / `adbheal` listen for the `_adb-tls-connect._tcp` mDNS
+         advertisement. The multicast lock is a normal permission; without it
+         several ROMs drop the mDNS packet before it ever reaches an app. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <!-- ================== PRIVILEGED ==================
+         Two families, and only one of them is reachable from a sideloaded app:
+
+         signature|privileged|development — grantable with
+             `adb shell pm grant net.de5.phoneagent <permission>`,
+         because the `development` flag exists precisely for this. These are the
+         permissions the privileged commands are actually built on, and each is
+         checked at runtime with checkSelfPermission.
+
+         signature|privileged (INSTALL_PACKAGES / DELETE_PACKAGES / REBOOT) —
+         platform-signed or /system/priv-app only. **Device Owner is not enough
+         and pm grant is refused**, so no command may assume them: install and
+         uninstall go through the system confirmation UI (`confirm` presses the
+         button), and reboot reports why it cannot. Declaring them here is
+         harmless and keeps the door open if this is ever pushed to priv-app. -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+    <uses-permission android:name="android.permission.READ_LOGS" />
+    <uses-permission android:name="android.permission.DUMP" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.DELETE_PACKAGES" />
+    <uses-permission android:name="android.permission.REBOOT" />
+    <uses-permission android:name="android.permission.DEVICE_POWER" />
+
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
@@ -93,6 +127,37 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <!-- ================= DEVICE ADMIN / OWNER =================
+             BIND_DEVICE_ADMIN is what makes this receiver reachable from the
+             system's admin framework; `device_admin.xml` lists the policies we
+             declare (lockNow / reboot / setGlobalSetting need them).
+             Being a *registered admin* and being *Device Owner* are different
+             grants: the admin flag alone allows lockNow, while silent install,
+             uninstall and reboot require the owner role, which is only
+             obtainable at provisioning time. -->
+        <receiver
+            android:name=".AgentDeviceAdmin"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- ================= APK HAND-OFF =================
+             Read-only, not exported: the only reader is whichever component we
+             grant a `content://` URI to from `install`, via the Intent flag.
+             Exists because a file:// URI in an Intent throws
+             FileUriExposedException since Android 7. -->
+        <provider
+            android:name=".ApkProvider"
+            android:authorities="${applicationId}.apk"
+            android:exported="false"
+            android:grantUriPermissions="true" />
 
         <!-- ==================== BOOT ==================== -->
         <receiver

@@ -16,6 +16,8 @@ data class NodeBounds(val left: Int, val top: Int, val right: Int, val bottom: I
  */
 interface NodeView {
     val className: String?
+    /** Owning package, when the framework exposes it; null in plain-JVM tests. */
+    val packageName: String?
     val text: String?
     val desc: String?
     val resId: String?
@@ -156,6 +158,14 @@ open class AccessibilityNodeAdapter(private val node: AccessibilityNodeInfo) : N
 
     override val className: String?
         get() = node.className?.toString()
+
+    /**
+     * The package that owns the node. Used by `confirm` to prefer the system
+     * installer's own buttons over an identically-labelled button in whatever
+     * app happens to be behind it.
+     */
+    override val packageName: String?
+        get() = node.packageName?.toString()
 
     override val text: String?
         get() = node.text?.toString()

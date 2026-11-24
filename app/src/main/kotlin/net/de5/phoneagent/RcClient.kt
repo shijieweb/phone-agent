@@ -21,6 +21,16 @@ data class PollResult(
 )
 
 /**
+ * Outcome of one blob upload.
+ *
+ * [bytes] is the number of bytes the relay accepted, or -1 on failure, in which
+ * case [error] says why in one short line that is safe to paste into stderr.
+ */
+data class BlobUpload(val bytes: Int, val error: String?) {
+    val ok: Boolean get() = error == null
+}
+
+/**
  * The three relay calls of SPEC.md section 2, on `java.net.HttpURLConnection`.
  *
  * Every call opens a fresh connection, so this class is safe to use from the
@@ -93,6 +103,87 @@ class RcClient(
         return response.optBoolean("ok", false)
     }
 
+    /**
+     * Push raw bytes to `/agent/blob/<name>` (SPEC.md section 2).
+     *
+     * The body is the file itself — no base64, no JSON — so a full-size
+     * screenshot crosses the relay without ever touching the 200 KB stdout
+     * budget. Every failure is swallowed into a [BlobUpload] with `bytes = -1`;
+     * the caller decides whether to fall back.
+     */
+    fun uploadBlob(name: String, bytes: ByteArray): BlobUpload {
+        if (!ShotBlob.isValidName(name)) {
+            return BlobUpload(-1, "invalid blob name: " + name)
+        }
+        if (bytes.isEmpty()) return BlobUpload(-1, "empty blob")
+        if (bytes.size.toLong() > ShotBlob.MAX_BYTES) {
+            return BlobUpload(-1, "blob too large: " + bytes.size + " bytes")
+        }
+
+        val path = "/agent/blob/" + name
+        return try {
+            val url = URL(joinUrl(baseUrl, path))
+            val connection = url.openConnection() as HttpURLConnection
+            try {
+                connection.requestMethod = "PUT"
+                connection.setRequestProperty("X-RC-Secret", secret)
+                connection.setRequestProperty("Content-Type", "application/octet-stream")
+                connection.setRequestProperty("Accept", "application/json")
+                connection.connectTimeout = BLOB_CONNECT_TIMEOUT_MS
+                connection.readTimeout = BLOB_READ_TIMEOUT_MS
+                connection.doOutput = true
+                connection.doInput = true
+                connection.instanceFollowRedirects = true
+
+                connection.setFixedLengthStreamingMode(bytes.size)
+                val out = connection.outputStream
+                try {
+                    out.write(bytes)
+                    out.flush()
+                } finally {
+                    out.close()
+                }
+
+                val code = connection.responseCode
+                if (code < 200 || code > 299) {
+                    BlobUpload(-1, "HTTP " + code)
+                } else {
+                    // The ack is tiny; read it so a rejected-but-200 relay cannot
+                    // pass for a stored blob.
+                    val text = readAll(connection)
+                    if (text.contains("\"ok\":false") || text.contains("\"ok\": false")) {
+                        BlobUpload(-1, "relay rejected the blob")
+                    } else {
+                        BlobUpload(bytes.size, null)
+                    }
+                }
+            } finally {
+                connection.disconnect()
+            }
+        } catch (t: Throwable) {
+            BlobUpload(-1, describe(t))
+        }
+    }
+
+    private fun readAll(connection: HttpURLConnection): String {
+        val stream = try {
+            connection.inputStream
+        } catch (t: Throwable) {
+            return ""
+        } ?: return ""
+        return try {
+            String(stream.readBytes(), Charsets.UTF_8)
+        } catch (t: Throwable) {
+            ""
+        } finally {
+            try {
+                stream.close()
+            } catch (t: Throwable) {
+                // Nothing useful to do: the connection is dropped anyway.
+            }
+        }
+    }
+
     private fun post(path: String, body: JSONObject, readTimeoutMs: Int): JSONObject? {
         val url = URL(joinUrl(baseUrl, path))
         val connection = url.openConnection() as HttpURLConnection
@@ -140,5 +231,9 @@ class RcClient(
         const val CONNECT_TIMEOUT_MS = 10_000
         const val HELLO_READ_TIMEOUT_MS = 15_000
         const val DEFAULT_TIMEOUT = 120
+
+        /** A 16 MB body over a slow uplink needs room; 30 s / 60 s is the contract. */
+        const val BLOB_CONNECT_TIMEOUT_MS = 30_000
+        const val BLOB_READ_TIMEOUT_MS = 60_000
     }
 }

@@ -1,5 +1,6 @@
 package net.de5.phoneagent
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
 import android.os.BatteryManager
@@ -8,6 +9,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
+import android.util.Base64
 import android.view.accessibility.AccessibilityNodeInfo
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
@@ -23,6 +25,17 @@ data class ExecutionResult(
 
 /** The relay truncates stdout at 200 000 chars; stay below that (SPEC.md §2). */
 const val MAX_STDOUT_CHARS = 190_000
+
+/**
+ * Uploads one named blob to the relay.
+ *
+ * A one-method interface rather than a direct [RcClient] dependency so the
+ * executor stays testable and so a missing relay client degrades to the base64
+ * path instead of failing.
+ */
+fun interface BlobUploader {
+    fun upload(name: String, bytes: ByteArray): BlobUpload
+}
 
 internal fun batteryPercent(context: Context): Int {
     return try {
@@ -51,7 +64,18 @@ internal fun deviceEnv(context: Context): String {
         ";acc=" + acc +
         ";bat=" + batteryPercent(context) +
         ";scr=" + scr +
-        ";opt=" + Battery.flag(context)
+        ";opt=" + Battery.flag(context) +
+        adbWifiField()
+}
+
+/**
+ * `adbwifi=<port>` appears only while a port was discovered within the last
+ * 10 minutes; a stale cache is omitted rather than sent as a guess, so the
+ * operator never sees a port that has already moved.
+ */
+private fun adbWifiField(): String {
+    val field = AdbWifi.cachedEnvField() ?: return ""
+    return ";" + field
 }
 
 /**
@@ -66,7 +90,12 @@ class CommandExecutor(
     private val context: Context,
     private val locations: LocationHelper,
     private val onLocationFix: (LocationFix) -> Unit,
-    private val onStopRequested: () -> Unit
+    private val onStopRequested: () -> Unit,
+    /**
+     * Blob transport for `shot`, or null when the caller has no relay client.
+     * A null uploader simply keeps every screenshot on the base64 path.
+     */
+    private val blobs: BlobUploader? = null
 ) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -81,6 +110,15 @@ class CommandExecutor(
 
             is Command.Shot ->
                 shot(command)
+
+            is Command.RcShot ->
+                rcShot(command)
+
+            is Command.RcUnknown ->
+                ExecutionResult(EXIT_USAGE, ShotBlob.error("未知内置动作：" + command.verb), "")
+
+            is Command.RcBadPayload ->
+                ExecutionResult(EXIT_USAGE, ShotBlob.error("bad #rc payload: " + command.detail), "")
 
             is Command.Tree ->
                 tree(command)
@@ -130,6 +168,45 @@ class CommandExecutor(
             is Command.LocStop ->
                 locStop()
 
+            is Command.Install ->
+                install(command)
+
+            is Command.Uninstall ->
+                uninstall(command)
+
+            is Command.Settings ->
+                settings(command)
+
+            is Command.Logs ->
+                logs(command)
+
+            is Command.Confirm ->
+                confirm(command)
+
+            is Command.AdminStatus ->
+                adminStatus()
+
+            is Command.AdminRelease ->
+                adminRelease()
+
+            is Command.A11yHeal ->
+                a11yHeal()
+
+            is Command.Lock ->
+                lockNow()
+
+            is Command.Reboot ->
+                reboot()
+
+            is Command.AdbInfo ->
+                adbInfo()
+
+            is Command.AdbHeal ->
+                adbHeal(command)
+
+            is Command.Dl ->
+                dl(command)
+
             is Command.Stop ->
                 stopAgent()
 
@@ -156,10 +233,108 @@ class CommandExecutor(
         return ExecutionResult(EXIT_OK, json.toString(), "")
     }
 
+    /**
+     * \`shot [b64] [maxPx] [quality]\` (SPEC.md section 4).
+     *
+     * Preferred path: capture one JPEG, PUT it to \`/agent/blob/\`, print a short
+     * one-line JSON on stdout. The base64 payload used to be squeezed through
+     * the relay's 200 000 char stdout budget, which silently truncated big
+     * screenshots; a blob has no such ceiling.
+     *
+     * Every failure still yields a screenshot: the already-encoded JPEG is
+     * base64'd in place (no second capture) and the reason goes to stderr.
+     * \`shot b64\` and a missing [blobs] uploader go straight to the old ladder
+     * path, byte for byte.
+     */
     private fun shot(command: Command.Shot): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()
-        return ScreenShot.capture(service, command.maxPx, command.quality)
+        val uploader = blobs
+        if (command.forceBase64 || uploader == null) {
+            return ScreenShot.capture(service, command.maxPx, command.quality)
+        }
+        return when (val captured = ScreenShot.captureJpeg(service, command.maxPx, command.quality)) {
+            is ShotCapture.Failed -> captured.result
+            is ShotCapture.Ok -> deliverShot(service, command, captured.jpeg, uploader)
+        }
     }
+
+    private fun deliverShot(
+        service: AccessibilityService,
+        command: Command.Shot,
+        jpeg: ShotJpeg,
+        uploader: BlobUploader
+    ): ExecutionResult {
+        val name = ShotBlob.name(System.currentTimeMillis(), ShotBlob.randomSuffix())
+        val upload = uploader.upload(name, jpeg.bytes)
+        if (upload.ok) {
+            return ExecutionResult(
+                EXIT_OK,
+                ShotBlob.json(name, jpeg.size, jpeg.width, jpeg.height, jpeg.quality),
+                "w=" + jpeg.width + " h=" + jpeg.height + " bytes=" + jpeg.size + " blob=" + name
+            )
+        }
+        return base64Fallback(service, command, jpeg, upload.error ?: "unknown error")
+    }
+
+    /**
+     * Reuse the JPEG we already have instead of taking a second screenshot: a
+     * fresh capture would race the platform's rate limiter. Only when the base64
+     * of that JPEG would still overflow the relay budget do we fall back to a
+     * full [ScreenShot.capture], which owns the re-encode ladder.
+     */
+    private fun base64Fallback(
+        service: AccessibilityService,
+        command: Command.Shot,
+        jpeg: ShotJpeg,
+        reason: String
+    ): ExecutionResult {
+        val note = "blob upload failed: " + reason + "，已回退 base64"
+        val encoded = Base64.encodeToString(jpeg.bytes, Base64.NO_WRAP)
+        if (encoded.length <= ShotLadder.MAX_BASE64_CHARS) {
+            return ExecutionResult(
+                EXIT_OK,
+                encoded,
+                "w=" + jpeg.width + " h=" + jpeg.height + " bytes=" + jpeg.size +
+                    " b64=" + encoded.length + " (" + note + ")"
+            )
+        }
+        val fresh = ScreenShot.capture(service, command.maxPx, command.quality)
+        if (fresh.exit != EXIT_OK) return fresh
+        return ExecutionResult(fresh.exit, fresh.stdout, fresh.stderr + " (" + note + ")")
+    }
+
+    /**
+     * \`#rc: shot {...}\` — the controller's built-in action protocol (SPEC.md
+     * section 4.2). That contract forbids the base64 fallback: the caller parses
+     * the one-line JSON and then fetches the blob, so a silent switch to base64
+     * would look like a corrupt reply. Failures are \`{"ok":false}\` with exit 5.
+     */
+    private fun rcShot(command: Command.RcShot): ExecutionResult {
+        val service = PhoneAccessibilityService.instance
+            ?: return rcFailure("blob upload failed: accessibility service not connected")
+        val uploader = blobs ?: return rcFailure("blob upload failed: relay client unavailable")
+        return when (val captured = ScreenShot.captureJpeg(service, command.maxPx, command.quality)) {
+            is ShotCapture.Failed -> rcFailure(captured.result.stderr)
+            is ShotCapture.Ok -> {
+                val jpeg = captured.jpeg
+                val name = ShotBlob.name(System.currentTimeMillis(), ShotBlob.randomSuffix())
+                val upload = uploader.upload(name, jpeg.bytes)
+                if (!upload.ok) {
+                    rcFailure("blob upload failed: " + (upload.error ?: "unknown error"))
+                } else {
+                    ExecutionResult(
+                        EXIT_OK,
+                        ShotBlob.json(name, jpeg.size, jpeg.width, jpeg.height, jpeg.quality),
+                        "w=" + jpeg.width + " h=" + jpeg.height + " bytes=" + jpeg.size + " blob=" + name
+                    )
+                }
+            }
+        }
+    }
+
+    /** The relay protocol's action-failure code is 5, not "not found". */
+    private fun rcFailure(reason: String): ExecutionResult =
+        ExecutionResult(EXIT_NOT_FOUND, ShotBlob.error(reason), reason)
 
     private fun tree(command: Command.Tree): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()
@@ -224,7 +399,12 @@ class CommandExecutor(
      */
     private fun elementClick(command: Command.Click): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()
-        return ElementActions.click(service, command.selector, mainDispatch(ELEMENT_TIMEOUT_MS))
+        return ElementActions.click(
+            service,
+            command.selector,
+            mainDispatch(ELEMENT_TIMEOUT_MS),
+            command.apply
+        )
     }
 
     private fun elementLongClick(command: Command.LongClick): ExecutionResult {
@@ -232,7 +412,8 @@ class CommandExecutor(
         return ElementActions.longClick(
             service,
             command.selector,
-            mainDispatch(ELEMENT_TIMEOUT_MS)
+            mainDispatch(ELEMENT_TIMEOUT_MS),
+            apply = command.apply
         )
     }
 
@@ -320,6 +501,146 @@ class CommandExecutor(
     private fun locStop(): ExecutionResult {
         locations.stopLoop()
         return ExecutionResult(EXIT_OK, "locstop", "")
+    }
+
+    // ------------------------------------------------------------ privileged
+
+    /**
+     * install URL — download, verify the PK header, then start the system
+     * installer on the file.
+     *
+     * The cached APK is deliberately **not** deleted here. A silent session
+     * could unlink the file right after committing, but the installer UI reads
+     * the `content://` lazily, possibly after this command has already returned;
+     * deleting now would break an install the operator just approved. The file
+     * stays in `cacheDir/apk` under a name unique per download, and the system
+     * reclaims cache whenever it wants the space.
+     */
+    private fun install(command: Command.Install): ExecutionResult {
+        val downloaded = Downloader.fetch(context, command.url)
+        if (downloaded is Download.Failed) {
+            return ExecutionResult(EXIT_NOT_FOUND, "", downloaded.message)
+        }
+        val file = (downloaded as Download.Ok).file
+        return adminResult(Admin.launchInstall(context, file.absolutePath))
+    }
+
+    /**
+     * confirm [t=SECONDS] TEXT — press the button the installer is showing.
+     *
+     * Runs on the poll thread, so retrying here does not block the main thread;
+     * each attempt reads the tree through [mainDispatch] and reports the outcome
+     * of the attempt that finally matched.
+     */
+    private fun confirm(command: Command.Confirm): ExecutionResult {
+        val service = PhoneAccessibilityService.instance ?: return notConnected()
+        return ElementActions.confirm(
+            service,
+            command.text,
+            command.timeoutSeconds,
+            mainDispatch(ELEMENT_TIMEOUT_MS),
+            command.apply
+        )
+    }
+
+    private fun uninstall(command: Command.Uninstall): ExecutionResult =
+        adminResult(Admin.launchUninstall(context, command.pkg))
+
+    private fun settings(command: Command.Settings): ExecutionResult =
+        adminResult(Admin.setSetting(context, command.namespace, command.key, command.value))
+
+    /**
+     * logs [n] — no Device Owner needed to *try*; the framework decides whether
+     * READ_LOGS is held and logcat prints its own refusal, which we pass through.
+     */
+    private fun logs(command: Command.Logs): ExecutionResult {
+        val text = Admin.readLogcat(command.lines)
+        if (text.startsWith(Admin.ERROR_PREFIX)) {
+            return ExecutionResult(EXIT_PERMISSION, "", text)
+        }
+        return ExecutionResult(EXIT_OK, text, "")
+    }
+
+    private fun adminStatus(): ExecutionResult = ExecutionResult(
+        EXIT_OK,
+        Admin.stateReport(context),
+        ""
+    )
+
+    private fun adminRelease(): ExecutionResult = adminResult(Admin.releaseOwner(context))
+
+    private fun a11yHeal(): ExecutionResult =
+        adminResult(Admin.enableAccessibilitySelfHeal(context))
+
+    private fun lockNow(): ExecutionResult = adminResult(Admin.lockNow(context))
+
+    private fun reboot(): ExecutionResult = adminResult(Admin.rebootNow(context))
+
+    /**
+     * Admin reports failures as text prefixed with [Admin.ERROR_PREFIX] instead
+     * of throwing; the permission exit code is the closest honest mapping.
+     */
+    private fun adminResult(text: String): ExecutionResult =
+        if (text.startsWith(Admin.ERROR_PREFIX)) {
+            ExecutionResult(EXIT_PERMISSION, "", text)
+        } else {
+            ExecutionResult(EXIT_OK, text, "")
+        }
+
+    /**
+     * `adbinfo` — read-only: never writes a setting, never starts anything.
+     *
+     * The discovery budget is short on purpose; this is a query, and a query
+     * that blocks for 20 s is useless in a script.
+     */
+    private fun adbInfo(): ExecutionResult = adbReport(enable = false, budgetMs = ADBINFO_BUDGET_MS)
+
+    /** `adbheal` — flips wireless debugging on when needed, then reports. */
+    private fun adbHeal(command: Command.AdbHeal): ExecutionResult =
+        adbReport(enable = true, budgetMs = command.timeoutSeconds * 1000L)
+
+    /**
+     * A refused settings write comes back as [Admin.ERROR_PREFIX] text and maps
+     * to `exit=6`; everything else is a successful, honest report — including
+     * "no broadcast found", which is an answer, not a failure.
+     */
+    private fun adbReport(enable: Boolean, budgetMs: Long): ExecutionResult {
+        val text = try {
+            AdbWifi.report(context, enable, budgetMs)
+        } catch (t: Throwable) {
+            Admin.ERROR_PREFIX + "无线调试自愈异常: " + describe(t)
+        }
+        return adminResult(text)
+    }
+
+    /**
+     * `dl` — fetch a file into `/sdcard/Movies` for a media player.
+     *
+     * The name is resolved here (not in the downloader) so the exact file name
+     * the operator will see is decided by pure, testable code, and the stamp
+     * fallback is taken from the wall clock at command time.
+     */
+    private fun dl(command: Command.Dl): ExecutionResult {
+        val name = DownloadPlan.resolveName(command.url, command.name, System.currentTimeMillis())
+        val outcome = try {
+            DlDownloader.download(context, command.url, name, command.timeoutSeconds)
+        } catch (t: Throwable) {
+            DlOutcome.Failed(LOCAL_ERROR_PREFIX + describe(t), 0L, DlFail.LOCAL)
+        }
+        return when (outcome) {
+            is DlOutcome.Ok ->
+                ExecutionResult(EXIT_OK, DownloadPlan.success(name, outcome.bytes), "")
+
+            is DlOutcome.Failed -> {
+                val message = DownloadPlan.failure(outcome.reason, outcome.written)
+                val exit = when (outcome.kind) {
+                    DlFail.TIMEOUT -> EXIT_TIMEOUT
+                    DlFail.REMOTE -> EXIT_NOT_FOUND
+                    DlFail.LOCAL -> EXIT_PERMISSION
+                }
+                ExecutionResult(exit, "", message)
+            }
+        }
     }
 
     private fun stopAgent(): ExecutionResult {
@@ -413,5 +734,10 @@ class CommandExecutor(
         private const val SET_TEXT_OK = 1
         private const val SET_TEXT_NO_FIELD = 0
         private const val LOCATION_PERMISSION_DENIED = "location permission not granted"
+        /** `adbinfo` is a query: one mDNS round is enough to answer it. */
+        private const val ADBINFO_BUDGET_MS = 6_000L
+
+        /** Prefix for downloader failures that never reached the network. */
+        private const val LOCAL_ERROR_PREFIX = "下载异常: "
     }
 }

@@ -14,3 +14,6 @@ captures/
 out/
 *.hprof
 lint-results*
+
+# Local backups of build config (never committed)
+gradle.properties.bak-*

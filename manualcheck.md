@@ -86,8 +86,9 @@ and compare against the expectation below.
 | --- | --- |
 | `ping` | exit 0, stdout is exactly `pong` |
 | `status` | exit 0, stdout is a JSON object: `{"ok":true,"ver":…,"acc":<bool>,"svc":<bool>,"scr":<bool>,"bat":<0-100>,"loc":<bool>,"loop":<seconds>,"queue":0}`. `acc` must be `true` after step 2.4. |
-| `shot` | exit 0, stdout is one long base64 line (no newlines, no `data:` prefix); stderr `w=… h=… bytes=… b64=…`. Decode it and confirm the picture is the current screen. |
+| `shot` | exit 0, stdout is **one line of JSON** `{"name":"shot-<millis>-<6 chars>","bytes":<n>,"w":<w>,"h":<h>,"q":<q>,"method":"screen"}`; stderr `w=… h=… bytes=… blob=shot-…`. Fetch the bytes with `GET <relay>/ctl/blob/<name>` and confirm the picture is the current screen. If the upload fails the command must still work: stdout becomes base64 and stderr gains `blob upload failed: <reason>，已回退 base64` |
 | `shot 320 30` | exit 0, stderr shows a smaller `w=`/`h=` |
+| `shot b64` | exit 0, stdout is one long base64 line (no newlines, no `data:` prefix); stderr `w=… h=… bytes=… b64=…` — this is the only path that still puts the image on stdout |
 | `tree` | exit 0, one line per node, each `<depth>\|<class>\|<text>\|<desc>\|<resId>\|<bounds>\|<flags>`. Open the app drawer and re-run — the lines must change. |
 | `tap X Y` | exit 0 with stdout `tap X Y`; the thing at those coordinates reacts (verify with `shot` before/after). If the gesture never completes you get exit 4 `gesture did not complete`. |
 | `long X Y 800` | exit 0 with stdout `long X Y 800`; a long-press menu opens |
@@ -97,8 +98,10 @@ and compare against the expectation below.
 | `key recents` | opens the recents list |
 | `key notifications` | pulls down the notification shade |
 | `key quicksettings` | expands quick settings |
-| `click SEL` | exit 0, stdout `clicked via=action\|ancestor\|gesture node=… at=<x>,<y>` and stderr `matches=<n>`. Open a screen with a labelled button, run `click <its text>` and watch that exact control react. `via=action` means the accessibility action landed on the node, `via=ancestor` means the nearest clickable parent was used (e.g. clicking the text inside a list row), `via=gesture` means it fell back to a coordinate tap. Re-run with `click id:<resourceId>` and `click desc:<content-desc>` to exercise the kind prefixes. |
-| `longclick SEL` | exit 0, stdout `longclicked via=… node=… at=…`; a long-press menu or context menu opens on that element |
+| `click SEL` | exit 0, stdout `dry-run: would click "<SEL>" via=action\|ancestor\|gesture pkg=<pkg> node=<label> at=<x>,<y>` and stderr `matches=<n>` — **nothing is tapped**. Watch the screen: it must not change. `via=action`/`via=ancestor`/`via=gesture` name the path `apply` would take. Re-run with `click id:<resourceId>` and `click desc:<content-desc>` to exercise the kind prefixes. |
+| `click apply SEL` | exit 0, stdout `clicked via=action\|ancestor\|gesture node=… at=<x>,<y>`, and that exact control reacts. `via=action` means the accessibility action landed on the node, `via=ancestor` means the nearest clickable parent was used (e.g. clicking the text inside a list row), `via=gesture` means it fell back to a coordinate tap. |
+| `longclick SEL` | exit 0, `dry-run: would longclick …`, nothing happens |
+| `longclick apply SEL` | exit 0, stdout `longclicked via=… node=… at=…`; a long-press menu or context menu opens on that element |
 | `scroll down [n] [SEL]` | exit 0, stdout `scrolled down x<n> node=…`; the list/dialog scrolls one step per `n` (default 1, max 20). `scroll down 3` on a long list must visibly advance three steps. `scroll up` returns |
 | `scroll down 2 id:feed` | scoped form: only the subtree matching the selector is scrolled, stdout names that container |
 | `ime enter` | focus a text field first (e.g. `tap` the search box), then run it: exit 0, stdout `ime enter`; the keyboard's Go/Search action fires (the form submits / the search runs). With no editable field focused: exit 5 `no editable text field` |
@@ -110,6 +113,33 @@ and compare against the expectation below.
 | `locloop 60` | exit 0 immediately; then `-Action History -Id PHONE-MEIZU` grows by one `loc-<epochMillis>` record per minute |
 | `locstop` | the growth from `locloop` stops |
 | `stop` | the app's status line goes to `服务: 已停止`; `online` turns false within ~120 s |
+| `admin status` | exit 0, several lines: `Device Owner`, `设备管理器`, `静默安装: 不可用…`, `安装未知应用`, one line per development permission with `已授予/未授予`, `无障碍条目` |
+| `settings get secure enabled_accessibility_services` | exit 0, stdout `<key> = <value>`; the value must list this app's service |
+| `settings put global airplane_mode_on 0` | exit 0, stdout `已设置 global airplane_mode_on = 0`. Without `WRITE_SECURE_SETTINGS`: exit 6 with the exact `pm grant` line |
+| `logs 50` | exit 0, up to 50 logcat lines. Without `READ_LOGS`: exit 6 naming `READ_LOGS` |
+| `a11y heal` | exit 0, stdout mentions how many existing entries were kept; the accessibility service stays on |
+| `install <url>` | exit 0, stdout `已拉起安装确认页（需确认安装）: …`; the system installer appears. Ctrl path: `confirm 安装` (dry run — check the node) then `confirm apply 安装` |
+| `confirm 安装` | exit 0, stdout `dry-run: would confirm "安装" via=… pkg=com.android.packageinstaller node=… at=…` — the installer is **not** pressed (it takes one look, no polling) |
+| `confirm apply t=30 安装` | exit 0, stdout `confirmed "安装" via=action|ancestor|gesture pkg=com.android.packageinstaller node=… at=… attempts=…`; the install proceeds |
+| `uninstall <pkg>` | exit 0, stdout `已拉起卸载确认页（需确认卸载）: <pkg>` (or `包未安装…（无需卸载）`); then `confirm apply 确定` |
+| `lock` | exit 0, stdout `已锁屏`; the screen locks |
+| `reboot` | exit 6 `重启需要系统签名权限（REBOOT），侧载应用无法申请；平板已设 DO 也不够，只能手动重启或 root`. There is no configuration that makes this succeed — see SPEC.md §3.5 |
+| `adbinfo` | exit 0, exactly these lines: `adb_wifi_enabled = 1`, `本机 IP = <当前 wlan 地址>`, `无线调试端口 = <port>（来源 _adb-tls-connect._tcp）`, `connect = <ip>:<port>`, `TCP 探测 = 可连`. Compare the port with `adb mdns services` on the PC — they must match |
+| `adbheal` | exit 0, the same five lines; the connect string must be pasteable into `adb connect` as-is. **It bounces `adb_wifi_enabled` 0 -> 1, so a live adb session drops** — re-connect with the printed string |
+| `adbheal` with wireless debugging already on, after `adbinfo` has started returning `未发现` | exit 0 and **must still print a port**: the toggle bounce re-creates the broadcast that NsdManager stopped hearing. If it prints `未发现`, the failure text must name both tiers (`NsdManager 未发现…，裸 mDNS 查询也未收到应答…`) |
+| `adbinfo` twice within a minute | the second run reports `来源 = 缓存（Ns 前发现）` and the same port; no second discovery round |
+| `adbheal` then `adbinfo` immediately | `adbinfo` reports the fresh cache, and the port matches what `adbheal` printed |
+| `dl https://<any host>/film.mp4` | exit 0, stdout exactly `已下载 film.mp4 <n> 字节 → /sdcard/Movies/film.mp4`; `<n>` matches the real file size |
+| `stop` then look at the app | the status line says `服务: 已停止`, the button reads `启动`, and the `开机自动启动` checkbox is **unchecked** (stop cleared it) |
+| press `启动` | service runs and the checkbox is ticked again — start re-arms auto-start |
+| reboot after `stop` | the agent stays down; nothing starts it (this is the whole point of the toggle). After a `启动` press, a reboot brings it back as before |
+
+### Family scenario: a film on the tablet (the reason `dl` exists)
+
+1. Get a direct video link (any host, `http` or `https`, no login page).
+2. `-Cmd "dl https://<host>/film.mp4"` → exit 0 with the `已下载 … 字节 → /sdcard/Movies/film.mp4` line.
+3. On the tablet open **VLC → 浏览 / Internal storage → Movies** — the file is listed and plays. No permission prompt, no reboot, no USB cable.
+4. Optional name: `dl https://<host>/a1b2c3 https://… no —` use `dl https://<host>/a1b2c3 奶奶的越剧.mp4` and confirm the file appears under that exact name.
 
 ### Negative cases
 
@@ -117,33 +147,94 @@ and compare against the expectation below.
 | --- | --- |
 | `bogus` | exit 2, stderr `unknown command: bogus` |
 | `tap` / `tap 1` | exit 2 (usage) |
-| `click` / `click   ` | exit 2, usage `click SEL` (a selector is mandatory) |
-| `click no-such-label` | exit 5, stderr `no node matched: no-such-label matches=0` |
+| `click` / `click   ` / `click apply` | exit 2, usage `click [apply] SEL` (a selector is mandatory) |
+| `longclick` / `longclick apply` | exit 2, usage `longclick [apply] SEL` |
+| `click no-such-label` | exit 5, stderr `没有出现含「no-such-label」的节点` (dry run) |
+| `click apply no-such-label` | exit 5, stderr `no node matched: no-such-label matches=0` |
 | `scroll down` on a screen with nothing scrollable | exit 5, stderr `no scrollable node` |
 | `scroll sideways` | exit 2, usage `scroll up\|down [n] [SEL]` |
 | `ime` / `ime search` | exit 2, usage `ime enter` |
 | any command with accessibility **off** | exit 3, stderr `accessibility service not connected` |
 | `loc` with location permission revoked | exit 6, stderr `location permission not granted` |
 | `app com.does.not.exist` | exit 5, stderr `package not found: com.does.not.exist` |
+| `confirm t=4 zzqq_no_such_button` | exit 5, stderr `没有出现含「zzqq_no_such_button」的节点`. **Must not** report success: plain status text is not a button |
+| `confirm t=4 服务` | exit 5, stderr `只匹配到不可点文本（N 个），没有可按的按钮` |
+| `confirm apply t=4 zzqq_no_such_button` | exit 5, stderr `confirm 超时：4s 内没有出现含「zzqq_no_such_button」的节点（尝试 N 次）` — the `apply` form polls, so its wording names the timeout |
+| `settings unknown key` | exit 2 (usage) |
+| `confirm` / `confirm t=abc x` / `confirm apply` | exit 2, usage `confirm [apply] [t=SECONDS] TEXT` |
+| `adbinfo` with wireless debugging off (`settings put global adb_wifi_enabled 0`) | exit 0, `无线调试端口 = 未发现`, `connect = 无（未发现端口）`, `TCP 探测 = 未做`. **Must not** print a port or a `:port` substring taken from anywhere else |
+| `adbinfo 38181` / `adbheal 38181` | exit 2, usage; an argument-taking query hides script typos |
+| `dl` / `dl t=300` | exit 2, usage `dl [t=SECONDS] URL [NAME]` |
+| `dl /sdcard/x.mp4` | exit 2, usage — a bare path is a typo, not a URL, and must not be quietly prefixed with `http://` |
+| `dl https://<host>/does-not-exist.mp4` | exit 5, stderr `错误: 下载失败: HTTP 404（已写 0 字节）`; **no file** in Movies, and no 0-byte ghost in VLC |
+| `dl` two of them back to back | the second returns exit 6 `已有下载在进行` while the first still runs; it must not corrupt the first transfer |
+| `dl t=1 https://<host>/<a genuinely slow large file>` | exit 4, stderr `错误: 下载失败: 超过 1 秒没有下完（已写 <n> 字节）`, and Movies has no half file |
 
 ### Rate limit
 
-Run `shot` twice back to back. If the second one returns exit 4 with
+Run `shot` twice back to back. The blob path has no size ladder, so a rate-limit
+reply is the only failure worth retrying. If the second one returns exit 4 with
 `INTERVAL_TIME_SHORT`, that is the platform rate limit, not a bug — wait a
 second and retry.
 
-## 6. Reboot persistence
+### The controller's `#rc:` protocol
+
+`rc.py` on the managed PC does not send `shot`; it sends a `#rc:` line and then
+fetches the blob. Check that path separately, because it must never fall back to
+base64 (the controller parses JSON):
+
+| Command | Expectation |
+| --- | --- |
+| `#rc: shot {"width":1280,"quality":72}` | exit 0, stdout is exactly one line of JSON `{"name":"shot-…","bytes":<n>,"w":1280,"h":<h>,"q":72,"method":"screen"}`, stderr the same `w=/h=/bytes=/blob=` line as `shot`. Fetch `GET <relay>/ctl/blob/<name>` — the image must be the current screen at 1280 px on the long side |
+| `#rc: shot {}` | exit 0, defaults apply: `"w":720`, `"q":55` |
+| `#rc: shot {"width":99999,"quality":1}` | exit 0, clamped to `"w":1440`, `"q":10` (the controller window is 10..95, wider than the human `shot` window) |
+| `#rc: shot {"width":800,"quality":60,"hwnd":123,"rect":[0,0,100,100]}` | exit 0, `hwnd`/`rect` ignored silently — Android has no window handles, and this must not error |
+| `#rc: wins` | exit 2, stdout `{"ok":false,"err":"未知内置动作：wins"}`. **Must not** be executed as a shell command and **must not** exit 0 |
+| `#rc:` / `#rc: shot {bad json` | exit 2, stdout `{"ok":false,"err":"bad #rc payload: …"}` |
+| `#rc: shot` with the relay unreachable (airplane mode) | exit 5, stdout `{"ok":false,"err":"blob upload failed: …"}` — **no base64 fallback**, because the controller would read it as a corrupt reply |
+
+## 6. Reboot persistence and the post-boot adb heal
 
 1. Reboot the phone.
 2. Do **not** open the app.
 3. Wait 2–3 minutes, then `-Action List`: `PHONE-MEIZU` should be `online: True`
    again, driven by `BootReceiver` + `START_STICKY`.
+4. The same list line should now carry `adbwifi=<port>`: `BootHeal` runs about
+   20 s after boot, turns wireless debugging back on if it was off, and caches the
+   new port. The port changes every reboot, so a port here that matches
+   `adb mdns services` on the PC is the proof it worked.
+5. Within 10 minutes of boot, `adbinfo` should report
+   `来源 = 缓存（Ns 前发现）` — that is the boot heal's cache, not a fresh lookup.
 
-If it does not come back, the cause is almost always a missing Flyme
+**Before blaming the ROM, check the checkbox.** If the last thing anyone did was
+press `停止`, auto-start is off by design and nothing will bring the agent back —
+that is the feature, not a failure. Press `启动` (which re-arms it) and reboot
+again.
+
+If the app does not come back, the cause is almost always a missing Flyme
 keep-alive switch from section 3 — re-check those before suspecting the code.
+If the app comes back but `adbwifi=` is missing, look at `logs 200` for the
+tag `adb` line `开机自愈: …`, which names the failed tier. A missing field is not a
+bug by itself: `adb_wifi_enabled = 0` on a device where the settings write is
+refused leaves nothing to discover.
 
 ## 7. What this app deliberately cannot do
 
-No arbitrary shell execution, no silent app install/uninstall, no root. These
-need either root or Device Owner (which requires a factory reset), so they are
-out of scope by design. See `README.md`.
+No arbitrary shell execution and no root. `INSTALL_PACKAGES` /
+`DELETE_PACKAGES` are `signature|privileged` with no `development` flag, so a
+sideloaded app cannot hold them **even as Device Owner** — `install`/`uninstall`
+go through the system confirmation UI and `confirm apply` presses the button.
+
+What `pm grant` *can* grant — `WRITE_SECURE_SETTINGS`, `READ_LOGS`, `DUMP`,
+`PACKAGE_USAGE_STATS` — is used, and reported honestly per command. See
+`README.md` and SPEC.md §3.3.
+
+`dl` writes only inside `/sdcard/Movies` and only over `http`/`https`; there is no
+`rm`, no move, no arbitrary path, and nothing is ever written outside that
+directory (SPEC.md §3.6). It also does not run when nobody asked: no scheduled
+downloads, no background syncing.
+
+`reboot` is in the same category and always answers exit 6: the permission it
+needs (`REBOOT`) is signature-level, and the Device Owner door needs a
+factory-reset provisioning this build never asks for. See SPEC.md §3.5. `lock`
+does work, because a device admin can be activated by hand.

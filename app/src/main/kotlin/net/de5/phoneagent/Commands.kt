@@ -26,16 +26,33 @@ const val EXIT_INTERRUPTED = 7
 sealed class Command {
     object Ping : Command()
     object Status : Command()
-    data class Shot(val maxPx: Int, val quality: Int) : Command()
+    /**
+     * `shot [b64] [maxPx] [quality]`.
+     *
+     * [forceBase64] skips the blob channel and prints base64 on stdout, which is
+     * what an operator wants when they are reading the output themselves instead
+     * of letting a controller fetch the bytes (SPEC.md section 4).
+     */
+    data class Shot(
+        val maxPx: Int,
+        val quality: Int,
+        val forceBase64: Boolean = false
+    ) : Command()
     data class Tree(val maxNodes: Int) : Command()
     data class Tap(val x: Int, val y: Int) : Command()
     data class LongPress(val x: Int, val y: Int, val ms: Int) : Command()
     data class Swipe(val x1: Int, val y1: Int, val x2: Int, val y2: Int, val ms: Int) : Command()
     data class Key(val name: String) : Command()
-    /** `click SEL` — element-level click (SPEC.md section 3.1). */
-    data class Click(val selector: Selector) : Command()
-    /** `longclick SEL` — element-level long click (SPEC.md section 3.1). */
-    data class LongClick(val selector: Selector) : Command()
+    /**
+     * `click [apply] SEL` — element-level click (SPEC.md section 3.1).
+     *
+     * [apply] is false by default and the action is then a **dry run**: we report
+     * which node would be hit and where, and touch nothing. A phone nobody is
+     * holding makes a wrong tap expensive, so the destructive half is opt-in.
+     */
+    data class Click(val selector: Selector, val apply: Boolean = false) : Command()
+    /** `longclick [apply] SEL` — element-level long click (SPEC.md section 3.1). */
+    data class LongClick(val selector: Selector, val apply: Boolean = false) : Command()
     /** `scroll up|down [n] [SEL]` (SPEC.md section 3.1). */
     data class Scroll(val direction: Direction, val count: Int, val selector: Selector?) : Command()
     /** `ime enter` — send ACTION_IME_ENTER to the focused editable node. */
@@ -50,6 +67,83 @@ sealed class Command {
     data class LocLoop(val interval: Int) : Command()
     object LocStop : Command()
     object Stop : Command()
+
+    // ------------------------- privileged / admin surface -------------------
+
+    /** `install URL` — download the APK, then hand it to the package installer. */
+    data class Install(val url: String) : Command()
+    /** `uninstall PKG` — silently remove another package. */
+    data class Uninstall(val pkg: String) : Command()
+    /**
+     * `settings global|secure|system KEY [VALUE]`.
+     *
+     * [value] is the rest of the line verbatim (so it may contain spaces); null
+     * means "read and report the current value".
+     */
+    data class Settings(val namespace: String, val key: String, val value: String?) : Command()
+    /** `logs [lines]` — a tail of logcat. */
+    data class Logs(val lines: Int) : Command()
+
+    /**
+     * `confirm [t=SECONDS] TEXT` — click the on-screen button whose label
+     * contains TEXT, retrying until [timeoutSeconds] runs out.
+     *
+     * This is what turns `install` into a hands-free flow: the system installer
+     * is a UI like any other, and the operator is not holding the phone.
+     */
+    data class Confirm(
+        val text: String,
+        val timeoutSeconds: Int,
+        val apply: Boolean = false
+    ) : Command()
+    /** `admin status` — Device Owner / device-admin state. */
+    object AdminStatus : Command()
+    /** `admin release` — drop Device Owner and remove ourselves as admin. */
+    object AdminRelease : Command()
+    /** `a11y heal` — rewrite ENABLED_ACCESSIBILITY_SERVICES to include us. */
+    object A11yHeal : Command()
+    /** `lock` — lock the screen now. */
+    object Lock : Command()
+    /** `reboot` — reboot the device (Device Owner only). */
+    object Reboot : Command()
+    /** `adbinfo` — read-only wireless-debugging report: IP, port, connect string. */
+    object AdbInfo : Command()
+    /**
+     * `adbheal [t=SECONDS]` — turn wireless debugging on if it is off, wait for
+     * the mDNS advertisement, then report exactly what `adbinfo` reports.
+     *
+     * Idempotent: safe to re-run after every reboot, which is the whole point
+     * (the port changes on every boot and pairing survives, so only the port
+     * ever needs rediscovering).
+     */
+    data class AdbHeal(val timeoutSeconds: Int) : Command()
+
+    /**
+     * `dl [t=SECONDS] URL [NAME]` — fetch any file into `/sdcard/Movies` so a
+     * media player (VLC) can open it (SPEC.md section 3.6).
+     *
+     * [name] is the rest of the line verbatim; null means "guess from the URL".
+     */
+    data class Dl(val url: String, val name: String?, val timeoutSeconds: Int) : Command()
+
+    // ------------------------------------- controller built-in protocol (#rc:)
+
+    /**
+     * `#rc: shot {"width":..,"quality":..}` — the screenshot contract of the
+     * Windows controller layer, which reads the `name` field of our one-line
+     * JSON and fetches the bytes over HTTP (SPEC.md section 4).
+     *
+     * Unlike [Shot] there is **no base64 fallback**: the controller cannot parse
+     * base64, so a blob failure is reported as a JSON error instead.
+     */
+    data class RcShot(val maxPx: Int, val quality: Int) : Command()
+
+    /** A `#rc:` verb this build does not implement; never runs as a shell command. */
+    data class RcUnknown(val verb: String) : Command()
+
+    /** A `#rc:` line we cannot parse at all (missing verb, malformed JSON). */
+    data class RcBadPayload(val detail: String) : Command()
+
     /** The verb is not part of the grammar. */
     data class Unknown(val name: String) : Command()
     /** The verb is known but the arguments cannot be used. */
@@ -81,9 +175,33 @@ object Commands {
     const val LOCLOOP_MIN_SECONDS = 30
     const val LOCLOOP_MAX_SECONDS = 3600
 
+    /** Shared shape of every `settings` usage error, so the text never drifts. */
+    private val SETTINGS_USAGE = Command.BadUsage("usage: settings [get|put] global|secure|system KEY [VALUE]")
+
     /** `scroll up|down [n] [SEL]`: default 1, cap 20 (SPEC.md section 3.1). */
     const val SCROLL_COUNT_DEFAULT = 1
     const val SCROLL_COUNT_MAX = 20
+
+    /** `logs [lines]`: 120 by default, never more than 500 (logcat is chatty). */
+    /** `confirm` waits this long by default before giving up. */
+    const val CONFIRM_TIMEOUT_DEFAULT = 15
+    const val CONFIRM_TIMEOUT_MAX = 120
+
+    const val LOGS_LINES_DEFAULT = 120
+    const val LOGS_LINES_MAX = 500
+
+    /** `adbheal [t=SECONDS]`: how long to wait for the port, default 20. */
+    const val ADBHEAL_TIMEOUT_DEFAULT = 20
+    const val ADBHEAL_TIMEOUT_MAX = 60
+
+    /** Shared shape of every `dl` usage error. */
+    private val DL_USAGE = Command.BadUsage("usage: dl [t=SECONDS] URL [NAME]")
+
+    /** Shared shapes of the element-verb usage errors, so the text never drifts. */
+    private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
+    private val CLICK_USAGE = "usage: click [apply] SEL"
+    private val LONGCLICK_USAGE = "usage: longclick [apply] SEL"
+    private val CONFIRM_USAGE = "usage: confirm [apply] [t=SECONDS] TEXT"
 
     private val KEY_NAMES = setOf("back", "home", "recents", "notifications", "quicksettings")
 
@@ -93,6 +211,17 @@ object Commands {
      * reports as `exit=2`.
      */
     fun parse(line: String): Command {
+        // The controller's built-in action protocol is a different grammar
+        // entirely, so it is split off before the shell grammar sees the line:
+        // a "#rc:" verb must never fall through to "unknown command".
+        if (isRcLine(line)) {
+            return when (val rc = parseRcLine(line)) {
+                is RcLine.Shot -> Command.RcShot(rc.maxPx, rc.quality)
+                is RcLine.Unknown -> Command.RcUnknown(rc.verb)
+                is RcLine.Bad -> Command.RcBadPayload(rc.detail)
+            }
+        }
+
         val raw = line.trim()
         if (raw.isEmpty()) return Command.Unknown("")
 
@@ -107,13 +236,19 @@ object Commands {
 
             "shot" -> {
                 val args = splitArgs(rest)
-                val maxPx = optionalInt(args, 0, SHOT_MAXPX_DEFAULT)
-                    ?: return Command.BadUsage("usage: shot [maxPx] [quality]")
-                val quality = optionalInt(args, 1, SHOT_QUALITY_DEFAULT)
-                    ?: return Command.BadUsage("usage: shot [maxPx] [quality]")
+                // "b64" is an optional leading flag, so "shot b64 1080 80" and
+                // "shot 1080 80" both work and the positional meaning of the
+                // numbers never changes.
+                val forceBase64 = args.isNotEmpty() && args[0].equals("b64", ignoreCase = true)
+                val offset = if (forceBase64) 1 else 0
+                val maxPx = optionalInt(args, offset, SHOT_MAXPX_DEFAULT)
+                    ?: return Command.BadUsage(SHOT_USAGE)
+                val quality = optionalInt(args, offset + 1, SHOT_QUALITY_DEFAULT)
+                    ?: return Command.BadUsage(SHOT_USAGE)
                 Command.Shot(
                     maxPx.coerceIn(SHOT_MAXPX_MIN, SHOT_MAXPX_MAX),
-                    quality.coerceIn(SHOT_QUALITY_MIN, SHOT_QUALITY_MAX)
+                    quality.coerceIn(SHOT_QUALITY_MIN, SHOT_QUALITY_MAX),
+                    forceBase64
                 )
             }
 
@@ -167,15 +302,19 @@ object Commands {
             "click" -> {
                 // SPEC.md section 3.1: the selector is the whole rest of the line,
                 // verbatim, with only the separating whitespace dropped.
-                val selector = dropLeadingWhitespace(rest)
-                if (selector.isBlank()) return Command.BadUsage("usage: click SEL")
-                Command.Click(Selector.parse(selector))
+                val parsed = parseElementVerb(rest)
+                when (parsed) {
+                    null -> Command.BadUsage(CLICK_USAGE)
+                    else -> Command.Click(parsed.selector, parsed.apply)
+                }
             }
 
             "longclick" -> {
-                val selector = dropLeadingWhitespace(rest)
-                if (selector.isBlank()) return Command.BadUsage("usage: longclick SEL")
-                Command.LongClick(Selector.parse(selector))
+                val parsed = parseElementVerb(rest)
+                when (parsed) {
+                    null -> Command.BadUsage(LONGCLICK_USAGE)
+                    else -> Command.LongClick(parsed.selector, parsed.apply)
+                }
             }
 
             "scroll" -> parseScroll(rest)
@@ -216,6 +355,72 @@ object Commands {
             }
 
             "locstop" -> Command.LocStop
+
+            "install" -> {
+                // The URL is the whole rest of the line: query strings contain
+                // characters we must not split on, only the separator is dropped.
+                val url = dropLeadingWhitespace(rest).trim()
+                if (url.isEmpty()) return Command.BadUsage("usage: install URL")
+                val lower = url.lowercase()
+                if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+                    return Command.BadUsage("usage: install URL (http:// or https://)")
+                }
+                Command.Install(url)
+            }
+
+            "uninstall" -> {
+                // Exactly one token: a second word is a typo, and silently
+                // ignoring it would uninstall the wrong package on a phone
+                // nobody can watch.
+                val args = splitArgs(rest)
+                if (args.size != 1 || !isPackageName(args[0])) {
+                    return Command.BadUsage("usage: uninstall PACKAGE")
+                }
+                Command.Uninstall(args[0])
+            }
+
+            "settings" -> parseSettings(rest)
+
+            "confirm" -> parseConfirm(rest)
+
+            "logs" -> {
+                val args = splitArgs(rest)
+                val lines = optionalInt(args, 0, LOGS_LINES_DEFAULT)
+                    ?: return Command.BadUsage("usage: logs [lines]")
+                Command.Logs(lines.coerceIn(1, LOGS_LINES_MAX))
+            }
+
+            "admin" -> {
+                when (splitArgs(rest).firstOrNull()?.lowercase()) {
+                    "status" -> Command.AdminStatus
+                    "release" -> Command.AdminRelease
+                    else -> Command.BadUsage("usage: admin status|release")
+                }
+            }
+
+            "a11y" -> {
+                if (splitArgs(rest).firstOrNull()?.lowercase() == "heal") {
+                    Command.A11yHeal
+                } else {
+                    Command.BadUsage("usage: a11y heal")
+                }
+            }
+
+            "lock" -> Command.Lock
+
+            "reboot" -> Command.Reboot
+
+            "adbinfo" -> {
+                if (splitArgs(rest).isNotEmpty()) {
+                    Command.BadUsage("usage: adbinfo")
+                } else {
+                    Command.AdbInfo
+                }
+            }
+
+            "adbheal" -> parseAdbHeal(rest)
+
+            "dl" -> parseDl(rest)
 
             "stop" -> Command.Stop
 
@@ -265,6 +470,175 @@ object Commands {
         }
 
         return Command.Scroll(direction, count, selector)
+    }
+
+    /**
+     * `settings [get|put] global|secure|system KEY [VALUE]`.
+     *
+     * Both spellings work: the explicit `get`/`put` verb (what an operator
+     * types, mirroring the adb `settings` command they already know) and the
+     * bare form where the presence of a value decides read vs write.
+     *
+     * Split with [tokenSpans] so the value keeps its inner spacing verbatim,
+     * exactly like `text` / `click` — a setting value such as
+     * `"a  b"` must not be re-joined from tokens.
+     */
+    private fun parseSettings(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return SETTINGS_USAGE
+
+        // Drop an explicit verb first; what follows is the bare grammar.
+        var index = 0
+        var forceRead = false
+        when (tokens[0].text.lowercase()) {
+            "get" -> {
+                forceRead = true
+                index = 1
+            }
+            "put" -> index = 1
+        }
+        if (tokens.size - index < 2) return SETTINGS_USAGE
+
+        val namespace = tokens[index].text.lowercase()
+        if (namespace != "global" && namespace != "secure" && namespace != "system") {
+            return SETTINGS_USAGE
+        }
+        val key = tokens[index + 1].text
+        if (key.isEmpty()) return SETTINGS_USAGE
+
+        if (forceRead) return Command.Settings(namespace, key, null)
+        val valueIndex = index + 2
+        val value = if (valueIndex < tokens.size) {
+            val raw = rest.substring(tokens[valueIndex].start)
+            if (raw.isBlank()) null else raw
+        } else {
+            null
+        }
+        return Command.Settings(namespace, key, value)
+    }
+
+    /**
+     * `confirm [t=SECONDS] TEXT`.
+     *
+     * The timeout is optional and recognised only as a leading `t=` token, so a
+     * button that legitimately starts with a digit (`confirm 2 个选项`) keeps its
+     * text instead of being parsed as a timeout.
+     */
+    private fun parseConfirm(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return Command.BadUsage(CONFIRM_USAGE)
+
+        // Only *leading* flags are consumed, and only while they really are
+        // flags: a button label that starts with a digit ("confirm 2 个选项")
+        // therefore keeps its text instead of being read as a timeout.
+        var index = 0
+        var timeout = CONFIRM_TIMEOUT_DEFAULT
+        var apply = false
+        while (index < tokens.size) {
+            val head = tokens[index].text
+            if (head.equals("apply", ignoreCase = true)) {
+                apply = true
+                index++
+                continue
+            }
+            if (head.length > 2 && head.startsWith("t=", ignoreCase = true)) {
+                val parsed = head.substring(2).toIntOrNull()
+                    ?: return Command.BadUsage(CONFIRM_USAGE)
+                timeout = parsed.coerceIn(1, CONFIRM_TIMEOUT_MAX)
+                index++
+                continue
+            }
+            break
+        }
+        if (index >= tokens.size) return Command.BadUsage(CONFIRM_USAGE)
+
+        // The label keeps its inner spacing: it is matched by substring, and
+        // re-joining tokens would collapse a two-space button label.
+        val text = rest.substring(tokens[index].start).trim()
+        if (text.isEmpty()) return Command.BadUsage(CONFIRM_USAGE)
+        return Command.Confirm(text, timeout, apply)
+    }
+
+    /** One element verb's arguments: the selector plus whether the tap is real. */
+    private class ParsedElement(val selector: Selector, val apply: Boolean)
+
+    /**
+     * `click [apply] SEL` / `longclick [apply] SEL`.
+     *
+     * `apply` is recognised only as the *first* token, and the selector is the
+     * rest of the line verbatim (inner spaces included), exactly like before. A
+     * selector that itself begins with the word stays reachable through a kind
+     * prefix: `click text:apply button`.
+     */
+    private fun parseElementVerb(rest: String): ParsedElement? {
+        var body = dropLeadingWhitespace(rest)
+        if (body.isBlank()) return null
+        var apply = false
+        val cut = firstWhitespace(body)
+        val head = if (cut < 0) body else body.substring(0, cut)
+        if (head.equals("apply", ignoreCase = true)) {
+            apply = true
+            body = if (cut < 0) "" else dropLeadingWhitespace(body.substring(cut))
+            if (body.isBlank()) return null
+        }
+        return ParsedElement(Selector.parse(body), apply)
+    }
+
+    /**
+     * `adbheal [t=SECONDS]` — the optional timeout is a leading `t=` token only,
+     * same rule as `confirm`, so no argument means the documented default.
+     */
+    private fun parseAdbHeal(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return Command.AdbHeal(ADBHEAL_TIMEOUT_DEFAULT)
+
+        val head = tokens[0].text
+        if (!head.startsWith("t=", ignoreCase = true)) {
+            return Command.BadUsage("usage: adbheal [t=SECONDS]")
+        }
+        val parsed = head.substring(2).toIntOrNull()
+            ?: return Command.BadUsage("usage: adbheal [t=SECONDS]")
+        if (tokens.size > 1) return Command.BadUsage("usage: adbheal [t=SECONDS]")
+        return Command.AdbHeal(parsed.coerceIn(1, ADBHEAL_TIMEOUT_MAX))
+    }
+
+    /**
+     * `dl [t=SECONDS] URL [NAME]`.
+     *
+     * The URL is taken as one token and never re-joined, because query strings
+     * carry the signature of the link. Everything after it is the name
+     * verbatim, so a name with spaces still works (the cleaner turns them into
+     * underscores). Only the *first* token may be `t=`, exactly like `adbheal`.
+     */
+    private fun parseDl(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return DL_USAGE
+
+        var index = 0
+        var timeout = DownloadPlan.TIMEOUT_DEFAULT
+        if (tokens[0].text.startsWith("t=", ignoreCase = true)) {
+            val parsed = tokens[0].text.substring(2).toIntOrNull() ?: return DL_USAGE
+            timeout = parsed.coerceIn(1, DownloadPlan.TIMEOUT_MAX)
+            index = 1
+        }
+        if (index >= tokens.size) return DL_USAGE
+
+        val url = tokens[index].text
+        val lower = url.lowercase()
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) {
+            return Command.BadUsage("usage: dl [t=SECONDS] URL [NAME] (http:// or https://)")
+        }
+        val nameStart = tokens[index].start + tokens[index].text.length
+        val name = dropLeadingWhitespace(rest.substring(nameStart)).trim()
+        return Command.Dl(url, if (name.isEmpty()) null else name, timeout)
+    }
+
+    /** A dotted, non-empty application id: what `uninstall` accepts. */
+    private fun isPackageName(value: String): Boolean {
+        if (value.isEmpty()) return false
+        if (value.contains(WHITESPACE)) return false
+        if (!value.contains('.')) return false
+        return value.all { it.isLetterOrDigit() || it == '.' || it == '_' }
     }
 
     /** A whitespace-separated token plus where it starts, for verbatim slicing. */

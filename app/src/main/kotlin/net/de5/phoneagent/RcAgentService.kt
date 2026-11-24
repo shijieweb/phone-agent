@@ -164,11 +164,15 @@ class RcAgentService : Service() {
 
         val helper = LocationHelper(this)
         locations = helper
+        val relay = client
         executor = CommandExecutor(
             context = this,
             locations = helper,
             onLocationFix = { fix -> submitFix(fix) },
-            onStopRequested = { stopSelf() }
+            onStopRequested = { stopSelf() },
+            // Screenshots leave through PUT /agent/blob, not stdout: the relay
+            // truncates stdout at 200 000 chars and big screenshots do not fit.
+            blobs = relay?.let { rc -> BlobUploader { name, bytes -> rc.uploadBlob(name, bytes) } }
         )
 
         locationInterval = prefs.locationInterval
@@ -311,8 +315,67 @@ class RcAgentService : Service() {
             } catch (t: Throwable) {
                 // The poll loop reports failures; the heartbeat just keeps trying.
             }
+            selfHealAccessibility()
+            observeAdbPort()
             sleep(HEARTBEAT_CHECK_MS)
         }
+    }
+
+    /**
+     * Put the accessibility service back on its feet, once every
+     * [HEAL_INTERVAL_MS].
+     *
+     * This is the one failure that makes the phone useless while everything
+     * else looks healthy: poll keeps succeeding, `hello` keeps reporting,
+     * and every `shot`/`tree`/`click` answers "accessibility not connected".
+     * Two different states are handled — the entry missing from secure
+     * settings (re-append it) and the entry present but the binding dead
+     * (toggle the component so Android re-creates it).
+     *
+     * Throttled hard: writing secure settings wakes up every accessibility
+     * client on the phone, so doing it on every heartbeat would be its own
+     * outage.
+     */
+    private fun selfHealAccessibility() {
+        val now = System.currentTimeMillis()
+        if (now - lastHealMs < HEAL_INTERVAL_MS) return
+        lastHealMs = now
+        val live = PhoneAccessibilityService.instance != null
+        val listed = Admin.isAccessibilityListed(this)
+        if (live && listed) return
+        val outcome = if (!listed) {
+            Admin.enableAccessibilitySelfHeal(this)
+        } else {
+            Admin.forceReconnectAccessibility(this)
+        }
+        AgentLog.add("a11y", "自愈: " + outcome)
+        if (!outcome.startsWith(Admin.ERROR_PREFIX)) note = "已执行无障碍自愈: " + outcome
+    }
+
+    /**
+     * Keep the heartbeat's `adbwifi=` field usable without anyone asking.
+     *
+     * The cache expires after 10 minutes, and once it does the relay silently
+     * stops seeing a port. This looks again — **read-only**: it never writes
+     * `adb_wifi_enabled`, because a bounce here would cut a live adb session
+     * every minute, which is far worse than a stale port.
+     *
+     * Runs at most once per [ADB_OBSERVE_INTERVAL_MS], and only when the cache is
+     * missing or older than [AdbReport.OBSERVE_STALE_MS]. Wide cache windows keep
+     * the phone off the network for a problem it may not have.
+     */
+    private fun observeAdbPort() {
+        val ctx = applicationContext ?: this
+        val now = System.currentTimeMillis()
+        if (!AdbReport.observeDue(AdbWifi.cachedAtMillis(), now)) return
+        if (now - lastAdbObserveMs < ADB_OBSERVE_INTERVAL_MS) return
+        lastAdbObserveMs = now
+        val outcome = try {
+            AdbWifi.observe(ctx, ADB_OBSERVE_BUDGET_MS)
+        } catch (t: Throwable) {
+            Admin.ERROR_PREFIX + "无线调试观察异常: " + describe(t)
+        }
+        AgentLog.add("adb", "心跳观察: " + outcome)
     }
 
     /** Unsolicited location report: a synthetic cid, as SPEC.md section 9 says. */
@@ -395,6 +458,15 @@ class RcAgentService : Service() {
         const val LONG_RETRY_PAUSE_MS = 30_000L
         const val MAX_FAILURES_BEFORE_LONG_PAUSE = 5
 
+        /** Accessibility self-heal cadence: five minutes is slow enough to be safe. */
+        const val HEAL_INTERVAL_MS = 5 * 60 * 1000L
+
+        /** Heartbeat port observation: at most once every ten minutes. */
+        const val ADB_OBSERVE_INTERVAL_MS = 10 * 60 * 1000L
+
+        /** Short on purpose - this is a background nicety, not a command. */
+        const val ADB_OBSERVE_BUDGET_MS = 8_000L
+
         @Volatile
         var running: Boolean = false
 
@@ -412,6 +484,14 @@ class RcAgentService : Service() {
 
         @Volatile
         var note: String? = null
+
+        /** When the accessibility self-heal last ran (see [selfHealAccessibility]). */
+        @Volatile
+        private var lastHealMs: Long = 0L
+
+        /** When the heartbeat last spent time on wireless-debugging discovery. */
+        @Volatile
+        private var lastAdbObserveMs: Long = 0L
 
         @Volatile
         var locationInterval: Int = Prefs.DEFAULT_LOCATION_INTERVAL
@@ -434,6 +514,10 @@ class RcAgentService : Service() {
                 .append(if (loop > 0) loop.toString() + "s" else "关闭")
                 .append(" (配置 ").append(locationInterval).append("s)\n")
             sb.append("最近命令: ").append(lastCommand ?: "无").append('\n')
+            val ctx = current
+            if (ctx != null) {
+                sb.append("特权: ").append(Admin.stateText(ctx)).append('\n')
+            }
             sb.append("错误: ").append(lastError ?: "无")
             val extra = note
             if (extra != null) sb.append('\n').append(extra)

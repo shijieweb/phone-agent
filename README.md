@@ -8,29 +8,62 @@ nothing needs to be exposed on the phone's network.
 - **No root.** No Shizuku. No ADB. No Google Play Services.
 - **Zero third-party dependencies.** JDK + Android framework only.
 - **~2.5 MB APK**, built entirely in GitHub Actions (no local Android SDK needed).
-- **Android 13+** (`minSdk 33`), `targetSdk 34`.
+- **Android 12+** (`minSdk 31`), `targetSdk 34`.
 
 ## What it can do
 
 | Area | Commands |
 |---|---|
-| Screen | `shot` (screenshot, no MediaProjection prompt), `tree` (node tree), `status` |
+| Screen | `shot [b64] [maxPx] [quality]` (screenshot, no MediaProjection prompt — uploaded as a blob and answered with one line of JSON; `b64` forces the old base64-on-stdout output), `tree` (node tree), `status` |
 | Touch | `tap`, `long`, `swipe` |
 | Keys | `key back\|home\|recents\|notifications\|quicksettings` |
 | Text | `text <string>` |
 | Apps | `apps`, `app <package>` |
 | Location | `loc`, `locloop <seconds>`, `locstop` |
+| Elements | `click [apply] SEL`, `longclick [apply] SEL`, `scroll`, `ime enter`, `confirm [apply] [t=N] <text>` — **dry run by default**: they report the node they *would* press; add `apply` to really press it |
+| Apps | `install <url>` (opens the system installer), `uninstall <pkg>` |
+| Privileged | `settings`, `logs`, `a11y heal`, `admin status\|release`, `lock` (works), `reboot` (always exit 6 — see below) |
+| Wireless ADB | `adbinfo` (IP + mDNS port + `adb connect` string), `adbheal [t=N]` (bounce wireless debugging off/on, then rediscover — this drops a live adb session). The port is also rediscovered on its own ~20 s after boot, and when the cache is 30 min stale, so `adb connect` keeps working without a command |
+| Files | `dl <url> [name]` — download into `/sdcard/Movies` and media-scan it so VLC lists it (cap 2 GB, `t=` timeout) |
 | Lifecycle | `ping`, `stop` |
+
+`stop` is authoritative: pressing it in the app also clears "start on boot", so
+the agent cannot come back by itself after a reboot or an update. Re-arm it with
+the `启动` button or the `开机自动启动` checkbox.
 
 Everything is driven by one-line commands delivered over the relay's long poll,
 and every command returns `exit` + `stdout` + `stderr`.
+
+Screenshots do not fit through that text channel (the relay truncates `stdout`
+at 200 000 chars), so `shot` **uploads the JPEG as a blob** — `PUT
+/agent/blob/<name>` — and answers with one line of JSON naming it. The
+controller then fetches `/ctl/blob/<name>`. `shot b64` restores the old
+base64-on-stdout output for a human at a terminal.
 
 ### What it deliberately cannot do
 
 There is **no arbitrary shell execution**. An app in the `untrusted_app` SELinux
 domain cannot run shell commands without root, and unlike many "AI phone control"
-projects this one does not pretend otherwise. Anything needing shell (installing
-APKs, `pm grant`, reading `/proc`) must be done once over a USB ADB session.
+projects this one does not pretend otherwise. Anything needing shell (`pm grant`,
+reading `/proc`) must be done once over a USB ADB session.
+
+**No silent install or uninstall either.** `INSTALL_PACKAGES` / `DELETE_PACKAGES`
+are `signature|privileged` without the `development` flag, so a sideloaded app
+cannot hold them and *Device Owner does not change that*. `install` therefore
+opens the system installer and `confirm apply <text>` presses its button — two
+commands, no lie about authority. Run `confirm <text>` first without `apply` to
+see which button it would press before letting it press anything.
+
+What `adb shell pm grant` *can* hand over is `WRITE_SECURE_SETTINGS`, `READ_LOGS`,
+`DUMP` and `PACKAGE_USAGE_STATS`; `admin status` reports each one's real state and
+every command that needs one fails with `exit=6` and the exact grant line.
+
+**No reboot, either.** `reboot` always answers exit 6, and no setup changes that:
+`PowerManager.reboot` needs `REBOOT`, which is `signature|privileged` (the same
+wall as `INSTALL_PACKAGES`, and `pm grant` cannot touch a signature
+permission), while the Device Owner door `DevicePolicyManager.reboot` needs
+provisioning on a factory-reset device, which this app never asks for. `lock`
+does work — `DevicePolicyManager.lockNow` only needs an active device admin.
 
 ## How it talks to the relay
 
@@ -78,7 +111,7 @@ handed out. A missed command can be re-sent; a double-executed destructive actio
 cannot be undone.
 
 See [SPEC.md](SPEC.md) for the frozen contract, including the exact command
-grammar, the node-tree format, and the screenshot size ladder.
+grammar, the node-tree format, and the screenshot blob/base64 paths.
 
 ## Install
 
