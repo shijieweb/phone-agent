@@ -462,12 +462,32 @@ class CommandExecutor(
     private fun rcFailure(reason: String): ExecutionResult =
         ExecutionResult(EXIT_NOT_FOUND, ShotBlob.error(reason), reason)
 
+    /**
+     * `tree`: read the screen, then read it once more [TreeSettle.SETTLE_MS]
+     * later and report the later answer when the two disagree.
+     *
+     * The second read is what makes a layout that landed mid-read visible; the
+     * root-level fix in [PhoneAccessibilityService.roots] is what stops the
+     * cached-snapshot case, and this covers the rest without turning `tree` into
+     * a slow command — one retry, 150 ms, nothing more (SPEC.md section 5).
+     */
     private fun tree(command: Command.Tree): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()
-        val text = onMain(TREE_TIMEOUT_MS) { UiTree.format(service.roots(), command.maxNodes) }
+        val first = readTree(service, command.maxNodes)
             ?: return ExecutionResult(EXIT_TIMEOUT, "", "tree timed out")
-        return ExecutionResult(EXIT_OK, text, "")
+        try {
+            Thread.sleep(TreeSettle.SETTLE_MS)
+        } catch (t: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return ExecutionResult(EXIT_OK, first, "")
+        }
+        val second = readTree(service, command.maxNodes)
+        return ExecutionResult(EXIT_OK, TreeSettle.pick(first, second), "")
     }
+
+    /** @return the formatted tree, or null when the main thread never answered. */
+    private fun readTree(service: PhoneAccessibilityService, maxNodes: Int): String? =
+        onMain(TREE_TIMEOUT_MS) { UiTree.format(service.roots(), maxNodes) }
 
     private fun tap(command: Command.Tap): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()

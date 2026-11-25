@@ -347,6 +347,34 @@ the UI) can restart the agent on cellular. Run the whole of 5.3 on Wi-Fi.
 wipes it — boot recovery is `BootReceiver` (§6). A ROM that aggressively reaps
 `uid 2000` background processes can kill the guard too; the app cannot prevent
 that, only notice it the next time it is opened.
+### `tree` must see a layout change without re-activating the window (v0.6.0-pad12)
+
+This is the bug the whole version exists for. Run it in the order it was found,
+because every step is a check:
+
+1. On the config page leave 高级设置 collapsed. `tree 200` over the relay and
+   count lines whose class is `android.widget.EditText` → **0**.
+2. `click apply 高级设置`. The reply is `clicked via=action ...` and a screenshot
+   shows the three fields and 保存.
+3. `tree 200` **immediately** → **3** `EditText`. Before this version it was 0,
+   and stayed 0 after six seconds and after a scroll; that is the regression to
+   watch for. If it is 0, the active window is being read through
+   `AccessibilityWindowInfo.getRoot()` again (cached snapshot) instead of
+   `rootInActiveWindow`.
+4. `click apply 高级设置` again to collapse it, then `tree 200` → back to **0**.
+   A tree that only ever grows is the other half of the same bug.
+5. Open a system page with a list (Settings → any screen with menu rows) and
+   `tree`; those rows must be there.
+6. `click apply 保存` — a node that only appeared in step 2 — must be found, not
+   answered with `no node matched`. That error on a node you can see means the
+   tree being searched is the stale one.
+7. Time it: `tree` must stay **under 500 ms** on this phone. It reads the screen
+   twice now, 150 ms apart, so a slow answer means something else got slow.
+8. With an IME open, `tree` must still show **both** the keyboard window and the
+   app window: the fresh root is merged with the other windows, not substituted
+   for them, and neither may appear twice (a duplicate would double every match
+   count and make `click apply` ambiguous).
+
 ### The debug page (v0.5.7-pad12)
 
 1. Open the app and scroll to the bottom. The last line is just `v0.5.7-pad12` —

@@ -1353,9 +1353,23 @@ One node per line:
   `x`=checked `d`=disabled `k`=selected.
 - Skip nodes that have no text, no contentDescription, no resource id **and** no
   flags — unless they have children (walk through them without emitting a line).
-- Enumerate **all** windows via `service.windows` (needs
-  `flagRetrieveInteractiveWindows`), starting each at depth 0; fall back to
-  `rootInActiveWindow` if `windows` is empty.
+- Enumerate **all** windows (needs `flagRetrieveInteractiveWindows`), each
+  starting at depth 0. The **active** window is read through `rootInActiveWindow`,
+  not through `AccessibilityWindowInfo.getRoot()`: on Flyme / Android 16 the
+  latter hands back a cached snapshot, so a panel that expands inside the window
+  already on screen never appears in it — measured on the real phone, pressing
+  高级设置 drew three `EditText`s and `tree` kept reporting zero after one second,
+  after six seconds and after a scroll; only switching away and back made them
+  visible. Every root is `refresh()`ed first (a failure just means the node went
+  away and it is used as-is). The remaining windows are read through
+  `window.root`, ordered top-of-screen first, and the active window is never
+  emitted twice: `WindowPicker.merge` keeps the fresh root first, then the
+  remaining windows top-of-screen first, de-duplicated by window id.
+- The screen is read **twice**, 150 ms apart, and the second answer is reported
+  when the two disagree. This is the self-healing half: a layout that lands
+  between the two reads becomes visible, and a second read that times out never
+  turns a good first read into a failure. One retry only — `tree` is run in a
+  loop while the operator pokes the screen, so it may not become slow.
 - If the tree is larger than `maxNodes`, stop and append a final line
   `... truncated at <n> nodes`.
 - Accessibility service not connected → `exit=3`, stderr `accessibility service not connected`.

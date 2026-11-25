@@ -32,6 +32,14 @@ itself before each beat) and cached APKs (24 h). `logs size` prints the three
 numbers, `logs trim` shows what it would delete, `logs trim apply` does it.
 See `SPEC.md` §3.18.
 
+Since v0.6.0-pad12 `tree` reads the active window through
+`rootInActiveWindow` and merges it with the other windows (IME, dialogs) instead
+of trusting `AccessibilityWindowInfo.getRoot()`, which on Flyme / Android 16
+returns a cached snapshot: a panel that expanded inside the window already on
+screen stayed invisible to `tree` — and therefore to `click apply` — until the
+window was re-activated. The screen is also read twice, 150 ms apart, and the
+later answer wins when the two disagree. See `SPEC.md` §5.
+
 | Area | Commands |
 |---|---|
 | Screen | `shot [b64] [maxPx] [quality]` (screenshot, no MediaProjection prompt — uploaded as a blob and answered with one line of JSON; `b64` forces the old base64-on-stdout output), `tree` (node tree), `status` |
