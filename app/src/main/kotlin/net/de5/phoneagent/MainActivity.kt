@@ -3,6 +3,8 @@ package net.de5.phoneagent
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -10,6 +12,8 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
+import android.util.TypedValue
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.CheckBox
@@ -19,11 +23,19 @@ import android.widget.ScrollView
 import android.widget.TextView
 
 /**
- * Minimal config screen, built in code (no XML layout): relay URL, agent id,
- * secret, start/stop, permission + settings shortcuts and a status line that
- * refreshes every 2 s from a static snapshot (SPEC.md section 6).
+ * The config screen, built in code (no XML) — the only screen a non-technical
+ * user ever sees (SPEC.md section 6).
  *
- * Nothing here touches the network.
+ * v0.5.8-pad12 cut it down from twelve buttons to one card, one main button, two
+ * switches, one permission wizard and a collapsed advanced section. The reason
+ * is not taste: twelve buttons had piled up for two different people on one
+ * screen. 启动/停止, the two switches and 一键设置权限 are what the phone's owner
+ * actually needs; the relay URL, the secret and the log tools belong to whoever
+ * debugs it, and the log tools now live on [DebugActivity] (five presses on the
+ * version line) together with the command panel.
+ *
+ * Nothing here touches the network, and every string the operator clicks by is
+ * defined once in [UiText] so `click apply <text>` cannot hit the wrong control.
  */
 class MainActivity : Activity() {
 
@@ -34,7 +46,11 @@ class MainActivity : Activity() {
     private lateinit var toggleButton: Button
     private lateinit var autoStartBox: CheckBox
     private lateinit var stayOnBox: CheckBox
-    private lateinit var statusView: TextView
+    private lateinit var statusTitle: TextView
+    private lateinit var statusDetail: TextView
+    private lateinit var permHint: TextView
+    private lateinit var noticeView: TextView
+    private lateinit var advancedBox: LinearLayout
     private lateinit var versionView: TextView
 
     /** Five presses inside three seconds open the debug screen (see onCreate). */
@@ -59,40 +75,65 @@ class MainActivity : Activity() {
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(48, 48, 48, 48)
 
-        addLabel(root, "Relay base URL")
-        relayEdit = addField(root, prefs.relayBase)
+        // ---- 1. the status card: one big word, one small line ----
+        statusTitle = TextView(this)
+        statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
+        statusTitle.setPadding(0, 0, 0, 8)
+        root.addView(statusTitle)
 
-        addLabel(root, "Agent id")
-        idEdit = addField(root, prefs.agentId)
+        statusDetail = TextView(this)
+        statusDetail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        statusDetail.setPadding(0, 0, 0, 24)
+        root.addView(statusDetail)
 
-        addLabel(root, "Secret")
-        secretEdit = addField(root, prefs.secret, password = true)
+        // ---- 2. the one button that matters ----
+        toggleButton = addButton(root, UiText.START) { toggleAgent() }
 
-        addButton(root, "保存") { save() }
-        toggleButton = addButton(root, "启动") { toggleAgent() }
-        autoStartBox = addCheckBox(root, "开机自动启动", prefs.autoStart) { checked ->
+        // Anything that went wrong or needs a human answer lands here instead of
+        // overwriting the status card: the card is a live snapshot, a failure is
+        // a sentence, and mixing them means neither is readable.
+        noticeView = TextView(this)
+        noticeView.setPadding(0, 8, 0, 16)
+        root.addView(noticeView)
+
+        // ---- 3. the two switches ----
+        autoStartBox = addCheckBox(root, UiText.AUTO_START, prefs.autoStart) { checked ->
             prefs.autoStart = checked
             refreshStatus()
         }
         // Same switch the `screen stayon` command flips, so the operator can set
         // it while holding the phone and still find it in force after a reboot.
-        stayOnBox = addCheckBox(root, "屏幕常亮", prefs.stayOn) { checked ->
+        stayOnBox = addCheckBox(root, UiText.STAY_ON, prefs.stayOn) { checked ->
             applyStayOn(checked)
         }
         addLabel(root, "屏幕常亮会关闭自动熄屏（需要 WRITE_SECURE_SETTINGS）")
         addLabel(root, StartPolicy.HINT)
-        addButton(root, "请求权限") { requestAgentPermissions() }
-        addButton(root, "打开无障碍设置") { openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS) }
-        addButton(root, "加入电池白名单") { requestBatteryExemption() }
-        addButton(root, "打开电池优化设置") {
-            openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-        }
-        addButton(root, "诊断并复制（推荐）") { runDiagnostics() }
-        addButton(root, "复制日志") { copyLog() }
-        addButton(root, "清空日志") { AgentLog.clear(); refreshStatus() }
 
-        statusView = TextView(this)
-        root.addView(statusView)
+        // ---- 4. one wizard instead of four buttons ----
+        // Four buttons asked the owner to know which permission was missing; the
+        // wizard asks [PermPlan] instead and does exactly the next missing thing,
+        // so pressing it repeatedly walks the list and nothing else.
+        addButton(root, UiText.PERMISSION) { advancePermission() }
+        permHint = TextView(this)
+        permHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        permHint.setPadding(0, 4, 0, 24)
+        root.addView(permHint)
+
+        // ---- 5. the advanced section, collapsed by default ----
+        // Deliberately not persisted: every visit starts collapsed, so a stray
+        // tap on the phone cannot leave the secret field on screen.
+        addButton(root, UiText.ADVANCED) { toggleAdvanced() }
+        advancedBox = LinearLayout(this)
+        advancedBox.orientation = LinearLayout.VERTICAL
+        advancedBox.visibility = View.GONE
+        addLabel(advancedBox, UiText.RELAY_LABEL)
+        relayEdit = addField(advancedBox, prefs.relayBase)
+        addLabel(advancedBox, UiText.ID_LABEL)
+        idEdit = addField(advancedBox, prefs.agentId)
+        addLabel(advancedBox, UiText.SECRET_LABEL)
+        secretEdit = addField(advancedBox, prefs.secret, password = true)
+        addButton(advancedBox, UiText.SAVE) { save() }
+        root.addView(advancedBox)
 
         scroll.addView(root)
         setContentView(scroll)
@@ -174,20 +215,20 @@ class MainActivity : Activity() {
         prefs.autoStart = decision.autoStart
         if (decision.start) {
             if (!prefs.isConfigured()) {
-                statusView.text = "未配置 relay 地址或口令"
+                noticeView.text = "未配置 relay 地址或口令"
                 syncAutoStartBox()
                 return
             }
             try {
                 startForegroundService(Intent(this, RcAgentService::class.java))
             } catch (t: Throwable) {
-                statusView.text = "启动失败: " + (t.message ?: "")
+                noticeView.text = "启动失败: " + (t.message ?: "")
             }
         } else {
             try {
                 stopService(Intent(this, RcAgentService::class.java))
             } catch (t: Throwable) {
-                statusView.text = "停止失败: " + (t.message ?: "")
+                noticeView.text = "停止失败: " + (t.message ?: "")
             }
         }
         syncAutoStartBox()
@@ -210,8 +251,26 @@ class MainActivity : Activity() {
         } catch (t: Throwable) {
             "错误: " + describe(t)
         }
-        statusView.text = result
+        noticeView.text = result
         stayOnBox.isChecked = prefs.stayOn
+        refreshStatus()
+    }
+
+    /**
+     * Do exactly the next missing thing, then say what is still missing.
+     *
+     * The pressed text is written *before* the action so a specific message from
+     * the action (a refused intent, "pick 允许 in the dialog") wins over it.
+     */
+    private fun advancePermission() {
+        val step = currentStep()
+        noticeView.text = PermPlan.pressed(step)
+        when (step) {
+            PermPlan.Step.RUNTIME -> requestAgentPermissions()
+            PermPlan.Step.ACCESSIBILITY -> openSettings(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+            PermPlan.Step.BATTERY -> requestBatteryExemption()
+            PermPlan.Step.DONE -> Unit
+        }
         refreshStatus()
     }
 
@@ -234,7 +293,7 @@ class MainActivity : Activity() {
         try {
             startActivity(Intent(action))
         } catch (t: Throwable) {
-            statusView.text = "无法打开设置: $action"
+            noticeView.text = "无法打开设置: $action"
         }
     }
 
@@ -251,46 +310,42 @@ class MainActivity : Activity() {
             val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
             intent.data = Uri.parse("package:$packageName")
             startActivity(intent)
-            statusView.text = "请在系统弹窗里选择「允许」"
+            noticeView.text = "请在系统弹窗里选择「允许」"
         } catch (t: Throwable) {
-            statusView.text = "本机不支持直接申请，已打开设置列表"
+            noticeView.text = "本机不支持直接申请，已打开设置列表"
             openSettings(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
         }
     }
 
-    private fun refreshStatus() {
-        statusView.text = RcAgentService.snapshot() +
-            "\n电池白名单: " + Battery.flag(this)
-        toggleButton.text = if (RcAgentService.running) "停止" else "启动"
-        if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
-        if (stayOnBox.isChecked != prefs.stayOn) stayOnBox.isChecked = prefs.stayOn
+    /** Which permission the wizard would do next, asked fresh every refresh. */
+    private fun currentStep(): PermPlan.Step = PermPlan.next(
+        checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED,
+        PhoneAccessibilityService.instance != null,
+        Battery.isExempt(this)
+    )
+
+    private fun toggleAdvanced() {
+        advancedBox.visibility =
+            if (advancedBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
     /**
-     * Walk the network layers and copy the result. Runs off the UI thread
-     * because it makes real connections with short timeouts.
+     * The card is the whole page in two lines: the word the owner looks for, and
+     * the three facts that explain a "why is it not working".
      */
-    private fun runDiagnostics() {
-        statusView.text = "正在诊断…（最多约 1 分钟）"
-        Thread(Runnable {
-            val text = try {
-                Diagnostics.run(this, prefs)
-            } catch (t: Throwable) {
-                "诊断本身失败: " + describe(t) + "\n" + stackOf(t)
-            }
-            Clipboard.copy(this, text)
-            uiHandler.post {
-                statusView.text = "诊断结果已复制到剪贴板（" +
-                    text.length + " 字符），粘贴发回即可。\n\n" + RcAgentService.snapshot()
-            }
-        }, "diagnostics").start()
-    }
-
-    private fun copyLog() {
-        val text = Diagnostics.stateOnly(prefs)
-        Clipboard.copy(this, text)
-        statusView.text = "状态与日志已复制到剪贴板（" +
-            text.length + " 字符）。\n\n" + RcAgentService.snapshot()
+    private fun refreshStatus() {
+        val running = RcAgentService.running
+        statusTitle.text = if (running) "运行中" else "已停止"
+        statusTitle.setTextColor(if (running) COLOR_RUNNING else COLOR_STOPPED)
+        statusDetail.text = "无障碍 " +
+            (if (PhoneAccessibilityService.instance != null) "已开启" else "未开启") +
+            " · 电池白名单 " + Battery.flag(this) +
+            " · v" + BuildConfig.VERSION_NAME
+        toggleButton.text = if (running) UiText.STOP else UiText.START
+        if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
+        if (stayOnBox.isChecked != prefs.stayOn) stayOnBox.isChecked = prefs.stayOn
+        permHint.text = PermPlan.hint(currentStep())
     }
 
     private fun addLabel(parent: LinearLayout, text: String) {
@@ -354,5 +409,9 @@ class MainActivity : Activity() {
         private const val REFRESH_MS = 2_000L
         private const val REQ_PERMISSIONS = 100
         private const val REQ_BACKGROUND_LOCATION = 101
+
+        /** 运行中/已停止的两种颜色：光看字在太阳底下不够，颜色要跟着变。 */
+        private val COLOR_RUNNING = Color.parseColor("#2E7D32")
+        private val COLOR_STOPPED = Color.parseColor("#C62828")
     }
 }

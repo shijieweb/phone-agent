@@ -171,6 +171,8 @@ reach the `unknown command` branch.
 | `confirm [apply] [t=SECONDS] TEXT` | **dry run** by default; `apply` waits for a *pressable* node whose text/desc contains `TEXT` and presses it (see §3.2) |
 | `settings [get\|put] global\|secure\|system KEY [VALUE]` | read or write a system setting |
 | `logs [lines]` | logcat tail, default 120, cap 500 |
+| `logs size` | what the logs occupy, in three separate ledgers: the in-memory ring (`AgentLog`, cap 400), the guard log `/data/local/tmp/phoneagent-guard.log` (cap 64 KB, measured over self-ADB) and leftover APKs in `cacheDir` (§3.18) |
+| `logs trim [apply]` | **dry run** by default; `apply` cuts the guard log back to its last 200 lines when it is over 64 KB and deletes cached APKs older than 24 h |
 | `admin status` | authority report: Device Owner, admin, each development permission, installer app-op, accessibility |
 | `admin release` | drop Device Owner and remove ourselves as device admin |
 | `a11y status` | read-only: master switch, list entry, live binding, last rebuild — and the one repair that fits (see §3.15) |
@@ -1175,6 +1177,49 @@ outcome**, not a crash: `wake` must never throw.
 `loop` = periodic location interval in seconds (0 = off),
 `opt` = `"on"` when the app is exempt from battery optimisation, else `"off"`.
 
+### 3.18 `logs size` / `logs trim`: three ledgers, one question
+
+The agent writes logs in three unrelated places, and before v0.5.8-pad12 nobody
+could answer "how big is it" without a shell. `logs size` reports all three; the
+same numbers appear in the debug page summary (§6.1) so the operator and the
+owner are looking at one truth.
+
+| Ledger | Where | Cap | Who trims |
+|---|---|---|---|
+| in-memory ring | `AgentLog` | `AgentLog.MAX_LINES` = 400 lines | `AgentLog.add` drops the oldest and counts it (`droppedCount`) |
+| guard log | `/data/local/tmp/phoneagent-guard.log`, written by the watchdog script (§3.17) | `WatchdogPlan.LOG_MAX_BYTES` = 64 KB | the script itself: before each 60 s beat, if the file is over the cap it keeps the last `LOG_KEEP_LINES` = 200 lines; `Watchdog.arm` also trims once at arm time |
+| cached APKs | `cacheDir` | `LogSizes.APK_STALE_MS` = 24 h | `Downloader.pruneNow` at service start, plus `logs trim apply` |
+
+**Why the script trims itself.** The guard log is written by a shell loop that
+outlives the app (that is the whole point of §3.17), so nothing in-process can
+keep it bounded. `tail -n 200` costs nothing on a 64 KB file and the loop is
+already awake once a minute; a log that grows until the phone is full is a bug
+that only shows up months later on somebody else's phone.
+
+**Why a dry run is the default.** `logs trim` with no argument deletes nothing —
+it prints what it *would* remove and ends with
+`dry-run: 没有删除任何东西，加 apply 才真删。`. Trimming is irreversible and the
+relay carries the operator's keystrokes, not their eyes; `apply` has to be typed
+on purpose.
+
+**Reading the guard log is a self-ADB round trip.** `GuardProbe` shells out over
+our own adbd (§3.16) with a 10 s timeout, so:
+
+- a missing file is reported as 文件还没建，守护脚本还没 arm 过 — not as 0 B, because
+  "empty" and "absent" are different problems;
+- a timeout is reported as 读取超时（10000ms 内没有结果） and the byte count stays
+  unknown rather than being filled in with a zero;
+- `apply` that cannot read the result back says 已发出裁剪命令，但没回读到结果
+  instead of claiming success;
+- `parseGuard` takes the **last** `B=`/`L=` pair in the reply, because the PTY
+  echoes the command line itself (where the numbers are still `$(wc ...)`), and a
+  reply carrying only one of the two numbers is treated as unreadable rather than
+  half-trusted.
+
+The debug page measures this ledger on its own 30 s timer
+(`DebugActivity.GUARD_REFRESH_MS`), not on the 2 s summary refresh: one round
+trip per two seconds would keep the shell busy for no new information.
+
 ### Exit codes
 | Code | Meaning |
 |---|---|
@@ -1280,43 +1325,63 @@ One node per line:
 ## 6. UI (`MainActivity`)
 
 One screen, `android.app.Activity`, plain `LinearLayout` built in code (no XML
-layout file). Fields:
+layout file). Since v0.5.8-pad12 it is organised for the phone's owner, not for
+the operator — top to bottom:
 
-- Relay base URL (`EditText`, default `https://relay.2-c.cc`)
-- Agent id (`EditText`, default `PHONE-MEIZU`)
-- Secret (`EditText`, `inputType=textPassword`)
-- `保存` button → persists to SharedPreferences
-- `启动 / 停止` button → starts/stops `RcAgentService`, and **writes the
-  auto-start flag in the same press**: stopping sets `auto_start = false`
-  *before* the service is touched, starting sets it `true`. The decision itself
-  is `StartPolicy.onToggle` (§7), so the button and `BootReceiver` can never
-  disagree. Without this, "stop" was a suggestion: a reboot, an app update or
-  `START_STICKY` would bring the agent back on a phone nobody was watching.
-- `开机自动启动` checkbox → binds `Prefs.autoStart`, written on every change; the
-  button updates it too, and the box is re-synced on refresh so it never shows a
-  stale value
-- `屏幕常亮` checkbox → the same switch as `screen stayon` (§3.14). It calls
-  `ScreenOps.stayOn` — never a second write path — and then re-reads
-  `Prefs.stayOn`, so a refused write leaves the box unchecked instead of showing
-  a state that is not in force.
-- A hint line under them (`StartPolicy.HINT`): 停止后不会自动启动，除非重新点「启动」；
-  勾选「开机自动启动」时，重启或装新版会自己拉起。
-- Opening the UI starts the service when `StartPolicy.shouldStartOnOpen` says so
-  (§3.17). This is not a convenience: Flyme delivers no package-replaced
-  broadcast, so after a silent `pm install -r` the only signal the app ever gets
-  is somebody bringing the activity up.
-- `请求权限` button → requests `POST_NOTIFICATIONS`,
-  `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, then (second pass)
-  `ACCESS_BACKGROUND_LOCATION`
-- `打开无障碍设置` button → `ACTION_ACCESSIBILITY_SETTINGS`
-- `加入电池白名单` button → `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with
-  `package:<applicationId>`; if the ROM refuses the intent, fall back to
-  `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`
-- `打开电池优化设置` button → `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`
-- A `TextView` status line refreshed every 2 s from a static snapshot held by
-  `RcAgentService` (service state, accessibility on/off, last poll time, last
-  error), plus the current battery-whitelist state. Never do network I/O on the
-  UI thread.
+1. **Status card.** One big word, 运行中 / 已停止 (28 sp, green / red), and under
+   it one small line: 无障碍 已开启 · 电池白名单 on · v0.5.8-pad12. Refreshed
+   every 2 s from the static snapshot `RcAgentService` holds; never any network
+   I/O on the UI thread.
+2. **The one main button**, `启动 / 停止` (`UiText.START` / `UiText.STOP`) →
+   starts/stops `RcAgentService`, and **writes the auto-start flag in the same
+   press**: stopping sets `auto_start = false` *before* the service is touched,
+   starting sets it `true`. The decision itself is `StartPolicy.onToggle` (§7),
+   so the button and `BootReceiver` can never disagree. Without this, "stop" was
+   a suggestion: a reboot, an app update or `START_STICKY` would bring the agent
+   back on a phone nobody was watching.
+3. **Two switches.** `开机自动启动` binds `Prefs.autoStart`, written on every
+   change; the button updates it too, and the box is re-synced on refresh so it
+   never shows a stale value. `屏幕常亮` is the same switch as `screen stayon`
+   (§3.14): it calls `ScreenOps.stayOn` — never a second write path — and then
+   re-reads `Prefs.stayOn`, so a refused write leaves the box unchecked instead
+   of showing a state that is not in force. A hint line under them carries
+   `StartPolicy.HINT`: 停止后不会自动启动，除非重新点「启动」；勾选「开机自动启动」时，
+   重启或装新版会自己拉起。
+4. **`一键设置权限` — one wizard instead of four buttons.** Four buttons asked the
+   owner to know *which* permission was missing. The wizard asks `PermPlan.next`
+   instead and does exactly the next missing thing, so pressing it repeatedly
+   walks the list: runtime permissions → accessibility → battery whitelist →
+   权限已齐全. The order is not cosmetic: location comes first because the
+   background grant is a two-pass question (§2 of `manualcheck.md`), and a
+   settings screen opened in the middle of it means the second question is never
+   asked. The line under the button (`PermPlan.hint`) says what is still missing.
+   - runtime → `requestPermissions` with `POST_NOTIFICATIONS` (API 33+),
+     `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, then (second pass)
+     `ACCESS_BACKGROUND_LOCATION`
+   - accessibility → `ACTION_ACCESSIBILITY_SETTINGS`
+   - battery → `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with
+     `package:<applicationId>`; if the ROM refuses the intent, fall back to
+     `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS`
+5. **`高级设置` — collapsed by default.** Relay base URL (`EditText`, default
+   `https://relay.2-c.cc`), Agent id (`EditText`, default `PHONE-MEIZU`), Secret
+   (`EditText`, `inputType=textPassword`) and `保存` → persists to
+   SharedPreferences. The section's `visibility` is `GONE` until the title is
+   pressed and is **not persisted**: every visit starts collapsed, so a stray tap
+   cannot leave the secret field on screen. Saving only writes prefs; it never
+   restarts the service behind the owner's back.
+6. **The version line**, `v` + `BuildConfig.VERSION_NAME`, with no hint text —
+   and the five-press door to `DebugActivity` (§6.1).
+7. Opening the UI starts the service when `StartPolicy.shouldStartOnOpen` says so
+   (§3.17). This is not a convenience: Flyme delivers no package-replaced
+   broadcast, so after a silent `pm install -r` the only signal the app ever gets
+   is somebody bringing the activity up.
+
+Every clickable label is defined once in `UiText` (`START`, `STOP`, `SAVE`,
+`AUTO_START`, `STAY_ON`, `PERMISSION`, `ADVANCED`) because the operator drives
+the real device with `click apply <text>`, not with coordinates: two controls
+with the same text is a mis-click, and a label that changes with state is a
+control that cannot be found. `UiText.clickable` is asserted unique in
+`PermPlanTest`.
 
 Buttons must not crash when the service was never started.
 
@@ -1345,6 +1410,7 @@ process, same executor.
     then stderr, in a monospace `TextView`. Off the UI thread always: `tree`
     waits on the main looper, `shot` uploads a blob, `logs` walks logcat.
   - **C. Quick actions:** `shot`, `tree 30`, `logs 200`,
+    `logs size`, `logs trim` (dry run), `logs trim apply`,
     `Diagnostics.run` (≈1 min, copied to the clipboard, previewed),
     `Diagnostics.stateOnly` (zero network, copied), clear the log.
   - **D. 返回配置页** → `finish()`.

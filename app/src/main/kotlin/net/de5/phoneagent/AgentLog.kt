@@ -16,8 +16,13 @@ import java.util.Locale
  */
 internal object AgentLog {
 
-    /** Enough for roughly two hours of 25 s polls, small enough to paste anywhere. */
-    private const val MAX_LINES = 400
+    /**
+     * Enough for roughly two hours of 25 s polls, small enough to paste anywhere.
+     *
+     * internal 而不是 private（v0.5.8-pad12）：`logs size` 要把这个上限念给操作员听，
+     * 由 [LogSizes] 直接引用；抄一份数字过去迟早会两边不一致。
+     */
+    const val MAX_LINES = 400
 
     private const val LOGCAT_TAG = "PhoneAgent"
 

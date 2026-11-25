@@ -212,6 +212,11 @@ class RcAgentService : Service() {
         // 下一次被 force-stop 或静默安装顶掉时，有人替我们 `am start` 把界面拉起来。
         // 独立线程：一次 shell 往返可能要 10 秒，不能占轮询或心跳的线程。
         worker("rc-watchdog") { Watchdog.armQuietly() }
+
+        // 顺手裁一次缓存里的安装包残留（v0.5.8-pad12）：下载目录过去只在「下一次下载」
+        // 之前裁，装完就静止的机器会一直留着旧 APK。文件操作很便宜，独立线程只是
+        // 不想让它在启动路径上多等一次磁盘。
+        worker("rc-prune") { Downloader.pruneNow(this) }
     }
 
     private fun worker(name: String, body: () -> Unit): Thread {

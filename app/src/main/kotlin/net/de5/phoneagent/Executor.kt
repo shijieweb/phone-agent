@@ -186,6 +186,12 @@ class CommandExecutor(
             is Command.Logs ->
                 logs(command)
 
+            is Command.LogsSize ->
+                logsSize()
+
+            is Command.LogsTrim ->
+                logsTrim(command)
+
             is Command.Confirm ->
                 confirm(command)
 
@@ -679,6 +685,60 @@ class CommandExecutor(
             return ExecutionResult(EXIT_PERMISSION, "", text)
         }
         return ExecutionResult(EXIT_OK, text, "")
+    }
+
+    /**
+     * `logs size` — 三处账本：内存环形缓冲、守护日志、缓存目录里的 APK 残留（v0.5.8-pad12）。
+     *
+     * 三处必须分开报，因为它们由三个不同的东西管：环形缓冲在进程里，守护日志在
+     * /data/local/tmp（只有 self-adb 读得到），APK 在 cacheDir。合成一个总数等于
+     * 告诉操作员「日志有点大」，然后什么也修不了。
+     */
+    private fun logsSize(): ExecutionResult {
+        val guard = GuardProbe.read()
+        return ExecutionResult(
+            EXIT_OK,
+            LogSizes.sizeReport(
+                guard.first,
+                guard.second,
+                AgentLog.size(),
+                AgentLog.droppedCount(),
+                Downloader.cached(context)
+            ),
+            ""
+        )
+    }
+
+    /**
+     * `logs trim` — 裁守护日志 + 清超 24 小时的 APK 残留。
+     *
+     * 默认 dry-run，只报「将裁掉什么」；`logs trim apply` 才真删。判定只有一份
+     * （[LogSizes.stale] 与 [WatchdogPlan.LOG_MAX_BYTES]），dry-run 与 apply 差
+     * 的只是动不动手，所以报告不会出现「预览说会删、执行时却按另一套标准」。
+     */
+    private fun logsTrim(command: Command.LogsTrim): ExecutionResult {
+        val before = GuardProbe.read()
+        val apks = Downloader.cached(context)
+        val stale = LogSizes.stale(apks, System.currentTimeMillis())
+        var after: LogSizes.Guard? = null
+        if (command.apply) {
+            // 只有真拿到回执才回读；没跑成就不回读，报告里那一段会写「没回读到」，
+            // 而不是替裁剪成功吹牛。
+            if (GuardProbe.trim()) after = GuardProbe.read().first
+            Downloader.discardStale(context, stale)
+        }
+        return ExecutionResult(
+            EXIT_OK,
+            LogSizes.trimReport(
+                before.first,
+                before.second,
+                stale,
+                apks.size - stale.size,
+                command.apply,
+                after
+            ),
+            ""
+        )
     }
 
     private fun adminStatus(): ExecutionResult = ExecutionResult(
@@ -1267,6 +1327,7 @@ class CommandExecutor(
 
         /** `sh` 的看门狗余量：哨兵要等命令自己结束，边界上不能误判超时。 */
         private const val SH_SLACK_MS = 5_000L
+
 
         /** 配对/连接的外部预算比发现预算各多给 10 秒，留出 TLS 握手时间。 */
         private const val PAIR_TIMEOUT_MS = 30_000L

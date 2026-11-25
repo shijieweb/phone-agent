@@ -374,6 +374,29 @@ that, only notice it the next time it is opened.
    start it (`adb shell am start -n net.de5.phoneagent/.DebugActivity` is
    refused: not exported).
 
+### Log size and trimming (v0.5.8-pad12)
+
+1. On the debug page the summary carries a fourth line: `日志: N 行/丢弃 M · 守护日志 X KB · APK 残留 K 个`.
+   N never exceeds 400. The first measurement takes one self-ADB round trip, so
+   it appears up to 30 s after the page opens (or press 日志占用 logs size).
+2. `logs size` from the relay prints the same three ledgers, each with its cap
+   and what the cap has thrown away. The guard line says 不可用（原因） when the
+   log has never been armed — it must never print `0 B` for a file that does not
+   exist.
+3. `logs trim` (no argument) is a **dry run**: it lists the guard log and every
+   cached APK older than 24 h, then ends with
+   `dry-run: 没有删除任何东西，加 apply 才真删。`. Check with `logs size` that
+   nothing shrank.
+4. `logs trim apply` really does it: the guard log drops to its last 200 lines
+   when it was over 64 KB, stale APKs disappear, and the reply ends with 已按上面执行。
+   Re-running `logs trim apply` immediately is harmless (it reports 不动 / under).
+5. Let the phone sit a day (or `dd` junk into `/data/local/tmp/phoneagent-guard.log`
+   until it passes 64 KB), then wait for the next watchdog beat: the file shrinks
+   to ≤200 lines **by itself**, with the app never opened. That is the point —
+   the loop outlives the app.
+6. Nothing here may touch `/sdcard/Movies` or any downloaded film: trimming is
+   limited to `cacheDir` and the guard log.
+
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
 1. Get a direct video link (any host, `http` or `https`, no login page).

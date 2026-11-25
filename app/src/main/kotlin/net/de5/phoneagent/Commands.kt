@@ -83,6 +83,10 @@ sealed class Command {
     data class Settings(val namespace: String, val key: String, val value: String?) : Command()
     /** `logs [lines]` — a tail of logcat. */
     data class Logs(val lines: Int) : Command()
+    /** `logs size` — where the log bytes live: memory ring, guard log, APK cache. */
+    object LogsSize : Command()
+    /** `logs trim [apply]` — dry-run by default: report what would be freed. */
+    data class LogsTrim(val apply: Boolean) : Command()
 
     /**
      * `confirm [t=SECONDS] TEXT` — click the on-screen button whose label
@@ -400,6 +404,9 @@ object Commands {
     const val LOGS_LINES_DEFAULT = 120
     const val LOGS_LINES_MAX = 500
 
+    /** 三种用法合成一句，报错时照着念就知道该敲什么。 */
+    const val LOGS_USAGE = "usage: logs [lines] | logs size | logs trim [apply]"
+
     /** `adbheal [t=SECONDS]`: how long to wait for the port, default 20. */
     const val ADBHEAL_TIMEOUT_DEFAULT = 20
     const val ADBHEAL_TIMEOUT_MAX = 60
@@ -613,9 +620,22 @@ object Commands {
 
             "logs" -> {
                 val args = splitArgs(rest)
-                val lines = optionalInt(args, 0, LOGS_LINES_DEFAULT)
-                    ?: return Command.BadUsage("usage: logs [lines]")
-                Command.Logs(lines.coerceIn(1, LOGS_LINES_MAX))
+                // 数字仍是老语义（tail logcat），只有第一个词不是数字时才分流到
+                // size/trim：relay 上跑着的旧脚本一条都没变。
+                when (args.firstOrNull()?.lowercase()) {
+                    "size" -> Command.LogsSize
+                    "trim" -> when {
+                        args.size == 1 -> Command.LogsTrim(apply = false)
+                        args.size == 2 && args[1].equals("apply", ignoreCase = true) ->
+                            Command.LogsTrim(apply = true)
+                        else -> Command.BadUsage(LOGS_USAGE)
+                    }
+                    else -> {
+                        val lines = optionalInt(args, 0, LOGS_LINES_DEFAULT)
+                            ?: return Command.BadUsage(LOGS_USAGE)
+                        Command.Logs(lines.coerceIn(1, LOGS_LINES_MAX))
+                    }
+                }
             }
 
             "admin" -> {

@@ -40,6 +40,21 @@ internal object WatchdogPlan {
     /** 检查间隔：60 秒。太短会一直唤醒 CPU，太长老板会觉得「装完没反应」。 */
     const val INTERVAL_SECONDS = 60
 
+    /**
+     * 守护日志的硬上限：64KB（v0.5.8-pad12）。
+     *
+     * 过去这个文件是**唯一**无界的东西：每重启一次追加一行，谁也不会来删。
+     * 现在脚本每轮追加前先自检大小，超了就先裁到末 [LOG_KEEP_LINES] 行再写；
+     * arm 的时候也先裁一次，免得上一版留下的巨无霸继续长。
+     */
+    const val LOG_MAX_BYTES = 64 * 1024
+
+    /** 裁的时候保留末尾这么多行：够看最近几十次重启，又不至于一眼看不到头。 */
+    const val LOG_KEEP_LINES = 200
+
+    /** 脚本里把 wc 的补位空格去掉；只用双引号，脚本里一个单引号都不许有。 */
+    private const val TRIM_SPACE = "\" \""
+
     const val USAGE = "usage: watchdog [status] | watchdog arm | watchdog disarm"
 
     /** 脚本里必须用到的美元符；直接写 $ 会被 Kotlin 当模板插值，用 Char 拼。 */
@@ -59,10 +74,14 @@ internal object WatchdogPlan {
         "# One job: if RcAgentService is gone, pull the UI up so the service returns.",
         "LOG=" + LOG_PATH,
         "PKG=" + PACKAGE,
+        "CAP=" + LOG_MAX_BYTES,
         "if [ -f " + OFF_MARKER + " ]; then exit 0; fi",
         "while true; do",
         "  if [ -f " + OFF_MARKER + " ]; then exit 0; fi",
         "  if ! dumpsys activity services " + D + "PKG 2>/dev/null | grep -q " + SERVICE_CLASS + "; then",
+        "    SZ=" + D + "(wc -c < " + D + "LOG 2>/dev/null | tr -d " + TRIM_SPACE + ")",
+        "    if [ " + D + "{SZ:-0} -gt " + D + "CAP ]; then tail -n " + LOG_KEEP_LINES +
+            " " + D + "LOG > " + D + "LOG.tmp && mv " + D + "LOG.tmp " + D + "LOG; fi",
         "    echo " + D + "(date +%Y-%m-%dT%H:%M:%S) restart >> " + D + "LOG",
         "    am start -n " + D + "PKG/.MainActivity >/dev/null 2>&1",
         "  fi",
@@ -93,7 +112,13 @@ internal object WatchdogPlan {
      * 先删停止标记，否则上一轮 disarm 留下的标记会让脚本立刻退出。
      */
     fun armCommand(): String =
-        "rm -f " + OFF_MARKER + "; setsid sh " + SCRIPT_PATH + " >/dev/null 2>&1 &"
+        "rm -f " + OFF_MARKER +
+            "; if [ -f " + LOG_PATH + " ]; then SZ=" + D + "(wc -c < " + LOG_PATH +
+            " 2>/dev/null | tr -d " + TRIM_SPACE + "); if [ " + D + "{SZ:-0} -gt " +
+            LOG_MAX_BYTES + " ]; then tail -n " + LOG_KEEP_LINES + " " + LOG_PATH +
+            " > " + LOG_PATH + ".tmp && mv " + LOG_PATH + ".tmp " + LOG_PATH +
+            "; fi; fi" +
+            "; setsid sh " + SCRIPT_PATH + " >/dev/null 2>&1 &"
 
     /**
      * 停止守护的命令：先写标记（幂等），再 pkill，最后回读一次进程表。

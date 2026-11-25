@@ -16,10 +16,21 @@ nothing needs to be exposed on the phone's network.
 
 ## What it can do
 
-The app has two screens: the config page (URL, secret, 启动) and, hidden behind
-five presses on the version line at the bottom, an operator's debug page that
-runs one command line through the live agent and shows the answer — same
-`Commands.parse` path as the relay, no round trip. See `SPEC.md` §6.1.
+The app has two screens: the config page and, hidden behind five presses on the
+version line at the bottom, an operator's debug page that runs one command line
+through the live agent and shows the answer — same `Commands.parse` path as the
+relay, no round trip. See `SPEC.md` §6.1.
+
+Since v0.5.8-pad12 the config page is written for the phone's owner, not for me:
+one big 运行中 / 已停止 word, one 启动 button, two switches, and a single
+一键设置权限 button that does the next missing thing instead of asking which of
+four buttons to press. URL / secret moved into a collapsed 高级设置 section.
+
+Logs are capped in all three places they accumulate — the in-memory ring (400
+lines), the watchdog log on `/data/local/tmp` (64 KB, trimmed by the script
+itself before each beat) and cached APKs (24 h). `logs size` prints the three
+numbers, `logs trim` shows what it would delete, `logs trim apply` does it.
+See `SPEC.md` §3.18.
 
 | Area | Commands |
 |---|---|

@@ -124,6 +124,62 @@ internal object Downloader {
      * download instead. A day is far longer than any install confirmation takes
      * and keeps cacheDir from growing by a few dozen MB per upgrade.
      */
+    /**
+     * 服务启动时也裁一次（v0.5.8-pad12）。
+     *
+     * 只在下次下载前裁的话，装完就再也不下载的机器会一直留着几十 MB 的旧 APK：
+     * 那台手机恰恰是最安静的一台，谁也不会来点「安装」。
+     */
+    fun pruneNow(context: Context) {
+        try {
+            val dir = File(context.cacheDir, CACHE_SUBDIR)
+            if (dir.isDirectory) pruneOld(dir)
+        } catch (t: Throwable) {
+            // Best effort: see pruneOld.
+        }
+    }
+
+    /**
+     * cacheDir/apk 里的文件清单（v0.5.8-pad12，给 `logs size` / `logs trim` 用）。
+     *
+     * 放在这里而不是 Executor 里：这个目录和它的 24 小时规则是 [Downloader] 的，
+     * 别处再拼一次路径，早晚会和 STALE_MS 对不上。读不到就返回空表——少报一个
+     * 残留，也比编一个数好。
+     */
+    fun cached(context: Context): List<LogSizes.Apk> {
+        val dir = File(context.cacheDir, CACHE_SUBDIR)
+        val files = try {
+            dir.listFiles()
+        } catch (t: Throwable) {
+            null
+        } ?: return emptyList()
+        val out = ArrayList<LogSizes.Apk>(files.size)
+        for (file in files) {
+            if (!file.isFile) continue
+            try {
+                out.add(LogSizes.Apk(file.name, file.length(), file.lastModified()))
+            } catch (t: Throwable) {
+                // 单个文件读不到就跳过，不影响其余条目。
+            }
+        }
+        return out
+    }
+
+    /** 删掉 [stale] 点名的那些；返回真正删掉的个数，供报告对账。 */
+    fun discardStale(context: Context, stale: List<LogSizes.Apk>): Int {
+        if (stale.isEmpty()) return 0
+        val dir = File(context.cacheDir, CACHE_SUBDIR)
+        var gone = 0
+        for (apk in stale) {
+            try {
+                if (File(dir, apk.name).delete()) gone++
+            } catch (t: Throwable) {
+                // Best effort: 删不掉就留着，下次再试。
+            }
+        }
+        return gone
+    }
+
     private fun pruneOld(dir: File) {
         try {
             val cutoff = System.currentTimeMillis() - STALE_MS

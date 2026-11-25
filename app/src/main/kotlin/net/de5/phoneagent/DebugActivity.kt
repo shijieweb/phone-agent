@@ -34,12 +34,31 @@ class DebugActivity : Activity() {
     private lateinit var commandEdit: EditText
     private lateinit var resultView: TextView
 
+    /**
+     * 守护日志 / APK 残留的最近一次测量（v0.5.8-pad12）。
+     *
+     * 这两个数要靠 self-adb 跑 shell，不能塞进 2 秒一次的那个刷新里：量一次要
+     * 一次往返，而摘要每 2 秒重画一次。所以分两条节奏——摘要 2 秒、测量 30 秒，
+     * 中间显示上一次量到的数（宁可显示旧数也不让界面卡住）。
+     */
+    private var guard: LogSizes.Guard? = null
+    private var guardNote: String? = null
+    private var apks: List<LogSizes.Apk> = emptyList()
+    private var measuring = false
+
     private val uiHandler = Handler(Looper.getMainLooper())
 
     private val refresher = object : Runnable {
         override fun run() {
             refreshSummary()
             uiHandler.postDelayed(this, REFRESH_MS)
+        }
+    }
+
+    private val guardRefresher = object : Runnable {
+        override fun run() {
+            measureLogs()
+            uiHandler.postDelayed(this, GUARD_REFRESH_MS)
         }
     }
 
@@ -81,6 +100,11 @@ class DebugActivity : Activity() {
         addButton(root, "截图 shot") { runCommand("shot") }
         addButton(root, "节点树 tree 30") { runCommand("tree 30") }
         addButton(root, "日志 logs 200") { runCommand("logs 200") }
+        // 日志占用与裁剪（v0.5.8-pad12）：dry-run 与真删分开两个按钮，
+        // 免得手快点掉了一次真的删除。
+        addButton(root, "日志占用 logs size") { runCommand("logs size") }
+        addButton(root, "日志裁剪 logs trim（只看）") { runCommand("logs trim") }
+        addButton(root, "日志裁剪并执行 logs trim apply") { runCommand("logs trim apply") }
         addButton(root, "诊断 Diagnostics.run") { runDiagnostics() }
         addButton(root, "状态与日志 Diagnostics.stateOnly") { copyState() }
         addButton(root, "清空日志") {
@@ -99,10 +123,12 @@ class DebugActivity : Activity() {
         super.onResume()
         refreshSummary()
         uiHandler.postDelayed(refresher, REFRESH_MS)
+        uiHandler.post(guardRefresher)
     }
 
     override fun onPause() {
         uiHandler.removeCallbacks(refresher)
+        uiHandler.removeCallbacks(guardRefresher)
         super.onPause()
     }
 
@@ -120,7 +146,39 @@ class DebugActivity : Activity() {
             .append('\n')
             .append("电量: ").append(if (battery < 0) "未知" else battery.toString() + "%").append('\n')
             .append("自连 ADB: ").append(if (SelfAdb.isConnected()) "已连接" else "未连接")
+            .append('\n')
+            .append(LogSizes.summaryLine(AgentLog.size(), AgentLog.droppedCount(), guard, apks))
             .toString()
+    }
+
+    /**
+     * 量一次日志占用：守护日志走 self-adb，APK 残留直接读 cacheDir。
+     *
+     * 在后台线程里跑，且同一时刻只允许一个在飞——self-adb 一次往返可能几十毫秒，
+     * 也可能卡到超时，叠起来会把 shell 通道挤满。
+     */
+    private fun measureLogs() {
+        if (measuring) return
+        measuring = true
+        Thread({
+            val measured = try {
+                GuardProbe.read()
+            } catch (t: Throwable) {
+                Pair(null, describe(t))
+            }
+            val files = try {
+                Downloader.cached(this)
+            } catch (t: Throwable) {
+                emptyList<LogSizes.Apk>()
+            }
+            uiHandler.post {
+                guard = measured.first
+                guardNote = measured.second
+                apks = files
+                measuring = false
+                refreshSummary()
+            }
+        }, "debug-guard").start()
     }
 
     /**
@@ -205,5 +263,8 @@ class DebugActivity : Activity() {
 
     companion object {
         private const val REFRESH_MS = 2_000L
+
+        /** 守护日志 30 秒量一次：它是低频数据，2 秒一次只会挤占 self-adb。 */
+        private const val GUARD_REFRESH_MS = 30_000L
     }
 }
