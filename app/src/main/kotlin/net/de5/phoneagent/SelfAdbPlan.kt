@@ -316,8 +316,20 @@ internal object SelfAdbPlan {
     fun notConnected(): String =
         "尚未连接 adb：配对成功后执行 shconnect（配对只交换密钥，连接是另一步）"
 
-    fun noPort(service: String): String =
-        "没发现 " + service + " 端口：确认无线调试已打开，等 3-5 秒重试（部分 ROM 会过滤 mDNS 广播）"
+    /**
+     * @param ignored 被 [MdnsGate] 丢掉的其它设备广播；非空时把条数一起报出来，
+     *   否则操作员会以为是「网线没插」而不是「被过滤了」。
+     */
+    fun noPort(service: String, ignored: List<String> = emptyList()): String =
+        "没发现 " + service + " 端口：确认无线调试已打开，等 3-5 秒重试（部分 ROM 会过滤 mDNS 广播）" +
+            (MdnsGate.ignoredLine(ignored)?.let { "；" + it } ?: "")
+
+    /**
+     * 导入失败：私钥解不出 n/e。文案刻意不提 CRT —— 旧的实现只会
+     * `as? RSAPrivateCrtKey`，Android 12 上 Conscrypt 不保证返回 CRT 实例，
+     * 于是把一把好钥匙判成了坏钥匙（见 [RsaDer]）。
+     */
+    fun importNotRsa(): String = "导入失败：这把私钥不是 RSA 私钥，或者 PKCS#8 结构不认识"
 
     fun timeoutText(millis: Long): String = "命令超时（" + (millis / 1000L) + "s 内没有返回）"
 

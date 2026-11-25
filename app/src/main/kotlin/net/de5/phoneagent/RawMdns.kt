@@ -33,8 +33,20 @@ internal object RawMdns {
     private const val MIN_PHASE_MS = 500L
     private const val BUFFER_BYTES = 4096
 
-    /** One raw-query outcome; a null [port] always comes with a [note]. */
-    internal class Hit(val port: Int?, val host: String?, val note: String?)
+    /**
+     * One raw-query outcome; a null [port] always comes with a [note].
+     *
+     * [ignored] lists the advertisements [MdnsGate] dropped because they came
+     * from another device on the same Wi-Fi (see the tablet bug in MdnsGate's
+     * doc). The caller turns it into the operator-visible "已忽略 N 个其它设备
+     * 的广播" line.
+     */
+    internal class Hit(
+        val port: Int?,
+        val host: String?,
+        val note: String?,
+        val ignored: List<String> = emptyList()
+    )
 
     fun discover(context: Context, serviceType: String, budgetMs: Long): Hit {
         if (budgetMs < MIN_PHASE_MS) return Hit(null, null, "裸 mDNS 查询没有时间预算")
@@ -51,15 +63,30 @@ internal object RawMdns {
         }
         try {
             val deadline = System.currentTimeMillis() + budgetMs
+            // 一次发现只读一次本机地址：地址闸要用它，收包循环里不必反复问系统。
+            val localIp = AdbWifi.localIpv4(context)
+            val rejected = ArrayList<String>()
             val unicastBudget = if (budgetMs < UNICAST_PHASE_MS) budgetMs else UNICAST_PHASE_MS
-            val first = ask(serviceType, unicastResponse = true, budgetMs = unicastBudget)
+            val first = ask(
+                serviceType = serviceType,
+                unicastResponse = true,
+                budgetMs = unicastBudget,
+                localIp = localIp,
+                rejected = rejected
+            )
             if (first.port != null) return first
 
             val remaining = deadline - System.currentTimeMillis()
-            if (remaining < MIN_PHASE_MS) return Hit(null, null, first.note)
-            val second = ask(serviceType, unicastResponse = false, budgetMs = remaining)
+            if (remaining < MIN_PHASE_MS) return Hit(null, null, first.note, rejected.toList())
+            val second = ask(
+                serviceType = serviceType,
+                unicastResponse = false,
+                budgetMs = remaining,
+                localIp = localIp,
+                rejected = rejected
+            )
             if (second.port != null) return second
-            return Hit(null, null, joinNotes(first.note, second.note))
+            return Hit(null, null, joinNotes(first.note, second.note), rejected.toList())
         } finally {
             try {
                 lock?.release()
@@ -70,7 +97,13 @@ internal object RawMdns {
     }
 
     /** One query + receive window. Never throws; failures become a note. */
-    private fun ask(serviceType: String, unicastResponse: Boolean, budgetMs: Long): Hit {
+    private fun ask(
+        serviceType: String,
+        unicastResponse: Boolean,
+        budgetMs: Long,
+        localIp: String?,
+        rejected: MutableList<String>
+    ): Hit {
         val service = Mdns.queryName(serviceType)
         val query = Mdns.ptrQuery(service, unicastResponse)
         var socket: MulticastSocket? = null
@@ -98,7 +131,15 @@ internal object RawMdns {
                     break
                 }
                 val answer = Mdns.parse(buffer, packet.length, service)
-                if (answer.found) return Hit(answer.port, answer.address, null)
+                val foundPort = answer.port
+                // 收到第一个应答就走人，是平板拿到手机端口的直接原因：
+                // mDNS 是局域网广播，先到的未必是自己那台。过闸才算数。
+                if (answer.found && foundPort != null) {
+                    val decision = MdnsGate.check(localIp, answer.address, foundPort)
+                    if (decision.pass) return Hit(foundPort, answer.address, null, rejected.toList())
+                    val why = decision.rejected
+                    if (why != null && !rejected.contains(why)) rejected.add(why)
+                }
             }
             return Hit(null, null, "裸 mDNS 查询 " + budgetMs + "ms 内没有收到应答")
         } catch (t: Throwable) {

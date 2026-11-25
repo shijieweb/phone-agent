@@ -135,15 +135,15 @@ internal object SelfAdbKeys {
         } catch (t: Throwable) {
             return KeyImport.Failed("导入失败：私钥无法解析（需要 PKCS#8 的 RSA 私钥）")
         }
-        val crt = privateKey as? RSAPrivateCrtKey
-            ?: return KeyImport.Failed("导入失败：私钥不是 RSA CRT 私钥（拿不到模数）")
+        // 不再 `as? RSAPrivateCrtKey` 一把梭：Android 12 上 Conscrypt 对 PKCS#8
+        // 返回的实例不保证实现 CRT 接口，那样会把一把好钥匙判成「拿不到模数」
+        // （平板 Lenovo TB-J607F 实测 shkey import 稳定 exit=6，同一把钥匙在
+        // Android 16 上却导入成功）。现在先试 CRT，失败就从 DER 自己解 n/e。
         val publicKey = try {
-            KeyFactory.getInstance("RSA").generatePublic(
-                java.security.spec.RSAPublicKeySpec(crt.modulus, crt.publicExponent)
-            ) as RSAPublicKey
+            publicFrom(privateKey)
         } catch (t: Throwable) {
             return KeyImport.Failed("导入失败：从私钥推不出公钥")
-        }
+        } ?: return KeyImport.Failed(SelfAdbPlan.importNotRsa())
         // 私钥与公钥必须是一对：adb 编码是确定性的（n0inv / rr 都由模数算出），
         // 所以两边算出来的 524 字节结构体应当逐字节相同。对不上就说明下载到
         // 了别人的公钥，那种情况下手机一定会拒绝认证。
@@ -157,7 +157,7 @@ internal object SelfAdbKeys {
         if (ours == null || !ours.contentEquals(providedBlob.copyOfRange(0, SelfAdbPlan.PUB_BLOB_SIZE))) {
             return KeyImport.Failed("导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）")
         }
-        val material = build(privateKey)
+        val material = build(privateKey, publicKey)
             ?: return KeyImport.Failed("导入失败：无法由私钥生成自签证书")
 
         val target = dir(context)
@@ -224,13 +224,52 @@ internal object SelfAdbKeys {
 
     // ------------------------------------------------------------ 内部
 
-    private fun build(privateKey: PrivateKey): Material? {
-        val crt = privateKey as? RSAPrivateCrtKey ?: return null
-        val publicKey = KeyFactory.getInstance("RSA").generatePublic(
-            java.security.spec.RSAPublicKeySpec(crt.modulus, crt.publicExponent)
-        ) as RSAPublicKey
+    /**
+     * 由私钥拼出 [Material]。
+     *
+     * @param publicKeyHint 已经算出来的公钥（`import` 里为了做逐字节比对先算过一次），
+     *   有就直接用，省一次 KeyFactory；没有就走 [publicFrom]。
+     */
+    private fun build(privateKey: PrivateKey, publicKeyHint: RSAPublicKey? = null): Material? {
+        val publicKey = publicKeyHint ?: publicFrom(privateKey) ?: return null
         val certificate = selfSigned(privateKey, publicKey) ?: return null
         return Material(privateKey, publicKey, certificate)
+    }
+
+    /**
+     * 从私钥取 n/e 造公钥，三条路按代价从低到高排：
+     *
+     * 1. 实例本身就是 [RSAPrivateCrtKey]（绝大多数平台）—— 直接读；
+     * 2. 不是 CRT，但 `encoded` 是 PKCS#8 —— 用 [RsaDer] 自己走 DER 抠 n/e；
+     * 3. 都不行 —— null，由调用方报「这把私钥不是 RSA」。
+     *
+     * 第 2 条是 Android 12 的救命路：Conscrypt 给的实例可能只是
+     * `RSAPrivateKey`，密钥本身完全可用。
+     */
+    private fun publicFrom(privateKey: PrivateKey): RSAPublicKey? {
+        val crt = privateKey as? RSAPrivateCrtKey
+        val n: BigInteger
+        val e: BigInteger
+        if (crt != null) {
+            n = crt.modulus
+            e = crt.publicExponent
+        } else {
+            val der = try {
+                privateKey.encoded
+            } catch (t: Throwable) {
+                null
+            } ?: return null
+            val pair = RsaDer.modulusAndExponent(der) ?: return null
+            n = pair.first
+            e = pair.second
+        }
+        return try {
+            KeyFactory.getInstance("RSA").generatePublic(
+                java.security.spec.RSAPublicKeySpec(n, e)
+            ) as RSAPublicKey
+        } catch (t: Throwable) {
+            null
+        }
     }
 
     private fun stripPem(pem: String): String = pem

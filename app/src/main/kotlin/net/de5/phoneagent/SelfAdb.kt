@@ -10,6 +10,7 @@ import java.io.IOException
 import java.net.InetAddress
 import java.security.PrivateKey
 import java.security.cert.Certificate
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -225,8 +226,9 @@ internal object SelfAdb {
         val ctx = app ?: return SelfAdbPlan.notPaired()
         if (!SelfAdbPlan.validPairCode(code)) return SelfAdbPlan.badPairCode()
         val keys = ensureMaterial() ?: return SelfAdbPlan.keyFailed()
-        val port = discoverPort(ctx, SelfAdbPlan.SERVICE_PAIRING, SelfAdbPlan.PAIR_BUDGET_MS)
-            ?: return note(SelfAdbPlan.noPort(SelfAdbPlan.SERVICE_PAIRING))
+        val found = discoverPort(ctx, SelfAdbPlan.SERVICE_PAIRING, SelfAdbPlan.PAIR_BUDGET_MS)
+        val port = found.port
+            ?: return note(SelfAdbPlan.noPort(SelfAdbPlan.SERVICE_PAIRING, found.ignored))
         return try {
             val session = Manager(keys)
             session.pair(SelfAdbPlan.HOST, port, code)
@@ -253,8 +255,9 @@ internal object SelfAdb {
         val existing = manager
         if (existing != null && existing.isConnected()) return SelfAdbPlan.connectOk()
         val keys = ensureMaterial() ?: return SelfAdbPlan.keyFailed()
-        val port = discoverPort(ctx, SelfAdbPlan.SERVICE_CONNECT, SelfAdbPlan.CONNECT_BUDGET_MS)
-            ?: return note(SelfAdbPlan.noPort(SelfAdbPlan.SERVICE_CONNECT))
+        val found = discoverPort(ctx, SelfAdbPlan.SERVICE_CONNECT, SelfAdbPlan.CONNECT_BUDGET_MS)
+        val port = found.port
+            ?: return note(SelfAdbPlan.noPort(SelfAdbPlan.SERVICE_CONNECT, found.ignored))
         return try {
             val session = Manager(keys)
             val ok = session.connect(SelfAdbPlan.HOST, port)
@@ -517,6 +520,9 @@ internal object SelfAdb {
     private fun precondition(text: String): SelfAdbPlan.Exit =
         SelfAdbPlan.Exit(null, note(text), precondition = true)
 
+    /** 一次发现的结论：端口，加上被闸丢掉的其它设备广播（给报错用）。 */
+    private class Discovery(val port: Int?, val ignored: List<String> = emptyList())
+
     /**
      * 发现 mDNS 广播的端口。
      *
@@ -524,26 +530,55 @@ internal object SelfAdb {
      * （魅族刚翻无线调试开关时，系统缓存里可能还没有记录，裸查询能抢到）。
      * 两级都空就按 AdbWifi 的经验把 adb_wifi_enabled 关一下再开，
      * 逼 adbd 重发广播，然后重试一轮。
+     *
+     * 每一级找到的每个候选都要过 [MdnsGate]：mDNS 是局域网广播，同一网段
+     * 每台开了无线调试的设备都在播，平板实测拿到的正是**手机**的端口
+     * （192.168.0.106:40157），于是 shconnect 稳定超时。闸不过的候选只记进
+     * [Discovery.ignored]，绝不当成「差不多就用它」——宁可报没找到，
+     * 也不拿别人的端口去握手。
      */
-    private fun discoverPort(ctx: Context, serviceType: String, budgetMs: Long): Int? {
-        val first = nsdPort(ctx, serviceType, budgetMs)
-        if (first != null) return first
+    private fun discoverPort(ctx: Context, serviceType: String, budgetMs: Long): Discovery {
+        val rejected = CopyOnWriteArrayList<String>()
+        val first = nsdPort(ctx, serviceType, budgetMs, rejected)
+        if (first != null) return Discovery(first)
         val raw = RawMdns.discover(ctx, serviceType, budgetMs / 2)
-        if (raw.port != null) return raw.port
-        if (!bounce(ctx)) return null
-        return nsdPort(ctx, serviceType, budgetMs)
+        if (raw.port != null) return Discovery(raw.port)
+        for (entry in raw.ignored) {
+            if (!rejected.contains(entry)) rejected.add(entry)
+        }
+        if (!bounce(ctx)) return Discovery(null, rejected.toList())
+        return Discovery(nsdPort(ctx, serviceType, budgetMs, rejected), rejected.toList())
     }
 
-    private fun nsdPort(ctx: Context, serviceType: String, budgetMs: Long): Int? {
+    /**
+     * NsdManager 这一级：预算内**持续收集**候选，不是第一个就返回。
+     *
+     * 老实现拿到第一个端口就 latch.countDown()，而回调里的 host 被直接丢掉 ——
+     * 这两件事合起来就是平板那个 bug。现在每个候选都过 [MdnsGate.check]，
+     * 第一个通过两道闸的才返回，都不通过就继续等到预算耗尽。
+     */
+    private fun nsdPort(
+        ctx: Context,
+        serviceType: String,
+        budgetMs: Long,
+        rejected: MutableList<String>
+    ): Int? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) return null
         var mdns: AdbMdns? = null
         val latch = CountDownLatch(1)
         val port = AtomicReference<Int>(-1)
+        // 一次发现只读一次本机地址：闸里的地址比对全靠它。
+        val localIp = AdbWifi.localIpv4(ctx)
         return try {
             mdns = AdbMdns(ctx, serviceType) { host: InetAddress?, found: Int ->
                 if (found > 0) {
-                    port.set(found)
-                    latch.countDown()
+                    val decision = MdnsGate.check(localIp, host?.hostAddress, found)
+                    if (decision.pass) {
+                        if (port.compareAndSet(-1, found)) latch.countDown()
+                    } else {
+                        val why = decision.rejected
+                        if (why != null && !rejected.contains(why)) rejected.add(why)
+                    }
                 }
             }
             mdns.start()

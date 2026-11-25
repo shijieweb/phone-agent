@@ -323,6 +323,45 @@ Both tiers failing is reported as both failing, each with its own reason:
 说明 = NsdManager 未发现（在 1995ms 内没有解析到 _adb-tls-connect._tcp 广播（本机自解析可能被 ROM 过滤）），裸 mDNS 查询也未收到应答（裸 mDNS 查询 2500ms 内没有收到应答）
 ```
 
+#### The gate: a broadcast is not necessarily *our* broadcast (v0.6.4-pad12)
+
+mDNS is a **shared** channel. Every device with wireless debugging on, on the same
+Wi-Fi, advertises `_adb-tls-connect._tcp`. Measured on the test tablet
+(Lenovo TB-J607F, Android 12) with the phone on the same network:
+
+| Fact | Value |
+|---|---|
+| tablet's own adbd | `192.168.0.108:41081` (desktop `adb connect` succeeded) |
+| what the tablet's discovery returned | `40157` |
+| who really owns 40157 | the **phone**, `192.168.0.106` (`adb connect` refused, 10061) |
+| symptom | `shconnect` stable `exit 4`, 「连接超时（30000ms 内没有结果）」 |
+
+The upstream helper (`AdbMdns.java:112-128`) only checks that the port is bindable
+on *some* local interface; it never asks where the advertisement came from, and the
+old `nsdPort()` threw the callback's `host` away and returned the first port it saw.
+
+So every candidate now passes `MdnsGate` (`MdnsGate.kt`), two gates in fixed order:
+
+1. **Address** — the advertisement's address must equal this device's wlan IPv4
+   (`AdbWifi.localIpv4`). Equal ⇒ pass. Different ⇒ drop. Either side unknown ⇒
+   undecidable, go to gate 2.
+2. **Loopback** — actually connect `127.0.0.1:port`. Our own adbd is always
+   listening there (that is the address `SelfAdb` connects to); someone else's
+   port never is. Harder evidence than string comparison.
+
+When the address already decided, gate 2 is skipped: there is no second
+possibility to pay a TCP round trip for. Discovery **keeps collecting** candidates
+until the budget runs out instead of returning the first one, and a port is only
+ever reported when it passed. **No candidate is ever "tried anyway"** — if nothing
+passes, the answer is "not found" plus how many foreign advertisements were dropped:
+
+```
+没发现 adb-tls-connect 端口：确认无线调试已打开，等 3-5 秒重试（部分 ROM 会过滤 mDNS 广播）；已忽略 1 个其它设备的广播（如 192.168.0.106:40157）
+```
+
+In `adbinfo`/`adbheal` the count is folded into the existing `说明 = ` line rather
+than added as a seventh line — the report format stays exactly six lines.
+
 The source line always says which tier answered:
 `无线调试端口 = 41277（来源 _adb-tls-connect._tcp（NsdManager））` or
 `（来源 _adb-tls-connect._tcp（裸 mDNS 查询））`.
@@ -954,7 +993,8 @@ untouched when validation fails:
 | Check | Failure text |
 |---|---|
 | private key is PKCS#8 PEM | `导入失败：私钥不是 PKCS#8 PEM（需要 -----BEGIN PRIVATE KEY----- 开头）` |
-| private key parses as RSA CRT | `导入失败：私钥无法解析（需要 PKCS#8 的 RSA 私钥）` |
+| private key parses as PKCS#8 | `导入失败：私钥无法解析（需要 PKCS#8 的 RSA 私钥）` |
+| modulus/exponent readable | `导入失败：这把私钥不是 RSA 私钥，或者 PKCS#8 结构不认识` |
 | public key decodes to 524 bytes | `导入失败：公钥只有 N 字节，adb 结构体需要 524 字节` |
 | public key declares 64 modulus words | `导入失败：公钥模数长度是 N 字，不是 2048 位（64 字）` |
 | the two halves match | `导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）` |
@@ -964,6 +1004,23 @@ The halves are compared by re-encoding the private key's public half with
 blob: the adb encoding is deterministic (both `n0inv` and `rr` derive from the
 modulus), so a mismatch means someone else's public key was served and the
 phone would reject authentication anyway.
+
+**Reading n/e without a CRT cast (v0.6.4-pad12).** The old code did
+`privateKey as? RSAPrivateCrtKey ?: fail("私钥不是 RSA CRT 私钥（拿不到模数）")`,
+and the same cast lived in `build()` — so on a platform that returns a plain
+`RSAPrivateKey` the app could not even *load* its own key. Measured on the tablet
+(Android 12 / API 31): `shkey import` failed with `exit 6` on every attempt while
+the very same key imported fine on Android 16. The key was never the problem.
+
+`publicFrom()` now tries three paths, cheapest first: the CRT interface → the
+PKCS#8 DER walked by `RsaDer.modulusAndExponent()` → give up. `RsaDer` is a
+minimal hand-written DER reader (no third-party library): `PrivateKeyInfo` →
+`algorithm` OID must be `1.2.840.113549.1.1.1` → `privateKey` OCTET STRING →
+`RSAPrivateKey` → `modulus`, `publicExponent`. It refuses anything it does not
+recognise: wrong OID, truncated buffer, indefinite length, modulus under 128
+bytes, non-positive or even exponent, `e = 1`. A guess here would produce a
+public key that fails the byte-for-byte comparison above, or worse, a handshake
+that fails much later with a much less useful message.
 
 Files are written to a temporary name and renamed, so a crash leaves the old
 key intact rather than half a new one, and the process-wide `SSLContext` is

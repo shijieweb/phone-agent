@@ -14,6 +14,7 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.Socket
 import java.util.Collections
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -309,8 +310,20 @@ internal object AdbWifi {
 
     // ------------------------------------------------------------- discovery
 
-    /** One discovery outcome; [port] null means "not found", never 0-as-unknown. */
-    internal class Found(val port: Int?, val source: String?, val note: String?)
+    /**
+     * One discovery outcome; [port] null means "not found", never 0-as-unknown.
+     *
+     * [ignored] lists the advertisements [MdnsGate] dropped because they belong
+     * to another device on the same Wi-Fi. It is folded into [note] rather than
+     * given its own line: the report format is a fixed six lines and the
+     * operator reads it line by line.
+     */
+    internal class Found(
+        val port: Int?,
+        val source: String?,
+        val note: String?,
+        val ignored: List<String> = emptyList()
+    )
 
     /**
      * Two tiers, in order:
@@ -322,12 +335,15 @@ internal object AdbWifi {
      *    is demonstrably still on the wire (the PC resolved it on every try).
      *
      * Tier 2 runs unless tier 1 already answered. Both failing is reported as
-     * both failing, with each tier's own reason.
+     * both failing, with each tier's own reason, plus how many foreign
+     * advertisements [MdnsGate] threw away - otherwise "not found" reads as
+     * "the Wi-Fi is off" when the truth is "we heard the phone next door".
      */
     fun discoverTwoTier(context: Context, budgetMs: Long): Found {
         val start = System.currentTimeMillis()
+        val rejected = CopyOnWriteArrayList<String>()
         val nsdBudget = if (budgetMs > RAW_RESERVE_MS) budgetMs - RAW_RESERVE_MS else budgetMs
-        val nsd = discoverWithNsd(context, nsdBudget)
+        val nsd = discoverWithNsd(context, nsdBudget, rejected)
         if (nsd.port != null) return Found(nsd.port, AdbReport.SOURCE_NSD, null)
 
         val remaining = budgetMs - (System.currentTimeMillis() - start)
@@ -336,8 +352,11 @@ internal object AdbWifi {
         val rawBudget = if (remaining < MIN_ROUND_MS) MIN_RAW_MS else remaining
         val raw = RawMdns.discover(context.applicationContext, AdbReport.SERVICE_TYPE, rawBudget)
         if (raw.port != null) return Found(raw.port, AdbReport.SOURCE_RAW, null)
+        for (entry in raw.ignored) {
+            if (!rejected.contains(entry)) rejected.add(entry)
+        }
 
-        return Found(null, null, AdbReport.twoTierNote(nsd.note, raw.note))
+        return Found(null, null, AdbReport.twoTierNote(nsd.note, raw.note), rejected.toList())
     }
 
     /**
@@ -345,14 +364,18 @@ internal object AdbWifi {
      * NsdManager refuses to resolve the same service twice without
      * re-discovering it, and because \`adbheal\` may be racing the daemon up.
      */
-    fun discoverWithNsd(context: Context, budgetMs: Long): Found {
+    fun discoverWithNsd(
+        context: Context,
+        budgetMs: Long,
+        rejected: MutableList<String> = CopyOnWriteArrayList()
+    ): Found {
         val deadline = System.currentTimeMillis() + budgetMs
         var lastNote: String? = null
         while (true) {
             val remaining = deadline - System.currentTimeMillis()
             if (remaining < MIN_ROUND_MS) break
             val round = if (remaining < DISCOVER_ROUND_MS) remaining else DISCOVER_ROUND_MS
-            val outcome = AdbDiscovery(context.applicationContext, round).run()
+            val outcome = AdbDiscovery(context.applicationContext, round, rejected).run()
             if (outcome.port != null) return Found(outcome.port, AdbReport.SOURCE_NSD, null)
             lastNote = outcome.note ?: lastNote
         }
@@ -388,12 +411,24 @@ internal object AdbWifi {
      * multi-second discovery is out of the question. So each round gets a
      * private HandlerThread; the caller only waits on a latch.
      */
-    private class AdbDiscovery(private val ctx: Context, private val budgetMs: Long) {
+    /**
+     * 一轮 NsdManager 发现。
+     *
+     * [rejected] 是跨轮共享的：一轮没找到，被闸丢掉的其它设备广播也要留下来，
+     * 最后拼进「说明 =」那行，否则操作员看到的只是「未发现广播」。
+     */
+    private class AdbDiscovery(
+        private val ctx: Context,
+        private val budgetMs: Long,
+        private val rejected: MutableList<String>
+    ) {
 
         private val done = CountDownLatch(1)
         private val hit = AtomicReference<Pair<String, Int>?>(null)
         private val note = AtomicReference<String?>(null)
         private val thread = HandlerThread("adbdisc")
+        // 一次发现只读一次本机地址，解析回调里直接比字符串。
+        private val localIp = localIpv4(ctx)
         private var lock: WifiManager.MulticastLock? = null
         private var manager: NsdManager? = null
         private var listener: NsdManager.DiscoveryListener? = null
@@ -483,12 +518,20 @@ internal object AdbWifi {
                     override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                         val port = serviceInfo.port
                         val host = serviceInfo.host?.hostAddress
-                        if (port in 1..65535) {
+                        if (port !in 1..65535) {
+                            note.set("广播里没有可用端口（port=" + port + "）")
+                            return
+                        }
+                        // 过闸：同一网段每台设备都在播这个服务，先解析到的不一定
+                        // 是本机（平板实测拿到手机的 40157）。
+                        val decision = MdnsGate.check(localIp, host, port)
+                        if (decision.pass) {
                             hit.compareAndSet(null, Pair(host ?: "", port))
                             done.countDown()
-                        } else {
-                            note.set("广播里没有可用端口（port=" + port + "）")
+                            return
                         }
+                        val why = decision.rejected
+                        if (why != null && !rejected.contains(why)) rejected.add(why)
                     }
                 }
                 nsd.resolveService(info, resolver)

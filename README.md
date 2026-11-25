@@ -48,6 +48,19 @@ green the rest is. All four facts are re-probed every 3 s while the page is in
 front (never cached, never on a background thread, never any network). See
 `SPEC.md` §6.
 
+Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
+with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
+port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s
+dialling a neighbour and gave up with 连接超时. Every candidate now passes two gates
+(its address must be this device's wlan IP; if the address cannot decide, the port
+must actually answer on `127.0.0.1`), discovery keeps collecting until the budget
+runs out instead of taking the first hit, and when nothing passes the reply says how
+many foreign advertisements were dropped. No port is ever "tried anyway". The same
+round removed the `RSAPrivateCrtKey` cast from key loading: on Android 12 the platform
+hands back a plain `RSAPrivateKey`, so `shkey import` failed with 不是 RSA CRT 私钥
+while the very same key imported fine on Android 16. Modulus and exponent are now read
+from the PKCS#8 DER when the CRT interface is missing. See `SPEC.md` §3.4 and §3.16.
+
 Since v0.6.3-pad12 **nothing starts the agent by itself.** The owner asked for
 开机不自启, so `BootReceiver` now only repairs the phone (stay-on timeout,
 accessibility binding, wireless-ADB port) and never calls

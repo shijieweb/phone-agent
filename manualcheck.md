@@ -368,7 +368,7 @@ out of the same test round.
    opening it.
 4. `watchdog status` on a phone still running a v0.5.8 guard script, then
    `watchdog arm`: the answer is
-   ｜已换掉旧脚本并启用守护（pid …, 版本 v0.6.3-pad12, 每 60s 检查一次）｜, and a
+   「已换掉旧脚本并启用守护（pid …, 版本 v0.6.3-pad12, 每 60s 检查一次）」, and a
    second `arm` right after answers 未重复启动. Before v0.6.3 the first `arm` said
    未重复启动 and the old script stayed forever, so a fix to the script could never
    reach a phone in the field.
@@ -538,6 +538,41 @@ and the screen on.
    reply is unchanged. Nothing in the app may claim that grant fixed it.
 4. `logs size` and `logs trim` are **not** affected — they measure files, not
    logcat, and must behave exactly as in the previous section with self-ADB down.
+
+### Two devices on one Wi-Fi: connect to yourself, not to the neighbour (v0.6.4-pad12)
+
+1. Put the phone and the tablet on the same Wi-Fi with wireless debugging on for both.
+   On the desktop, `adb mdns services` shows **two** `_adb-tls-connect._tcp` entries with
+   different addresses — that is the condition this guards against.
+2. On the tablet: `shconnect`. It must either connect to the tablet's own port or say
+   没发现 …端口 — it must **never** spend 30 s and end with 连接超时 on a port that
+   belongs to the phone.
+3. When it fails, the reply ends with 已忽略 N 个其它设备的广播（如 192.168.0.106:40157）.
+   The address in the example must be the *other* device's, and the port must be the one
+   that device really listens on (`adb -s <other> shell …` or the desktop `adb connect`
+   check). N counts every foreign advertisement dropped, not every packet seen.
+4. `adbinfo` / `adbheal` on the tablet: still exactly six lines, and the count appears
+   inside the existing `说明 = ` line. A seventh line is a regression.
+5. Turn the phone's wireless debugging off and repeat `shconnect`: the ignored count must
+   drop to zero (or the line disappears) and the port found must be the tablet's own.
+   This proves the gate rejects by address, not by luck of ordering.
+
+### `shkey import` on Android 12 (v0.6.4-pad12)
+
+1. On the tablet (Lenovo TB-J607F, Android 12 / API 31): `shkey import` with the same
+   private/public pair that works on the Android 16 phone. It must answer 导入成功 and
+   print the fingerprint — previously it always failed with
+   导入失败：私钥不是 RSA CRT 私钥（拿不到模数）. Exit code 6 on this step is the bug.
+2. `shkey show` right after: source reads imported, and the fingerprint equals the one
+   printed by import. Then `shconnect` must still work with the imported key — loading a
+   key goes through the same code path that used to fail, so a passing import with a
+   broken load is not a pass.
+3. Delete and regenerate (`shkey delete`, then `shconnect`): the generated key must load
+   on the same device. Generation always produced a CRT instance, so this checks the
+   fallback did not break the normal path.
+4. Feed it something that is not an RSA key (e.g. an EC private key in PKCS#8): the reply
+   is 导入失败：这把私钥不是 RSA 私钥，或者 PKCS#8 结构不认识. It must not mention CRT and
+   must not claim the key is corrupt.
 
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
