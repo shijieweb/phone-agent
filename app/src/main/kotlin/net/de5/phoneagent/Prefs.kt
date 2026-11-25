@@ -28,14 +28,20 @@ class Prefs(context: Context) {
             sp.edit().putString(KEY_RELAY_BASE, value).apply()
         }
 
+    /**
+     * The shared secret. A build made on the operator's machine carries it in
+     * [BuildConfig.DEFAULT_RELAY_SECRET]; a plain clone carries "" and the app
+     * asks a human. Falling back here (rather than in the UI) means every path —
+     * service start, boot receiver, diagnostics — sees the same value.
+     */
     var secret: String
-        get() = sp.getString(KEY_SECRET, "") ?: ""
+        get() = sp.getString(KEY_SECRET, null) ?: BuildConfig.DEFAULT_RELAY_SECRET
         set(value) {
             sp.edit().putString(KEY_SECRET, value).apply()
         }
 
     var agentId: String
-        get() = sanitizeId(sp.getString(KEY_AGENT_ID, DEFAULT_AGENT_ID) ?: DEFAULT_AGENT_ID)
+        get() = sanitizeId(sp.getString(KEY_AGENT_ID, null) ?: defaultAgentId())
         set(value) {
             sp.edit().putString(KEY_AGENT_ID, sanitizeId(value)).apply()
         }
@@ -137,6 +143,22 @@ class Prefs(context: Context) {
         const val DEFAULT_AGENT_ID = "PHONE-MEIZU"
         const val DEFAULT_AUTO_START = true
         const val DEFAULT_LOCATION_INTERVAL = 300
+
+        /**
+         * The id this build was made for: the baked one when the operator built
+         * it, otherwise the shipped fallback. Sanitised because a hand-edited
+         * local.properties can hold anything and the relay rejects the rest.
+         */
+        fun defaultAgentId(): String {
+            val baked = BuildConfig.DEFAULT_AGENT_ID
+            return sanitizeId(if (baked.isBlank()) DEFAULT_AGENT_ID else baked)
+        }
+
+        /** Same idea as [defaultAgentId]: baked when present, shipped default otherwise. */
+        fun defaultRelayBase(): String {
+            val baked = BuildConfig.DEFAULT_RELAY_BASE
+            return if (baked.isBlank()) DEFAULT_RELAY_BASE else baked
+        }
 
         /** The relay rejects anything else: `^[A-Za-z0-9_.-]{1,64}$`. */
         fun sanitizeId(raw: String): String {

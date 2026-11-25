@@ -57,20 +57,24 @@ class RelayUrlTest {
      */
     @Test
     fun everyRetiredDefaultMigratesToTheCurrentOne() {
+        // Compared against the *effective* default, not the shipped constant:
+        // a build made on the operator's machine bakes its own relay in
+        // (local.properties), and that is what an upgrade must land on.
+        val current = Prefs.defaultRelayBase()
         for (retired in Prefs.RETIRED_RELAY_BASES) {
             assertEquals(
                 "retired default $retired must migrate",
-                Prefs.DEFAULT_RELAY_BASE,
+                current,
                 resolveRelayBase(retired),
             )
-            assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("  $retired  "))
-            assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("$retired/"))
-            assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("$retired///"))
-            assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase(retired.uppercase()))
+            assertEquals(current, resolveRelayBase("  $retired  "))
+            assertEquals(current, resolveRelayBase("$retired/"))
+            assertEquals(current, resolveRelayBase("$retired///"))
+            assertEquals(current, resolveRelayBase(retired.uppercase()))
         }
-        assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase(null))
-        assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase(""))
-        assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("   "))
+        assertEquals(current, resolveRelayBase(null))
+        assertEquals(current, resolveRelayBase(""))
+        assertEquals(current, resolveRelayBase("   "))
     }
 
     /** The list is the contract; losing an entry strands the installs holding it. */
@@ -98,7 +102,7 @@ class RelayUrlTest {
         assertEquals(typed, resolveRelayBase("  $typed  "))
         // `https://relay.2-c.cc` used to be kept here. As of v0.7.0 it is itself a
         // retired default, so it migrates instead — covered above.
-        assertEquals(Prefs.DEFAULT_RELAY_BASE, resolveRelayBase("https://relay.2-c.cc"))
+        assertEquals(Prefs.defaultRelayBase(), resolveRelayBase("https://relay.2-c.cc"))
     }
 
     /**

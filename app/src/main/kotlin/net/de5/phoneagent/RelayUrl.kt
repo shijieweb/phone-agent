@@ -44,8 +44,21 @@ internal fun joinUrl(base: String?, path: String): String =
  */
 internal fun resolveRelayBase(stored: String?): String {
     val value = stored?.trim().orEmpty()
-    if (value.isEmpty()) return Prefs.DEFAULT_RELAY_BASE
-    if (isARetiredDefault(value)) return Prefs.DEFAULT_RELAY_BASE
+    // The default is whatever this build baked in (local.properties), falling
+    // back to the shipped one. See Prefs.defaultRelayBase.
+    val current = Prefs.defaultRelayBase()
+    if (value.isEmpty()) return current
+    if (isARetiredDefault(value)) return current
+    // [Prefs.DEFAULT_RELAY_BASE] is the address the app writes on first run when
+    // nothing is baked in. A build that bakes a different one must treat the
+    // shipped value as "not chosen by a human" too, or an install that stored it
+    // keeps dialling an address this build was specifically made to leave. When
+    // nothing is baked in the two are equal, so this is a no-op.
+    if (current != Prefs.DEFAULT_RELAY_BASE &&
+        value.trimEnd('/').equals(Prefs.DEFAULT_RELAY_BASE.trimEnd('/'), ignoreCase = true)
+    ) {
+        return current
+    }
     return value
 }
 
