@@ -152,6 +152,13 @@ class MainActivity : Activity() {
         permHint.setPadding(0, 4, 0, 24)
         root.addView(permHint)
 
+        // ---- 4b. the video-to-music page (v0.7.0-pad12) ----
+        // One page of its own instead of a switch here: it shows progress and a
+        // per-file result, which does not belong next to the one-tap switches.
+        addButton(root, UiText.CONVERT) {
+            startActivity(Intent(this, ConvertActivity::class.java))
+        }
+
         // ---- 5. the advanced section, collapsed by default ----
         // Deliberately not persisted: every visit starts collapsed, so a stray
         // tap on the phone cannot leave the secret field on screen.

@@ -6,4 +6,7 @@
     <!-- Title of the operator's debug screen; only ever seen by whoever opened
          it with five presses on the version line. -->
     <string name="debug_activity_label">调试</string>
+    <!-- Title of the video-to-music page (v0.7.0-pad12): the phone owner's own
+         screen, reached from one button on the config page. -->
+    <string name="convert_activity_label">视频转音乐</string>
 </resources>

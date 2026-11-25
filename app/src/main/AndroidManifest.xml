@@ -191,6 +191,16 @@
             android:excludeFromRecents="true"
             android:label="@string/debug_activity_label" />
 
+        <!-- The phone owner's own screen (v0.7.0-pad12): drop videos in one
+             folder, press one button, get mp3 files next to them. Reached from
+             the 视频转音乐 button on the config page — not exported, and kept
+             out of the task list, so nobody else can start a conversion. -->
+        <activity
+            android:name=".ConvertActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:label="@string/convert_activity_label" />
+
         <!-- ================== AGENT CORE ================== -->
         <!-- Holds the outbound long-poll to the relay. Runs until explicitly
              stopped; restarted from BootReceiver and from MainActivity. -->

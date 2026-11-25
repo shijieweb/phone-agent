@@ -9,7 +9,7 @@ package net.de5.phoneagent
  *
  * v0.6.3-pad12 去掉了「开机自动启动」：那个开关的生命周期本来就和启动/停止按钮
  * 绑在一起（按启动就置位、按停止就清零），单独摆一个复选框只会让人以为还有
- * 第三种状态。现在只剩六个可点文字。
+ * 第三种状态。v0.7.0-pad12 加回一个「视频转音乐」，现在共七个可点文字。
  */
 internal object UiText {
 
@@ -20,8 +20,16 @@ internal object UiText {
     const val PERMISSION = "一键设置权限"
     const val ADVANCED = "高级设置"
 
+    /**
+     * 打开「视频转音乐」页（v0.7.0-pad12）。
+     *
+     * 单独一页而不是塞进配置页：那一页要显示进度和结果，和「启动/停止」这种
+     * 一按就生效的开关不是一类东西。
+     */
+    const val CONVERT = "视频转音乐"
+
     /** 启动/停止是同一个按钮的两个状态，永远只出现一个，但两个字符串仍互不相同。 */
-    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED)
+    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED, CONVERT)
 
     /** 高级区里三个输入框的标题（不可点，但也不能重名，否则看图对不上）。 */
     const val RELAY_LABEL = "Relay base URL"

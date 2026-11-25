@@ -9,10 +9,11 @@ fourth agent, exactly like `rc-agent.ps1` on Windows.
 - **Zero third-party runtime dependencies.** Framework only:
   `java.net.HttpURLConnection`, `org.json`, `android.location.LocationManager`,
   `AccessibilityService`, `android.app.Activity` + views.
-- The self-ADB stack (§3.16) is **vendored source** under
-  `app/src/main/java/io/github/muntashirakon/`, not a dependency: the ADB protocol,
-  SPAKE2 pairing and the curves compile into the APK from files in this repo.
-  Attribution and every local change are in
+- Two **vendored source** trees, not dependencies, compile into the APK from files
+  in this repo: the self-ADB stack (§3.16) under
+  `app/src/main/java/io/github/muntashirakon/` (ADB protocol, SPAKE2 pairing, the
+  curves) and, since v0.7.0-pad12, the jump3r LAME port (§3.20) under
+  `app/src/main/java/de/sciss/jump3r/`. Attribution and every local change are in
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 - **No Kotlin plugin in `app/build.gradle.kts`** — AGP 9 has built-in Kotlin.
   Do not add `org.jetbrains.kotlin.android`; it is incompatible with the AGP 9 DSL.
@@ -48,6 +49,11 @@ Ship these files (all under `app/src/main/kotlin/net/de5/phoneagent/`):
 | `SelfAdb.kt` | Self-ADB transport: mDNS discovery, pairing, connect, one shell call (Android glue) |
 | `SelfAdbKeys.kt` | RSA key pair + hand-written DER self-signed certificate, on disk in `filesDir/adb` |
 | `SelfAdbPlan.kt` | Self-ADB pure logic: sentinel parsing, clamps, every user-facing string (no Android imports) |
+| `Mp3Plan.kt` | Video→MP3 pure logic: which suffixes count, target names, durations, the scan report, the dry-run line, every progress/summary sentence (no Android imports) |
+| `Mp3Converter.kt` | One video → one MP3: `MediaExtractor` + `MediaCodec` decode, `LameMp3Encoder` encode, written as `.part` then renamed |
+| `Mp3Runner.kt` | The batch loop shared by `mp3 run apply` and the 视频转音乐 page: who is skipped, per-file timeout, progress lines, summary |
+| `LameMp3Encoder.kt` | Thin Kotlin driver over the vendored jump3r LAME port — module wiring, `lame_init_params`, chunked encode, flush |
+| `ConvertActivity.kt` | The owner's third screen: folder, counts, 开始转换, one progress line, the result list |
 
 Deliver `AndroidManifest.xml`, `res/values/strings.xml` and
 `res/xml/accessibility_service_config.xml` **exactly as already written** — they
@@ -56,9 +62,9 @@ exist in this repo; do not rewrite them.
 **Out of scope (do not build):** MCP server, HTTP server, WebSocket, OAuth,
 camera, file manager, notifications, sharing, app install/uninstall, offline
 geocoding, IP database, any AndroidX/Compose/Ktor/Hilt usage, root, and any
-**third-party runtime dependency** — the one vendored exception is the self-ADB
-stack in §3.16, which is source-merged into this repo and listed in
-[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+**third-party runtime dependency** — the two vendored exceptions are the self-ADB
+stack in §3.16 and the jump3r LAME port in §3.20, both source-merged into this
+repo and listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Shell execution exists as of v0.5.0, but only through that one channel: the app
 talks to **its own** adbd over loopback (§3.16), never to a PC and never with
@@ -1351,6 +1357,83 @@ same as `sh`), a shell that never answers is `exit=4`, and a non-zero remote exi
 still returns `exit=0` with the text — the command ran, it just had nothing
 useful to say, and the operator can read the remote `exit=N` in the body.
 
+### 3.20 `mp3`: video soundtracks to MP3, on the phone
+
+The owner asked for one thing: drop videos into a folder, press one button, get
+mp3 files. No PC, no ffmpeg download, no online service.
+
+```
+mp3 scan [DIR]               # read-only inventory
+mp3 run [apply] [force] [DIR]
+```
+
+`DIR` defaults to `/sdcard/视频转音乐专用` (`Mp3Plan.DEFAULT_DIR`); the
+recognised suffixes are `mp4 mov mkv avi flv m4v 3gp webm ts mpg`. Output is
+`128 kbps / 44100 Hz`, stereo for stereo sources, mono kept mono, written as
+`<same name>.mp3` **next to** the source. A source whose mp3 already exists is
+skipped unless `force` is given. A file with no audio track is skipped and
+counted separately — "no audio" and "already done" are different answers, and
+only one of them means the owner has something to listen to.
+
+**Why not ffmpeg.** Two doors are both shut. Since targetSdk 34 the app may not
+`exec` a binary it wrote into its own private directory, which kills the
+`ffmpeg -i … -vn -b:a 128k` line that the tablet ran at 52× realtime; and
+shipping ffmpeg in the APK adds ~20 MB to a 2.7 MB app. So decoding is
+`MediaExtractor` + `MediaCodec` (platform, zero bytes) and encoding is
+**jump3r**, the pure-Java LAME port (§ third-party notices): 71 vendored
+`.java` files, ~350 KB in the APK, no `javax.sound`, no JNI.
+
+```
+scan:   Mp3Converter.scan(dir)
+          File.listFiles + Mp3Plan.isVideoName
+          per file: MediaExtractor → first audio/ track? KEY_DURATION
+          targetExists = <name>.mp3 isFile
+        → Mp3Plan.scanReport(dir, rows)
+
+run:    scan → Mp3Plan.dryRunLine(rows, force)          // no apply
+        scan → Mp3Runner.run(dir, rows, force)          // apply
+          per file: MediaCodec decode → LameMp3Encoder → <name>.mp3.part
+                    rename .part → .mp3 only on success
+```
+
+The batch loop lives in `Mp3Runner` rather than in `CommandExecutor` because it
+has **two doors**: `mp3 run apply` over the relay and the 开始转换 button on
+`ConvertActivity` (§6.2). Two copies of "who gets skipped, what `force` means, how a
+failure is counted" would drift apart, and then the inventory the owner sees and
+the work the app does would disagree.
+
+Each file gets its own 10-minute budget (`Mp3Runner.FILE_TIMEOUT_MS`). A decoder
+that wedges on a corrupt container would otherwise stop the whole batch, and one
+bad file must not cost the other twenty. A timed-out or failed file is counted
+as 失败 with its reason in the body, and the loop moves on.
+
+The `.part` rename matters: a conversion killed halfway must not leave a
+half-length mp3 that the *next* run then treats as "already done" and skips
+forever.
+
+`mp3 scan` refuses `apply`/`force` with exit 2 rather than ignoring them —
+a silently dropped `apply` reads as "it ran".
+
+Exit codes: a missing/unreadable directory is `exit=2` (the path is the
+argument, and it is wrong); a scan that never returns is `exit=4`; **a batch
+with failures is still `exit=0`**, because the command itself ran — which files
+converted is in the body, and the summary line (`完成 N 个，失败 M 个，跳过 K 个，
+无音轨 J 个，用时 T`) is the honest place to read it.
+
+Body shape (`mp3 run apply`, one line per event, so the phone UI can stream it):
+
+```
+[1/3] 生日.mp4 …
+[1/3] 生日.mp4 40%
+[1/3] 生日.mp4 → 生日.mp3 4.2 MB，用时 3.5s
+[2/3] 坏文件.mkv 失败: 没有音轨
+完成 2 个，失败 1 个，跳过 0 个，无音轨 0 个，用时 7.5s
+```
+
+Measured on this laptop's JVM (`LameMp3EncoderTest`): encoding alone runs at
+**45× realtime** (10 s of audio in 221 ms; repeated runs land between 43× and
+45×), so the encoder is not the bottleneck — `MediaCodec` is.
+
 ### Exit codes
 | Code | Meaning |
 |---|---|
@@ -1664,6 +1747,44 @@ process, same executor.
   `Handler`), so two callers cannot corrupt each other — the caller only has to
   stay off the UI thread.
 
+### 6.2 The third screen: 视频转音乐 (v0.7.0-pad12)
+
+A third Activity, and the first one that belongs to the **owner** rather than the
+operator. Reached by one button on the config page (`UiText.CONVERT`,
+视频转音乐), `exported="false"`, `excludeFromRecents="true"`, built in code
+like the other two.
+
+It shows exactly what the owner needs to decide whether to press anything:
+
+1. The source folder, selectable so it can be copied: `/sdcard/视频转音乐专用`.
+2. One line of counting, from a fresh `Mp3Converter.scan` on every entry:
+   视频 N 个：待转 A 个，已有 mp3 B 个，无音轨 C 个. An empty folder says so
+   instead of showing 0/0/0.
+3. **开始转换** (`ConvertActivity.START_LABEL`) — deliberately *not*
+   `UiText.CONVERT`: the config page's button already owns that string, and
+   `click apply 视频转音乐` must not have two candidate targets. Disabled while
+   nothing is pending, and disabled while a batch is running.
+4. One progress line, replaced as the batch advances (latest line wins).
+5. The full per-file list in monospace once the batch ends. Its last line *is*
+   the summary (`完成 N 个，失败 M 个，跳过 K 个，无音轨 J 个，用时 X.Xs`, §3.20),
+   and the page does not restate those numbers anywhere else — one source, so the
+   two can never disagree. After that it re-scans, so a batch that converted
+   everything immediately shows 没有要转的 instead of yesterday's count.
+
+Two details that are not cosmetic:
+
+- **The button is disabled while a batch runs.** Two presses would start two
+  batches racing over the same `<name>.mp3.part`, and the loser would rename a
+  half-written file over the winner.
+- **A batch re-scans before converting** instead of reusing the numbers on
+  screen: the owner may have added or deleted files since the page opened, and a
+  stale list produces a run of "file not found" failures for no reason. A scan is
+  tens of milliseconds.
+
+The page runs the **same** `Mp3Runner.run` as `mp3 run apply` (§3.20); the only
+difference is the `onLine` callback, which streams each line to the UI. There is
+no second conversion loop in this Activity.
+
 ---
 
 ## 7. Service behaviour
@@ -1886,6 +2007,38 @@ framework** — do not mock `AccessibilityService`. Required cases:
       a hit; `shouldArm` re-arms over a live-but-stale pid and still refuses when
       the service is down; `StartPolicy.HINT` no longer names the removed checkbox
       while still promising 启动 / 停止 / 重启.
+
+  21. The v0.7.0-pad12 mp3 pair, split the same way as everything else.
+      `Mp3Plan` (pure): the ten recognised suffixes and the ones that must not
+      match (no dot, dot first, `.MP4` in caps, `.mp3` itself), `targetName`
+      replacing only the last suffix, `duration` (`3:01`, `1:02:03`, `?`),
+      `seconds` (always one decimal), `percent` clamped at both ends,
+      `scanReport` (the three counts, the per-file state words, the empty-folder
+      sentence), `dryRunLine` (`将转 N 个，跳过 M 个` **in one line**, and
+      `force` moving the already-done files from 跳过 to 待转), the progress /
+      result / failure lines, `summaryLine`, and `failure` carrying
+      `Admin.ERROR_PREFIX`. `Mp3Runner` (pure, no decoder): the skip decision —
+      no audio is always skipped, an existing target is skipped unless `force`,
+      and an empty work list touches no file. And the grammar
+      (`Mp3CommandsTest`): bare `mp3` is usage, `scan` takes an optional
+      folder and **refuses** `apply`/`force`, `run` is dry by default,
+      `apply`/`force` in either order, a folder after the switches, two folders
+      is usage, an unknown verb is usage, verbs are case-insensitive.
+  22. `LameMp3EncoderTest` — the only test in this repo that runs a real
+      encoder, and it is still a plain JVM test: 2 s of 440 Hz sine at 44100 Hz
+      stereo → `> 30000` bytes, first byte `0xFF`, second byte `& 0xE0 == 0xE0`,
+      then every frame walked to the end of the stream with the frame length
+      computed from the bitrate (a wrong formula makes the sync check fail on a
+      perfectly good file). Plus: a mono source stays mono (the mode bits in the
+      third frame byte), 48 kHz → 44.1 kHz resamples without throwing, `finish()`
+      is idempotent, and 10 s of audio encodes in well under a second — measured
+      at **221 ms, 45× realtime** (232 ms / 43× on an earlier run), asserted at
+      better than 1/5 realtime so a 10× regression fails the build instead of
+      quietly shipping.
+  23. `UiText.clickable` is now seven labels and still has no duplicates
+      (`PermPlanTest`), and no label is a substring of any lamp label
+      (`HealthPlanTest`) — 视频转音乐 must not be clickable by accident when the
+      operator means 无障碍.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

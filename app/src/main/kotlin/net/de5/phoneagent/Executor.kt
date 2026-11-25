@@ -327,6 +327,12 @@ class CommandExecutor(
             is Command.ShDest ->
                 shDest(command)
 
+            is Command.Mp3Scan ->
+                mp3Scan(command)
+
+            is Command.Mp3Run ->
+                mp3Run(command)
+
             is Command.Watchdog ->
                 watchdog(command)
 
@@ -1232,6 +1238,46 @@ class CommandExecutor(
     }
 
     /**
+     * `mp3 scan` —— 只读清单。
+     *
+     * 只读但可能要读几十个容器的音轨头，所以照样套一层超时：卡在一个坏文件上
+     * 不返回，操作员会以为链路断了。
+     */
+    private fun mp3Scan(command: Command.Mp3Scan): ExecutionResult {
+        val scanned = offMain(MP3_SCAN_TIMEOUT_MS) { Mp3Converter.scan(command.dir) }
+            ?: return ExecutionResult(EXIT_TIMEOUT, "", "扫描超时（" + MP3_SCAN_TIMEOUT_MS / 1000 + "s）")
+        val error = scanned.error
+        if (error != null) return ExecutionResult(EXIT_USAGE, "", Mp3Plan.failure(error))
+        return ExecutionResult(EXIT_OK, Mp3Plan.scanReport(command.dir, scanned.rows), "")
+    }
+
+    /**
+     * `mp3 run [apply] [force]` —— 视频音轨转 mp3。
+     *
+     * 两段结构：先扫一遍（和 scan 完全同一个函数，所以清单和实转永远一致），
+     * 再按同一套判据决定转谁。默认 dry-run 只报数，一行文件都不碰。
+     *
+     * 真转的时候跑在独立线程上（offMain）：解码 + 编码是几秒到几分钟的活，
+     * 留在 poll 线程上会把心跳一起拖死。进度按 10% 一档往结果里攒，
+     * 免得 3 分钟的视频回来只有一行「完成」。
+     */
+    private fun mp3Run(command: Command.Mp3Run): ExecutionResult {
+        val scanned = offMain(MP3_SCAN_TIMEOUT_MS) { Mp3Converter.scan(command.dir) }
+            ?: return ExecutionResult(EXIT_TIMEOUT, "", "扫描超时（" + MP3_SCAN_TIMEOUT_MS / 1000 + "s）")
+        val error = scanned.error
+        if (error != null) return ExecutionResult(EXIT_USAGE, "", Mp3Plan.failure(error))
+        val rows = scanned.rows
+        if (!command.apply) return ExecutionResult(EXIT_OK, Mp3Plan.dryRunLine(rows, command.force), "")
+
+        // 真转直接在 poll 线程上跑：心跳是另一条线程（rc-heartbeat），
+        // 拖住 poll 不影响链路保活；而每转一个文件 Mp3Runner 自己套了超时。
+        val outcome = Mp3Runner.run(command.dir, rows, command.force)
+        // 全失败也报 exit=0：这条命令本身跑完了，转不了是素材的问题，
+        // 每一条原因都在 stdout 里。控制器要判成败，读汇总行比读退出码准。
+        return ExecutionResult(EXIT_OK, outcome.lines.joinToString("\n"), "")
+    }
+
+    /**
      * `watchdog [status|arm|disarm]` —— uid 2000 看门脚本。
      *
      * 三件事都走自连 ADB，所以每一次都可能卡在网络/进程上，统一 offMain 加超时。
@@ -1447,5 +1493,13 @@ class CommandExecutor(
          * 单次 10 秒（Watchdog.RUN_TIMEOUT_MS），这里给三倍余量。
          */
         private const val WATCHDOG_TIMEOUT_MS = 35_000L
+
+        /**
+         * `mp3 scan` 的预算：每个文件只读音轨头，实测几十毫秒；几十个文件
+         * 也在秒级。60 秒是给「目录里混着几个读不动的容器」留的余量。
+         */
+        private const val MP3_SCAN_TIMEOUT_MS = 60_000L
+
+
     }
 }

@@ -519,6 +519,44 @@ and the screen on.
 7. `watchdog arm` twice in a row. The second answer is 未重复启动, and no guard exits
    immediately after being armed (that would mean the stop marker was left behind).
 
+### 视频转音乐 (v0.7.0-pad12)
+
+No PC, no ffmpeg: the phone decodes the soundtrack and writes the MP3 itself.
+Do this on the tablet — it is the machine the owner actually keeps films on.
+
+1. Put three files into `/sdcard/视频转音乐专用/` (create it if it is not there):
+   one ordinary video with sound (`生日.mp4`), one video **without** an audio
+   track (`无声.mp4` — any silent screen recording will do), and a text file
+   `readme.txt` that must be ignored entirely.
+2. From the relay: `mp3 scan`. The first line names the folder, the second says
+   `视频 2 个：待转 1 个，已有 mp3 0 个，无音轨 1 个`, and each file gets its own
+   line with size, duration, 有音轨/无音轨 and 待转 / 跳过（无音轨）.
+   `readme.txt` must not appear — it is not a video suffix.
+3. `mp3 run` (no `apply`). One line: `dry-run: 将转 1 个，跳过 1 个；加 apply 真正开始`.
+   Check with `files ls /sdcard/视频转音乐专用` that **no** mp3 exists yet.
+4. On the phone: config page → 视频转音乐. The page shows the folder, the same
+   three counts, and 开始转换 is enabled. Press it once. The progress line walks
+   through `[1/1] 生日.mp4 …` and then percentages; the page must not accept a
+   second press while it runs.
+5. When it ends, `生日.mp3` sits next to `生日.mp4`, the result block lists
+   `→ 生日.mp3 X MB，用时 Ns`, and the summary line counts 1 done / 0 failed.
+   `无声.mp4` was skipped, not failed. Play the MP3 in the phone's own player:
+   3 minutes of video must be a few seconds of work (the encoder alone runs at
+   ~45× realtime; the decoder is the slower half).
+6. Press 开始转换 again with the MP3 already there: nothing is converted, the
+   counts show it as 已有 mp3. Then from the relay `mp3 run apply force` — now it
+   re-encodes and overwrites. `mp3 run apply` a third time without `force`: it
+   leaves the existing file alone.
+7. Break one on purpose: copy a video whose audio codec the phone cannot decode
+   (or truncate an MP4 to 100 KB). The batch must keep going, print
+   `[n/N] name 失败: <reason>`, and end with a summary whose 失败 count is 1 —
+   the command itself still exits 0, because the run completed.
+8. `mp3 scan` while the folder does not exist says `目录不存在: …` and exits 2.
+   `mp3 scan apply` is a usage error (exit 2) — `scan` never converts anything.
+9. Leave the app: the conversion must keep running in the foreground Activity; if
+   the screen turns off mid-batch, the file still finishes and the MP3 is valid.
+   A half-written `.mp3.part` must never be left behind after a failure.
+
 ### Log size and trimming (v0.5.8-pad12)
 
 1. On the debug page the summary carries a fourth line: `日志: N 行/丢弃 M · 守护日志 X KB · APK 残留 K 个`.

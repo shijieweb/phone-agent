@@ -16,10 +16,11 @@ nothing needs to be exposed on the phone's network.
 
 ## What it can do
 
-The app has two screens: the config page and, hidden behind five presses on the
-version line at the bottom, an operator's debug page that runs one command line
-through the live agent and shows the answer — same `Commands.parse` path as the
-relay, no round trip. See `SPEC.md` §6.1.
+The app has three screens: the config page, a 视频转音乐 page one button below
+it (v0.7.0-pad12), and — hidden behind five presses on the version line at the
+bottom — an operator's debug page that runs one command line through the live
+agent and shows the answer, same `Commands.parse` path as the relay, no round
+trip. See `SPEC.md` §6.1 and §6.2.
 
 Since v0.5.8-pad12 the config page is written for the phone's owner, not for me:
 one big 运行中 / 已停止 word, one 启动 button, one 屏幕常亮 switch, and a single
@@ -58,6 +59,19 @@ agent it now asks for the **service** (`am start-foreground-service`), which bui
 UI, and only falls back to the activity if that is refused. `watchdog arm` clears the
 marker before probing, so an old stop cannot make a fresh guard exit immediately. See
 `SPEC.md` §3.17.
+
+Since v0.7.0-pad12 the phone can turn a video's soundtrack into an MP3 **by
+itself**, with no PC and no ffmpeg: `MediaExtractor` + `MediaCodec` decode the
+audio track and a vendored LAME port (jump3r, pure Java, ~350 KB of source)
+encodes it at 128 kbps / 44100 Hz. Put the videos in `/sdcard/视频转音乐专用`,
+press 视频转音乐 on the config page and then 开始转换, and each `<name>.mp3`
+lands next to its video; files without an audio track are counted and skipped,
+and an existing MP3 is left alone. From the relay it is `mp3 scan` (read-only
+list) and `mp3 run` / `mp3 run apply [force]`. Measured: **45× realtime**
+for the encoder alone (221 ms per 10 s of audio) — a 3-minute video takes a few
+seconds, and the decoder, not LAME, is what you wait for. ffmpeg was rejected on purpose:
+`targetSdk 34` forbids executing a binary from the app's private directory, and
+shipping the 20 MB static build is not worth it. See `SPEC.md` §3.20.
 
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
@@ -113,6 +127,7 @@ left at `/data/local/tmp/phoneagent-tree.xml` as evidence. See `SPEC.md` §5.1.
 | Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
 | Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [show]` / `shkey regen [apply]` / `shkey import <url>` — the app talks to **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
 | Self-start | only two doors, and neither is the boot: opening the app starts the agent again (unless you pressed 停止), and a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`. A reboot never starts it — press 启动. `watchdog [status\|arm\|disarm]` drives the guard by hand |
+| Video → MP3 | `mp3 scan`, `mp3 run [apply] [force]` — decodes each video's audio track on the phone and writes `<name>.mp3` next to it (128 kbps / 44100 Hz, default folder `/sdcard/视频转音乐专用`); `run` is a dry run until `apply`; no ffmpeg, no PC |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative, and it is the same rule from both doors: pressing 停止 in
@@ -441,8 +456,10 @@ clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 
 The project's own code is MIT (see [LICENSE](LICENSE)). As of v0.5.0 the APK also
 contains **vendored source** — the ADB protocol client (Apache-2.0), the SPAKE2
-pairing implementation (LGPL-3.0) and the Ed25519/X25519 curve code (CC0-1.0) —
-copied into `app/src/main/java/` and compiled in, not pulled as a dependency.
+pairing implementation (LGPL-3.0), the Ed25519/X25519 curve code (CC0-1.0) and,
+since v0.7.0-pad12, the jump3r LAME port (LGPL-2.1-or-later) that encodes the
+MP3s — copied into `app/src/main/java/` and compiled in, not pulled as a
+dependency.
 Every vendored file keeps its original SPDX header, and the full attribution with
 the exact upstream commits is in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 Nothing is fetched at build time: no Maven artifact, no JitPack, no git

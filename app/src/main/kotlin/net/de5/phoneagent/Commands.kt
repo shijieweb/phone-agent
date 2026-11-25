@@ -347,6 +347,22 @@ sealed class Command {
      */
     data class Watchdog(val action: String) : Command()
 
+    /**
+     * `mp3 scan` — 只读列清单：目录里每个视频的文件名、大小、时长、有没有音轨。
+     *
+     * 为什么先有 scan 再有 run：这个功能要动用户的视频文件，操作员得先能看清
+     * 「哪些会被转、哪些会被跳过」，否则一次 apply 就是盲盒。
+     */
+    data class Mp3Scan(val dir: String) : Command()
+
+    /**
+     * `mp3 run [apply] [force]` — 把视频的音轨转成同名 mp3。
+     *
+     * 默认 dry-run：不带 [apply] 只报「将转 N 个，跳过 M 个」，一行文件都不碰。
+     * [force] 才会重转已经有同名 mp3 的源。
+     */
+    data class Mp3Run(val apply: Boolean, val force: Boolean, val dir: String) : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -438,6 +454,7 @@ object Commands {
     private val SHKEY_USAGE = Command.BadUsage(
         "usage: shkey [show] | shkey regen [apply] | shkey import URL [PUBURL] | shkey adopt"
     )
+    private val MP3_USAGE = Command.BadUsage(Mp3Plan.USAGE)
 
     /** Shared shapes of the element-verb usage errors, so the text never drifts. */
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
@@ -692,6 +709,8 @@ object Commands {
             "notif" -> parseNotif(rest)
 
             "say" -> parseSay(rest)
+
+            "mp3" -> parseMp3(rest)
 
             "screen" -> parseScreen(rest)
 
@@ -1348,6 +1367,39 @@ object Commands {
             "disarm" -> Command.Watchdog("disarm")
             else -> Command.BadUsage(WatchdogPlan.USAGE)
         }
+    }
+
+    /**
+     * `mp3 scan [DIR] | mp3 run [apply] [force] [DIR]`。
+     *
+     * 目录可以省略（默认 [Mp3Plan.DEFAULT_DIR]），但只认两种写法：第一个词是
+     * scan/run 时，剩下的词里找开关和目录；第一个词不是子命令时，整行当目录
+     * 处理等于猜，所以直接 usage——操作员打错一个词，宁可让他看到用法。
+     */
+    private fun parseMp3(rest: String): Command {
+        val parts = splitArgs(rest)
+        if (parts.isEmpty()) return MP3_USAGE
+        val verb = parts[0].lowercase()
+        if (verb != "scan" && verb != "run") return MP3_USAGE
+        var apply = false
+        var force = false
+        var dir: String? = null
+        for (index in 1 until parts.size) {
+            val token = parts[index]
+            when {
+                token.lowercase() == "apply" -> apply = true
+                token.lowercase() == "force" -> force = true
+                dir == null -> dir = token
+                else -> return MP3_USAGE
+            }
+        }
+        val path = dir ?: Mp3Plan.DEFAULT_DIR
+        if (verb == "scan") {
+            // scan 是只读的，带 apply/force 说明操作员记混了命令，别默默忽略。
+            if (apply || force) return MP3_USAGE
+            return Command.Mp3Scan(path)
+        }
+        return Command.Mp3Run(apply = apply, force = force, dir = path)
     }
 
     private fun isPackageName(value: String): Boolean {

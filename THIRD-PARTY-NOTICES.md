@@ -66,6 +66,45 @@ and the RSA key generation are this project's own code as well — Android expos
 no certificate-issuing API, and ADB only requires that the key and certificate
 match.
 
+## 4. jump3r — LAME MP3 encoder, in pure Java (v0.7.0-pad12)
+
+- **Upstream**: `sciss/jump3r`, version **1.0.5** — <https://git.iem.at/sciss/jump3r>
+- **Local source**: `app/src/main/java/de/sciss/jump3r/` (`mp3/` + `mpg/`)
+- **Licence**: **LGPL-2.1-or-later** (the headers say "GNU Lesser General Public
+  License … version 2 … or (at your option) any later version"; the `mpg/`
+  files say "GNU Library General Public License, version 2", which is the same
+  licence under its old name)
+- **Files**: 71 `.java` files, byte-identical to upstream. 30 of them carry the
+  LAME/LGPL header verbatim; the remaining 41 are LAME-derived files that never
+  had a header upstream (`Tables.java` is only Huffman tables, `MPEGMode.java`
+  is a ten-line enum). No header was added and no line was changed — this is the
+  upstream tree as published.
+
+### What was left out, and why
+
+Three files and one directory were **not** copied:
+
+| Left out | Why |
+|---|---|
+| `Main.java` | The command-line driver. It pulls in `java.beans.PropertyChangeSupport`, which Android does not ship, and this project never calls it |
+| `lowlevel/LameEncoder.java` | A `javax.sound.sampled` adapter around the encoder. Not on Android, and the app drives the encoder through its own `LameMp3Encoder.kt` |
+| `lowlevel/LameDecoder.java` | Same reason, decoding side — and the phone decodes with `MediaCodec` anyway |
+| `META-INF/` | Signatures and service files from the jar; irrelevant to a source merge |
+
+Nothing else references those three, and nothing in the 71 remaining files
+imports `javax.sound`, `java.awt`, `java.beans` or `java.applet` — that is the
+whole reason the rest compiles on Android unchanged.
+
+### LGPL compliance
+
+The source is present in this repository, in its original package
+(`de.sciss.jump3r.*`), unmodified, and compiled into the APK with
+`isMinifyEnabled = false` — so the library can be inspected and relinked against
+a modified version. The app does not modify jump3r's behaviour: `LameMp3Encoder`
+only calls the public `lame_init` / `lame_init_params` /
+`lame_encode_buffer_int` / `lame_encode_flush` / `lame_close` entry points and
+wires the modules in the order upstream's own `LameEncoder` did.
+
 ---
 
 ## Provenance
