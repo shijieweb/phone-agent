@@ -5,10 +5,15 @@ A minimal Android agent that makes a phone controllable through our **existing**
 fourth agent, exactly like `rc-agent.ps1` on Windows.
 
 - **Package / namespace**: `net.de5.phoneagent`
-- **minSdk 33 / targetSdk 34 / compileSdk 37**, JVM target 17
+- **minSdk 31 / targetSdk 34 / compileSdk 37**, JVM target 17
 - **Zero third-party runtime dependencies.** Framework only:
   `java.net.HttpURLConnection`, `org.json`, `android.location.LocationManager`,
   `AccessibilityService`, `android.app.Activity` + views.
+- The self-ADB stack (§3.16) is **vendored source** under
+  `app/src/main/java/io/github/muntashirakon/`, not a dependency: the ADB protocol,
+  SPAKE2 pairing and the curves compile into the APK from files in this repo.
+  Attribution and every local change are in
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 - **No Kotlin plugin in `app/build.gradle.kts`** — AGP 9 has built-in Kotlin.
   Do not add `org.jetbrains.kotlin.android`; it is incompatible with the AGP 9 DSL.
 - **No `vendor/`, no native code, no flavors, no signing config.** arm64 device,
@@ -40,6 +45,9 @@ Ship these files (all under `app/src/main/kotlin/net/de5/phoneagent/`):
 | `WakeActivity.kt` | One-shot translucent Activity used by the third `wake` layer |
 | `LoopGuard.kt` | Per-instance generation counter that keeps worker threads honest |
 | `Battery.kt` | Doze / battery-whitelist state (`opt`) |
+| `SelfAdb.kt` | Self-ADB transport: mDNS discovery, pairing, connect, one shell call (Android glue) |
+| `SelfAdbKeys.kt` | RSA key pair + hand-written DER self-signed certificate, on disk in `filesDir/adb` |
+| `SelfAdbPlan.kt` | Self-ADB pure logic: sentinel parsing, clamps, every user-facing string (no Android imports) |
 
 Deliver `AndroidManifest.xml`, `res/values/strings.xml` and
 `res/xml/accessibility_service_config.xml` **exactly as already written** — they
@@ -47,8 +55,14 @@ exist in this repo; do not rewrite them.
 
 **Out of scope (do not build):** MCP server, HTTP server, WebSocket, OAuth,
 camera, file manager, notifications, sharing, app install/uninstall, offline
-geocoding, IP database, any AndroidX/Compose/Ktor/Hilt usage, any shell command
-execution.
+geocoding, IP database, any AndroidX/Compose/Ktor/Hilt usage, root, and any
+**third-party runtime dependency** — the one vendored exception is the self-ADB
+stack in §3.16, which is source-merged into this repo and listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Shell execution exists as of v0.5.0, but only through that one channel: the app
+talks to **its own** adbd over loopback (§3.16), never to a PC and never with
+root.
 
 ---
 
@@ -188,6 +202,11 @@ reach the `unknown command` branch.
 | `call [apply] NUMBER` | **dry run** by default; `apply` opens `ACTION_CALL` (or `ACTION_DIAL` without `CALL_PHONE`) (see §3.13) |
 | `call answer` / `call hangup` / `call state` | call control and the current call state (see §3.13) |
 | `call speaker on\|off` | speakerphone for the current call (see §3.13) |
+| `shinfo` | read-only self-ADB report: key fingerprint, connected or not, loopback address, last note (see §3.16) |
+| `sh [t=SECONDS] [apply] COMMAND` | **dry run** by default; `apply` runs `COMMAND` as uid 2000 through our own adbd, timeout default 30 s, cap 300 s, stdout capped at 8000 chars (see §3.16) |
+| `shpair 123456` | pair with this phone's own adbd using the six-digit code from 无线调试, then try one connect (see §3.16) |
+| `shconnect` | connect to this phone's own adbd; pairing only swaps keys, connecting is a separate step (see §3.16) |
+| `shkey [regen [apply]]` | print the public key and its `SHA256:` fingerprint; `regen` is a dry run, `regen apply` really replaces the key (see §3.16) |
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
@@ -729,6 +748,98 @@ a11y status | a11y heal | a11y rescue
   `Admin.canWriteSecure`; without `WRITE_SECURE_SETTINGS` they log the skip and
   return instead of retrying a refusal every 15 s.
 
+### 3.16 `sh` / `shpair` / `shconnect` / `shkey`: our own adbd, over loopback
+
+**What this is.** The app connects to **its own** `adbd` (the phone's wireless
+debugging daemon) on `127.0.0.1`, pairs with it, and runs commands as uid 2000.
+No PC, no USB, no root, no third-party binary: the ADB protocol, the SPAKE2
+pairing and the RSA key encoding are vendored source in this repo (see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and compiled into the APK.
+
+```
+shinfo
+sh [t=SECONDS] [apply] COMMAND
+shpair 123456
+shconnect
+shkey | shkey regen [apply]
+```
+
+**Why loopback only.** `127.0.0.1` is a constant, not a parameter. Connecting to
+a LAN IP would need the same code plus a network permission, would break every
+time Wi-Fi changes, and would put the phone's adbd on the wire. There is
+deliberately **no** `sh HOST` form.
+
+**`sh` is a dry run by default.** This is the single most destructive command in
+the whole surface — it can `rm -rf` `/sdcard` as uid 2000 — and it is also the
+one most likely to be replayed from a log. So:
+
+| Form | Effect |
+|---|---|
+| `sh ls /sdcard` | exit 0, stdout `dry-run: would run sh: ls /sdcard` — nothing runs |
+| `sh apply ls /sdcard` | really runs it |
+| `sh t=120 apply id` | really runs it, 120 s budget (default 30, clamped 1..300) |
+| `sh echo apply` | `apply` is part of the payload here, so this is still a **dry run** of `echo apply` |
+
+Flags are only eaten **before** the payload: the first non-flag token starts the
+command and everything from there on is passed through byte for byte (spaces,
+quotes and pipes included). `sh apply` with no command is a usage error.
+
+**Exit codes are split, on purpose.** A remote exit code of 4 must never look
+like our own `EXIT_TIMEOUT`:
+
+| Situation | Our `exit` | Where the remote code goes |
+|---|---|---|
+| command ran | 0 | `stdout` ends with `exit=N` |
+| not paired / not connected | 6 | the sentence names the next command to run |
+| no result within `t` | 4 | stderr `命令超时（Ns 内没有返回）` |
+| ran, but the sentinel never came back | 4 | stdout is the raw text, no `exit=` line |
+
+**How the remote exit code is recovered.** The `shell:` service multiplexes
+stdout and stderr into one stream and the protocol carries no exit status, so the
+command is wrapped as `COMMAND` + newline + `echo __RC=$?`. The parser takes the
+**last** `__RC=<digits>` whose remainder is blank, strips it, and returns the
+number. Anything else (no sentinel, trailing output, non-digit) yields "no exit
+code" and the raw text is returned as-is — the agent never invents a 0. A command
+whose own text contains `__RC=` is therefore safe: only the final echo counts.
+
+**Output cap.** `stdout` is capped at 8000 chars and the truncation is stated in
+the text (`… 输出被截断（原 N 字符，上限 8000）`). The relay truncates at 200 000,
+so this cap is ours, chosen so one `sh` cannot flood the poll channel.
+
+**Pairing.**
+
+1. Phone: 设置 → 系统 → 开发者选项 → 无线调试 → **使用配对码配对设备** → six digits.
+2. `shpair 123456` — the app finds the `_adb-tls-pairing._tcp` port over mDNS,
+   runs SPAKE2 against it, writes the key, then tries one `shconnect`.
+3. `shconnect` alone is enough afterwards; the port changes but the pairing
+   survives reboots.
+
+The key lives in `filesDir/adb/adbkey` (PKCS#8 PEM) with `adbkey.pub` beside it,
+2048-bit RSA with `e=3` — the same shape AOSP's `adb keygen` produces, so the
+fingerprint in `shkey` can be compared character by character against 手机
+「已配对的设备」. The certificate is self-signed and generated in-process
+(hand-written DER): ADB only requires that the key and certificate match, and
+Android exposes no certificate-issuing API.
+
+**mDNS is unreliable, so discovery has three tiers**: the system `NsdManager`
+callback → a raw mDNS query → toggling `adb_wifi_enabled` off/on (needs
+`WRITE_SECURE_SETTINGS`) and retrying. A missing port answers
+`没发现 adb-tls-pairing 端口：确认无线调试已打开，等 3-5 秒重试（部分 ROM 会过滤 mDNS 广播）`
+— it never silently degrades into "connected but broken".
+
+**`shkey`** prints `公钥: <one line>` and `指纹: SHA256:<base64 without padding>`.
+`shkey regen` only prints
+`dry-run: 会删除现有密钥并重新生成，配对关系将失效，确认请加 apply`;
+`shkey regen apply` deletes both files, generates a new pair, and clears the
+process-wide TLS context — without that last step the old `KeyPair` stays pinned
+in the cached `SSLContext` and the symptom is "pairing succeeds but connecting
+fails".
+
+**What it still cannot do.** No root (`id` reports `uid=2000(shell)`); no
+`pm grant` for signature permissions (the shell user cannot hand those out
+either); no writing to another app's private storage. It is the same authority
+`adb shell` has over USB — nothing more.
+
 ### 3.1 Element selectors (`SEL`)
 
 The whole rest of the line after the command name is the selector, **verbatim**
@@ -1090,6 +1201,18 @@ framework** — do not mock `AccessibilityService`. Required cases:
      `A11yPlan.annotate` labelling each trigger `[装包]`/`[启动]`/`[心跳]` — with
      the install spelling tested before the generic one, since `安装后自愈`
      contains `自愈` and a wrong order would call every install repair a heartbeat.
+14. The v0.5.0 self-ADB layer, all on a plain JVM: `HkdfSha256` against **RFC 5869
+    appendix A case 1 and case 3** (case 3 is the null-salt path ADB pairing
+    actually uses, and it is the one a hand-written HKDF gets wrong); the sentinel
+    parser over every shape — clean `exit=0`, non-zero (`ls /nope` → 1), command
+    text that itself contains `__RC=` (only the last one counts), no sentinel,
+    trailing output after the sentinel, and CRLF input; the timeout clamp
+    (1..300 s) and the six-digit pairing code; the 8000-char output cap stating the
+    original length; base64 round-trip plus the `SHA256:` fingerprint shape; and
+    the exception-to-sentence map (`AdbPairingRequiredException` → "run shpair",
+    `AdbAuthenticationFailedException` → "run shkey regen apply"). `ShCommandsTest`
+    pins the grammar: `apply`/`t=` are only eaten before the payload,
+    `sh echo apply` stays a dry run, and `shkey regen` alone never replaces the key.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -1102,8 +1225,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (370 cases at
-  v0.4.4-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (421 cases at
+  v0.5.0-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

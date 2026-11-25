@@ -5,8 +5,12 @@ read a phone's location and drive its UI. It is the fourth client of an existing
 self-hosted remote-control channel — the phone dials **out** to the relay, so
 nothing needs to be exposed on the phone's network.
 
-- **No root.** No Shizuku. No ADB. No Google Play Services.
-- **Zero third-party dependencies.** JDK + Android framework only.
+- **No root.** No Shizuku. No Google Play Services. No PC in the loop — since
+  v0.5.0 the app pairs with **its own** `adbd` over `127.0.0.1` and gets a real
+  `uid=2000` shell, with no cable and no companion process.
+- **Zero third-party dependencies.** JDK + Android framework only. The one thing
+  that is not framework code is vendored source compiled into the APK — see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 - **~2.5 MB APK**, built entirely in GitHub Actions (no local Android SDK needed).
 - **Android 12+** (`minSdk 31`), `targetSdk 34`.
 
@@ -32,6 +36,7 @@ nothing needs to be exposed on the phone's network.
 | SMS | `sms [list [n]]`, `sms send [apply] <number> <text>` — sending is a dry run until `apply` |
 | Calls | `call [apply] <number>` (dry run until `apply`), `call answer`, `call hangup`, `call state`, `call speaker [on\|off]` (no argument = report) |
 | Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
+| Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [regen [apply]]` — the app pairs with **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative: pressing it in the app also clears "start on boot", so
@@ -49,10 +54,33 @@ base64-on-stdout output for a human at a terminal.
 
 ### What it deliberately cannot do
 
-There is **no arbitrary shell execution**. An app in the `untrusted_app` SELinux
-domain cannot run shell commands without root, and unlike many "AI phone control"
-projects this one does not pretend otherwise. Anything needing shell (`pm grant`,
-reading `/proc`) must be done once over a USB ADB session.
+**Shell exists as of v0.5.0, but only through one door and only as uid 2000.** The
+app pairs with **its own** `adbd` over `127.0.0.1` and runs commands there — the
+same authority a `adb shell` over USB has, and nothing more. There is no root
+(`sh apply id` reports `uid=2000(shell)`), no connecting to another machine, and
+no `pm grant` of a signature permission from inside that shell either. `sh` is a
+dry run until `apply`, because it is the most destructive command in the surface
+and the one most likely to be replayed out of a log.
+
+The transport is vendored source, not a dependency: the ADB protocol, SPAKE2
+pairing and the RSA key encoding live in `app/src/main/java/io/github/muntashirakon/`
+and compile into the APK. BouncyCastle was removed in the process — the two files
+that used it now run on plain JCE plus a 30-line RFC 5869 HKDF, so the dependency
+list is still empty. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+Pairing is a two-step ritual, and the steps are deliberately not merged:
+
+```
+shpair 123456     # 无线调试 → 使用配对码配对设备; then it tries one connect
+shconnect         # pairing only swaps keys; connecting is separate
+shinfo            # key fingerprint, connected or not, last note
+sh apply id       # uid=2000(shell) — the proof it really is a shell
+shkey             # 公钥 + SHA256: fingerprint, to compare against 已配对的设备
+```
+
+`shkey regen` alone only prints a warning; `shkey regen apply` really replaces the
+key and **invalidates the pairing**, so the old entry has to be removed on the
+phone before pairing again.
 
 **No silent install or uninstall either.** `INSTALL_PACKAGES` / `DELETE_PACKAGES`
 are `signature|privileged` without the `development` flag, so a sideloaded app
@@ -237,9 +265,17 @@ clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 
 ## Licensing
 
-The APK bundles no third-party code, so there is a single licence to honour: MIT
-(see [LICENSE](LICENSE)). The architecture and several accessibility techniques
-were learned from
+The project's own code is MIT (see [LICENSE](LICENSE)). As of v0.5.0 the APK also
+contains **vendored source** — the ADB protocol client (Apache-2.0), the SPAKE2
+pairing implementation (LGPL-3.0) and the Ed25519/X25519 curve code (CC0-1.0) —
+copied into `app/src/main/java/` and compiled in, not pulled as a dependency.
+Every vendored file keeps its original SPDX header, and the full attribution with
+the exact upstream commits is in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+Nothing is fetched at build time: no Maven artifact, no JitPack, no git
+submodule. That is deliberate — a dependency that updates itself is a dependency
+nobody reviewed.
+
+The architecture and several accessibility techniques were learned from
 [`danielealbano/android-remote-control-mcp`](https://github.com/danielealbano/android-remote-control-mcp)
 (MIT), which is a far more feature-complete project — worth a look if you want
 MCP instead of this minimal channel.

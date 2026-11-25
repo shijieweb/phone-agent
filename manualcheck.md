@@ -225,6 +225,42 @@ and compare against the expectation below.
 | `call speaker on` during a call | audio moves to the loudspeaker; `call speaker off` moves it back. Without `MODIFY_AUDIO_SETTINGS`: exit 6 naming the `pm grant` line |
 | `call speaker maybe` | exit 2 with the usage line — it must not pick a route for you |
 | `admin status` after the v0.4.0 grants | the `扩展权限:` block lists each permission with `已授予/未授予` plus 所有文件访问 / 悬浮窗 / 勿扰权限 / 通知使用权, each carrying the adb line when it is off |
+| `shinfo` before pairing | exit 0, five lines: `自连 ADB: 未连接`, `密钥: …`, `地址: 127.0.0.1（只连本机回环…）`, the two mDNS service names, and `最近:` |
+| `sh ls /sdcard` | exit 0, stdout is exactly `dry-run: would run sh: ls /sdcard` — **nothing runs** |
+| `sh apply id` | exit 0, stdout ends with `uid=2000(shell)` and `exit=0`. If it says `尚未配对`/`尚未连接`, that is exit **6**, not a command failure |
+| `sh apply ls /nope` | exit **0** with stdout `ls: /nope: No such file or directory` + `exit=1` — the remote code is in stdout, not in our exit |
+| `sh apply echo __RC=9` | exit 0, stdout contains `__RC=9` **and** a final `exit=0`: only the last sentinel counts |
+| `sh t=1 apply sleep 5` | exit 4, stderr `命令超时（1s 内没有返回）`; the phone must not stay wedged — `sh apply id` works right after |
+| `sh apply echo apply` | exit 0, stdout `dry-run: would run sh: echo apply` — the `apply` here is payload, not a flag |
+| `shkey` | exit 0, `公钥: <one long base64 line> phone-agent@dsh` and `指纹: SHA256:<43 chars>`; the same fingerprint appears in 手机 无线调试 → 已配对的设备 |
+| `shkey regen` | exit 0, **dry run**: `dry-run: 会删除现有密钥并重新生成…` and `shkey` still prints the old fingerprint |
+| `shpair 000000` (wrong code) | exit 6 with `配对失败: …`; the old pairing (if any) must still work |
+| `shpair 12345` | exit 2 — a code that is not six digits is refused before any network work |
+
+### 5.1 Self-ADB: pair the app with its own adbd
+
+This is the only part of the surface that needs a ritual, because Android's
+wireless debugging is a two-step handshake and the app is talking to **itself**.
+
+1. 设置 → 系统 → 开发者选项 → **无线调试** → on.
+2. Tap **使用配对码配对设备** — a six-digit code and a port appear. Keep that
+   dialog open; it closes on success.
+3. `shpair 123456` (the code from step 2). Expect
+   `配对成功，密钥已写入手机；接着执行 shconnect 建立连接` followed by
+   `已连上本机 adbd（uid 2000）…` on the next line.
+4. `shinfo` → `自连 ADB: 已连接`, and `密钥: 已生成（adb/adbkey） 指纹 SHA256:…`.
+5. `sh apply id` → `uid=2000(shell)`. **That single line is the whole proof**: an
+   app in the `untrusted_app` domain cannot print that.
+
+If step 3 answers `没发现 adb-tls-pairing 端口…`, the mDNS broadcast was missed
+(common on Flyme). Wait 3–5 s and retry; the app also bounces
+`adb_wifi_enabled` itself when `WRITE_SECURE_SETTINGS` is held. If it answers
+`TLS 握手被拒`, the key is not authorised — redo step 2, the code changes every
+time the dialog opens.
+
+After a reboot the pairing survives; only `shconnect` is needed. After
+`shkey regen apply` the pairing is **gone** — delete the old `phone-agent@dsh`
+entry under 已配对的设备 and start again from step 2.
 
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
@@ -312,10 +348,18 @@ refused leaves nothing to discover.
 
 ## 7. What this app deliberately cannot do
 
-No arbitrary shell execution and no root. `INSTALL_PACKAGES` /
-`DELETE_PACKAGES` are `signature|privileged` with no `development` flag, so a
-sideloaded app cannot hold them **even as Device Owner** — `install`/`uninstall`
-go through the system confirmation UI and `confirm apply` presses the button.
+No root, and no shell on any machine but this one. Since v0.5.0 `sh` does run
+commands — but as **uid 2000** through the phone's own `adbd` over `127.0.0.1`,
+which is exactly the authority a USB `adb shell` has and nothing more. There is no
+`sh HOST` form, no connecting to the PC, and `pm grant` of a signature permission
+fails from there too. `sh apply id` printing `uid=2000(shell)` is the honest
+statement of the ceiling; `uid=0` would be a bug.
+
+`INSTALL_PACKAGES` / `DELETE_PACKAGES` are `signature|privileged` with no
+`development` flag, so a sideloaded app cannot hold them **even as Device Owner** —
+`install`/`uninstall` go through the system confirmation UI and `confirm apply`
+presses the button. The shell user cannot hand them over either: uid 2000 is not
+`system`.
 
 What `pm grant` *can* grant — `WRITE_SECURE_SETTINGS`, `READ_LOGS`, `DUMP`,
 `PACKAGE_USAGE_STATS` — is used, and reported honestly per command. See

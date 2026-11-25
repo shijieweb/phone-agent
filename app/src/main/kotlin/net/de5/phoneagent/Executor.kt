@@ -100,6 +100,12 @@ class CommandExecutor(
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    init {
+        // 自连 ADB 要 context 才能读 filesDir 里的密钥、才能起 mDNS 发现。
+        // 在这里注入而不是每个命令里传：Executor 是常驻对象，生命周期正好对得上。
+        SelfAdb.init(context)
+    }
+
     fun execute(command: Command): ExecutionResult = clip(
         when (command) {
             is Command.Ping ->
@@ -287,6 +293,21 @@ class CommandExecutor(
 
             is Command.CallSpeaker ->
                 callSpeaker(command)
+
+            is Command.ShInfo ->
+                shInfo()
+
+            is Command.Sh ->
+                sh(command)
+
+            is Command.ShPair ->
+                shPair(command)
+
+            is Command.ShConnect ->
+                shConnect()
+
+            is Command.ShKey ->
+                shKey(command)
 
             is Command.Stop ->
                 stopAgent()
@@ -955,6 +976,76 @@ class CommandExecutor(
     private fun callSpeaker(command: Command.CallSpeaker): ExecutionResult =
         fromOps(CallOps.speaker(context, command.on))
 
+    private fun shInfo(): ExecutionResult = ExecutionResult(EXIT_OK, SelfAdb.status(), "")
+
+    /**
+     * `sh [t=SECONDS] [apply] COMMAND`.
+     *
+     * 默认 dry run：这条命令能以 uid 2000 跑任何东西，而它又是最容易在日志里
+     * 被随手重放的一条——不设闸门，一次误重放就可能 `rm -rf` 掉整个 /sdcard。
+     *
+     * 退出码语义（写进 SPEC，别让操作员猜）：
+     * - 命令跑完 → 0，远端退出码在 stdout 的 `exit=N` 里；
+     * - 没配对/没连接 → 6（EXIT_PERMISSION），不是「命令失败」；
+     * - 超时 → 4（EXIT_TIMEOUT）。
+     *
+     * 远端退出码不直接当 exit 用：2/3/4/5/6/7 在本协议里都有既定含义，
+     * 混用会让「adb shell 里 exit 4」看起来像我们自己的超时。
+     */
+    private fun sh(command: Command.Sh): ExecutionResult {
+        if (!command.apply) {
+            return ExecutionResult(EXIT_OK, SelfAdbPlan.dryRun(command.command), "")
+        }
+        // 多给 5 秒：哨兵要等命令自己结束，看门狗到点才收流，正好卡在边界上
+        // 会把「刚好跑完」误报成超时。
+        val result = offMain(command.timeoutMs + SH_SLACK_MS) {
+            SelfAdb.shell(command.command, command.timeoutMs)
+        } ?: return ExecutionResult(
+            EXIT_TIMEOUT,
+            "",
+            SelfAdbPlan.timeoutText(command.timeoutMs)
+        )
+        if (result.precondition) return ExecutionResult(EXIT_PERMISSION, "", result.text)
+        val code = result.code ?: return ExecutionResult(EXIT_TIMEOUT, "", result.text)
+        return ExecutionResult(
+            EXIT_OK,
+            SelfAdbPlan.output(SelfAdbPlan.shellOk(code, result.text)),
+            ""
+        )
+    }
+
+    private fun shPair(command: Command.ShPair): ExecutionResult {
+        val text = offMain(PAIR_TIMEOUT_MS) { SelfAdb.pair(command.code) }
+            ?: return ExecutionResult(EXIT_TIMEOUT, "", "配对超时（" + PAIR_TIMEOUT_MS + "ms 内没有结果）")
+        if (text != SelfAdbPlan.pairOk()) {
+            return ExecutionResult(EXIT_PERMISSION, "", text)
+        }
+        // 配对只交换密钥，连接是另一步；顺手连一次，省掉操作员一条命令。
+        val connected = offMain(CONNECT_TIMEOUT_MS) { SelfAdb.connect() }
+        val suffix = when {
+            connected == null -> "\n（自动连接超时，稍后执行 shconnect）"
+            connected == SelfAdbPlan.connectOk() -> "\n" + connected
+            else -> "\n（自动连接未成功：" + connected + "；稍后执行 shconnect 重试）"
+        }
+        return ExecutionResult(EXIT_OK, text + suffix, "")
+    }
+
+    private fun shConnect(): ExecutionResult {
+        val text = offMain(CONNECT_TIMEOUT_MS) { SelfAdb.connect() }
+            ?: return ExecutionResult(EXIT_TIMEOUT, "", "连接超时（" + CONNECT_TIMEOUT_MS + "ms 内没有结果）")
+        return if (text == SelfAdbPlan.connectOk()) {
+            ExecutionResult(EXIT_OK, text, "")
+        } else {
+            ExecutionResult(EXIT_PERMISSION, "", text)
+        }
+    }
+
+    private fun shKey(command: Command.ShKey): ExecutionResult {
+        if (!command.regen) return ExecutionResult(EXIT_OK, SelfAdb.keyReport(), "")
+        if (!command.apply) return ExecutionResult(EXIT_OK, SelfAdbPlan.regenDryRun(), "")
+        return ExecutionResult(EXIT_OK, SelfAdb.regenerate(), "")
+    }
+
     private fun stopAgent(): ExecutionResult {
         onStopRequested()
         return ExecutionResult(EXIT_OK, "stopping", "")
@@ -1091,5 +1182,12 @@ class CommandExecutor(
 
         /** Prefix for downloader failures that never reached the network. */
         private const val LOCAL_ERROR_PREFIX = "下载异常: "
+
+        /** `sh` 的看门狗余量：哨兵要等命令自己结束，边界上不能误判超时。 */
+        private const val SH_SLACK_MS = 5_000L
+
+        /** 配对/连接的外部预算比发现预算各多给 10 秒，留出 TLS 握手时间。 */
+        private const val PAIR_TIMEOUT_MS = 30_000L
+        private const val CONNECT_TIMEOUT_MS = 30_000L
     }
 }

@@ -272,6 +272,39 @@ sealed class Command {
      */
     data class CallSpeaker(val on: Boolean?) : Command()
 
+    // ------------------------------------- self-ADB (`sh` family, SPEC.md 3.16)
+
+    /**
+     * `shinfo` — read-only diagnostics of the self-ADB channel.
+     *
+     * Always exit 0: this is the command an operator runs when something is
+     * wrong, so it must never be the thing that fails.
+     */
+    object ShInfo : Command()
+
+    /**
+     * `sh [t=SECONDS] [apply] COMMAND` — run a shell command as uid 2000.
+     *
+     * [apply] is false for the dry run, matching every other destructive verb
+     * in this grammar: an operator reading a log must not be able to run
+     * arbitrary shell by accident.
+     */
+    data class Sh(val command: String, val timeoutMs: Long, val apply: Boolean) : Command()
+
+    /** `shpair 123456` — pair with the phone's own adbd, then connect. */
+    data class ShPair(val code: String) : Command()
+
+    /** `shconnect` — establish (or re-establish) the shell connection. */
+    object ShConnect : Command()
+
+    /**
+     * `shkey [regen [apply]]` — print the key fingerprint, or rotate the key.
+     *
+     * Rotation is two-step ([regen] alone is a dry run) because it invalidates
+     * the pairing on the phone: the operator must re-pair afterwards.
+     */
+    data class ShKey(val regen: Boolean, val apply: Boolean) : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -355,6 +388,9 @@ object Commands {
     private val SMS_USAGE = Command.BadUsage(SmsPlan.USAGE)
     private val ANIM_USAGE = Command.BadUsage(AnimPlan.USAGE)
     private val CALL_USAGE = Command.BadUsage(CallPlan.USAGE)
+    private val SH_USAGE = Command.BadUsage(SelfAdbPlan.USAGE)
+    private val SHPAIR_USAGE = Command.BadUsage("usage: shpair 123456")
+    private val SHKEY_USAGE = Command.BadUsage("usage: shkey | shkey regen [apply]")
 
     /** Shared shapes of the element-verb usage errors, so the text never drifts. */
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
@@ -600,6 +636,16 @@ object Commands {
             "anim" -> parseAnim(rest)
 
             "call" -> parseCall(rest)
+
+            "shinfo" -> if (splitArgs(rest).isEmpty()) Command.ShInfo else SH_USAGE
+
+            "sh" -> parseSh(rest)
+
+            "shpair" -> parseShPair(rest)
+
+            "shconnect" -> if (splitArgs(rest).isEmpty()) Command.ShConnect else SH_USAGE
+
+            "shkey" -> parseShKey(rest)
 
             "stop" -> Command.Stop
 
@@ -1110,6 +1156,72 @@ object Commands {
         if (tokens.size - index != 1) return CALL_USAGE
         val number = CallPlan.normalize(tokens[index].text) ?: return CALL_USAGE
         return Command.CallDial(number, apply)
+    }
+
+    /**
+     * `sh [t=SECONDS] [apply] COMMAND`.
+     *
+     * 只吃**前导**的 flag，遇到第一个不是 flag 的 token 就停，剩下的整段原文
+     * 当命令（用 tokenSpans 的 start 下标切，不做二次拼接）——否则
+     * `sh echo a  b` 里那两个空格会被 splitArgs 吃掉，命令语义就变了。
+     *
+     * `t=` 前缀但值不合法（`t=abc`）直接回 usage，而不是悄悄用默认 30 秒：
+     * 操作员以为自己限了时，超时后只会怀疑命令本身。
+     */
+    private fun parseSh(rest: String): Command {
+        val tokens = tokenSpans(rest)
+        if (tokens.isEmpty()) return SH_USAGE
+        var index = 0
+        var timeout: Long? = null
+        var apply = false
+        while (index < tokens.size) {
+            val lower = tokens[index].text.lowercase()
+            if (lower == "apply") {
+                apply = true
+                index++
+                continue
+            }
+            val millis = SelfAdbPlan.parseTimeout(lower)
+            if (millis != null) {
+                timeout = millis
+                index++
+                continue
+            }
+            if (lower.startsWith("t=")) return SH_USAGE
+            break
+        }
+        if (index >= tokens.size) return SH_USAGE
+        val command = rest.substring(tokens[index].start).trim()
+        if (command.isEmpty()) return SH_USAGE
+        return Command.Sh(command, SelfAdbPlan.clampTimeout(timeout), apply)
+    }
+
+    /** `shpair 123456` — 六位数字，格式错了当场拒，别让它去连一遍才失败。 */
+    private fun parseShPair(rest: String): Command {
+        val tokens = splitArgs(rest)
+        if (tokens.size != 1) return SHPAIR_USAGE
+        val code = tokens[0]
+        if (!SelfAdbPlan.validPairCode(code)) {
+            return Command.BadUsage(SelfAdbPlan.badPairCode())
+        }
+        return Command.ShPair(code)
+    }
+
+    /**
+     * `shkey` / `shkey regen` / `shkey regen apply`。
+     *
+     * regen 单独出现只是 dry run：换密钥会让手机上已授权的指纹失效，
+     * 必须显式加 apply 才真删，和 files rm / sms send 的规矩一致。
+     */
+    private fun parseShKey(rest: String): Command {
+        val tokens = splitArgs(rest)
+        if (tokens.isEmpty()) return Command.ShKey(regen = false, apply = false)
+        if (tokens[0].lowercase() != "regen") return SHKEY_USAGE
+        if (tokens.size == 1) return Command.ShKey(regen = true, apply = false)
+        if (tokens.size == 2 && tokens[1].lowercase() == "apply") {
+            return Command.ShKey(regen = true, apply = true)
+        }
+        return SHKEY_USAGE
     }
 
     /** A dotted, non-empty application id: what `uninstall` accepts. */
