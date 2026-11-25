@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -13,6 +14,7 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -21,6 +23,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import kotlin.math.roundToInt
 
 /**
  * The config screen, built in code (no XML) — the only screen a non-technical
@@ -48,6 +51,12 @@ class MainActivity : Activity() {
     private lateinit var stayOnBox: CheckBox
     private lateinit var statusTitle: TextView
     private lateinit var statusDetail: TextView
+
+    /** 24dp 主灯 + 三盏 12dp 小灯（v0.6.2-pad12）。 */
+    private lateinit var mainLamp: View
+    private lateinit var lampA11y: View
+    private lateinit var lampBattery: View
+    private lateinit var lampAdb: View
     private lateinit var permHint: TextView
     private lateinit var noticeView: TextView
     private lateinit var advancedBox: LinearLayout
@@ -59,8 +68,19 @@ class MainActivity : Activity() {
     private val uiHandler = Handler(Looper.getMainLooper())
     private var askedBackgroundLocation = false
 
+    /**
+     * 只在 onResume 与 onPause 之间为 true。
+     *
+     * onPause 里的 removeCallbacks 已经能停掉轮询链，但一个**已经排进消息队列**
+     * 的 run 还会照跑一次；那一跑就是「页面已经不在前台却还在探」，加这个开关让它
+     * 直接变成空操作，而不是靠删回调的时机刚好对上。
+     */
+    @Volatile
+    private var foreground = false
+
     private val refresher = object : Runnable {
         override fun run() {
+            if (!foreground) return
             refreshStatus()
             uiHandler.postDelayed(this, REFRESH_MS)
         }
@@ -75,16 +95,29 @@ class MainActivity : Activity() {
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(48, 48, 48, 48)
 
-        // ---- 1. the status card: one big word, one small line ----
+        // ---- 1. the status card: one lamp, one big word, one small line ----
+        // v0.6.2-pad12：这一页是给妈妈看的，她要的不是「四个字段各是什么值」，
+        // 而是「现在到底好不好」。所以主灯 + 一个大词给结论，副行只列有问题的项，
+        // 三盏小灯指出是哪一项不对。判定全在 [HealthPlan] 里，这里只负责画。
+        val card = LinearLayout(this)
+        card.orientation = LinearLayout.HORIZONTAL
+        card.gravity = Gravity.CENTER_VERTICAL
+        mainLamp = circle(MAIN_LAMP_DP)
+        card.addView(mainLamp)
+
         statusTitle = TextView(this)
         statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28f)
-        statusTitle.setPadding(0, 0, 0, 8)
-        root.addView(statusTitle)
+        statusTitle.setPadding(dp(12), 0, 0, 0)
+        card.addView(statusTitle)
+        root.addView(card)
 
         statusDetail = TextView(this)
         statusDetail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        statusDetail.setPadding(0, 0, 0, 24)
+        statusDetail.setTextColor(COLOR_DETAIL)
+        statusDetail.setPadding(0, dp(6), 0, dp(10))
         root.addView(statusDetail)
+
+        root.addView(lampRow())
 
         // ---- 2. the one button that matters ----
         toggleButton = addButton(root, UiText.START) { toggleAgent() }
@@ -171,11 +204,16 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 进来先真探一次（全是本地读，很快），再按 3 秒节拍轮询；onPause 停。
+        foreground = true
         refreshStatus()
+        // 先摘再挂：onResume 可能被连着调用两次，不摘就会叠出两条轮询链。
+        uiHandler.removeCallbacks(refresher)
         uiHandler.postDelayed(refresher, REFRESH_MS)
     }
 
     override fun onPause() {
+        foreground = false
         uiHandler.removeCallbacks(refresher)
         super.onPause()
     }
@@ -331,22 +369,102 @@ class MainActivity : Activity() {
     }
 
     /**
-     * The card is the whole page in two lines: the word the owner looks for, and
-     * the three facts that explain a "why is it not working".
+     * 四个探测每次刷新都重做，一个都不缓存（v0.6.2-pad12）。
+     *
+     * 缓存过就一定会骗人：无障碍被系统关掉、电池白名单被 ROM 清掉，这两件事都不
+     * 会通知本 App，只有重新读一次才知道。四次读全是本地调用（volatile 字段、
+     * Settings、PowerManager、ADB 连接状态），不碰网络，所以 3 秒一次不会跟服务
+     * 里的心跳线程抢东西——那条线程在等 relay 的 socket，这里一次 IO 都不做。
      */
     private fun refreshStatus() {
-        val running = RcAgentService.running
-        statusTitle.text = if (running) "运行中" else "已停止"
-        statusTitle.setTextColor(if (running) COLOR_RUNNING else COLOR_STOPPED)
-        statusDetail.text = "无障碍 " +
-            (if (PhoneAccessibilityService.instance != null) "已开启" else "未开启") +
-            " · 电池白名单 " + Battery.flag(this) +
-            " · v" + BuildConfig.VERSION_NAME
-        toggleButton.text = if (running) UiText.STOP else UiText.START
+        val snap = probe()
+        val health = HealthPlan.evaluate(snap)
+        statusTitle.text = health.title
+        statusTitle.setTextColor(
+            when (health.level) {
+                HealthPlan.Level.OK -> COLOR_RUNNING
+                HealthPlan.Level.WARN -> COLOR_WARN
+                HealthPlan.Level.DOWN -> COLOR_STOPPED
+            }
+        )
+        statusDetail.text = health.detail
+        paintMain(health.level)
+        paintLamp(lampA11y, HealthPlan.lampOn(snap, UiText.LAMP_A11Y))
+        paintLamp(lampBattery, HealthPlan.lampOn(snap, UiText.LAMP_BATTERY))
+        paintLamp(lampAdb, HealthPlan.lampOn(snap, UiText.LAMP_ADB))
+        toggleButton.text = if (snap.serviceRunning) UiText.STOP else UiText.START
         if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
         if (stayOnBox.isChecked != prefs.stayOn) stayOnBox.isChecked = prefs.stayOn
         permHint.text = PermPlan.hint(currentStep())
     }
+
+    /** 每次都真的去问一遍系统，见 [refreshStatus] 的注释。 */
+    private fun probe(): HealthPlan.Snapshot = HealthPlan.Snapshot(
+        serviceRunning = RcAgentService.running,
+        accessibilityOn = Admin.accessibilityEnabled(this),
+        batteryWhitelisted = Battery.isExempt(this),
+        selfAdbConnected = SelfAdb.isConnected()
+    )
+
+    /** 三盏小灯横排等宽：哪一项不对就哪一盏灰着，扫一眼就知道去补什么。 */
+    private fun lampRow(): LinearLayout {
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.setPadding(0, 0, 0, dp(18))
+        lampA11y = addLamp(row, UiText.LAMP_A11Y)
+        lampBattery = addLamp(row, UiText.LAMP_BATTERY)
+        lampAdb = addLamp(row, UiText.LAMP_ADB)
+        return row
+    }
+
+    private fun addLamp(row: LinearLayout, label: String): View {
+        val cell = LinearLayout(this)
+        cell.orientation = LinearLayout.HORIZONTAL
+        cell.gravity = Gravity.CENTER
+        val dot = circle(SMALL_LAMP_DP)
+        cell.addView(dot)
+        val text = TextView(this)
+        text.text = label
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        text.setTextColor(COLOR_DETAIL)
+        text.setPadding(dp(6), 0, 0, 0)
+        cell.addView(text)
+        row.addView(
+            cell,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        return dot
+    }
+
+    /**
+     * 一个圆点。用 [GradientDrawable] 而不是 drawable 资源：这个 App 没有 XML
+     * 布局，也不该为一个圆点多一个资源文件。
+     */
+    private fun circle(sizeDp: Int): View {
+        val dot = View(this)
+        val shape = GradientDrawable()
+        shape.shape = GradientDrawable.OVAL
+        shape.setColor(COLOR_LAMP_OFF)
+        dot.background = shape
+        dot.layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        return dot
+    }
+
+    private fun paintLamp(dot: View, on: Boolean) {
+        (dot.background as? GradientDrawable)?.setColor(if (on) COLOR_LAMP_ON else COLOR_LAMP_OFF)
+    }
+
+    private fun paintMain(level: HealthPlan.Level) {
+        (mainLamp.background as? GradientDrawable)?.setColor(
+            when (level) {
+                HealthPlan.Level.OK -> COLOR_RUNNING
+                HealthPlan.Level.WARN -> COLOR_WARN
+                HealthPlan.Level.DOWN -> COLOR_STOPPED
+            }
+        )
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private fun addLabel(parent: LinearLayout, text: String) {
         val view = TextView(this)
@@ -406,12 +524,24 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private const val REFRESH_MS = 2_000L
+        /** 3 秒：比 2 秒省一半唤醒，肉眼看不出延迟，又能在拔掉 ADB 后几秒内变灰。 */
+        private const val REFRESH_MS = 3_000L
         private const val REQ_PERMISSIONS = 100
         private const val REQ_BACKGROUND_LOCATION = 101
+
+        private const val MAIN_LAMP_DP = 24
+        private const val SMALL_LAMP_DP = 12
 
         /** 运行中/已停止的两种颜色：光看字在太阳底下不够，颜色要跟着变。 */
         private val COLOR_RUNNING = Color.parseColor("#2E7D32")
         private val COLOR_STOPPED = Color.parseColor("#C62828")
+
+        /** 部分异常用琥珀色：不是绿的（别以为没事），也不是红的（服务还在跑）。 */
+        private val COLOR_WARN = Color.parseColor("#F9A825")
+
+        /** 小灯的亮/灭，以及副行与灯标的灰字。 */
+        private val COLOR_LAMP_ON = Color.parseColor("#2E7D32")
+        private val COLOR_LAMP_OFF = Color.parseColor("#BDBDBD")
+        private val COLOR_DETAIL = Color.parseColor("#757575")
     }
 }

@@ -400,6 +400,41 @@ the check with 高级设置 collapsed at the start.
 6. `tree uia 5` → exactly five lines and the closing `... truncated at 5 nodes`,
    same wording as `tree 5`.
 
+### The status lamps tell the truth (v0.6.2-pad12)
+
+The page has one job for the phone's owner: answer 现在到底好不好 without her
+having to interpret four separate facts. Run this with the app in the foreground
+and the screen on.
+
+1. Agent started, accessibility on, battery whitelisted: the big lamp is **green**
+   and the word is 运行中, the small line says 一切正常, and all three small lamps
+   (无障碍 / 电池 / 自连ADB) are green.
+2. Press 停止. Within **3 seconds** the big lamp turns **red**, the word becomes
+   已停止, and the small line says 服务没有在跑 · 点下面的「启动」. The three small
+   lamps keep showing their own state — that is deliberate: a stopped service is
+   red on its own.
+3. Press 启动 again → green within 3 seconds.
+4. Turn accessibility off in the system settings, come back: within 3 seconds the
+   lamp turns **amber**, the word is 部分异常, and the line names 无障碍已关闭 and
+   ends with 建议点下面的一键设置权限. Nothing was cached — the page was not
+   restarted.
+5. Now also remove the battery whitelist (系统设置 → 电池 → 不做优化 → 取消):
+   the line must read 无障碍已关闭 · 电池白名单未加入 · 建议点下面的一键设置权限, in
+   that order. **Order matters**: it comes from the code, not from a set.
+6. With everything green again, drop the self-ADB link (or reboot and do not
+   `shconnect`): the line names **only** 自连 ADB 未连接 and points at
+   `shconnect`, never at 一键设置权限 — that wizard does not touch ADB, and
+   sending the owner there makes the button look broken.
+7. Put the app in the background (`key home`) for half a minute, then come back:
+   the values must be correct **immediately** on return (the page refreshes in
+   `onResume`), not after the next 3 s tick.
+8. The controls themselves must be untouched: 启动/停止, 开机自动启动, 屏幕常亮,
+   一键设置权限, 高级设置 (still collapsed) and 保存 inside it, in that order, with
+   those exact words — `click apply <text>` still drives the phone.
+9. `tree 200` on this page must show the lamp labels as plain text, not as
+   buttons: a lamp that could be clicked would be a lamp the operator presses by
+   accident.
+
 ### The debug page (v0.5.7-pad12)
 
 1. Open the app and scroll to the bottom. The last line is just `v0.5.7-pad12` —

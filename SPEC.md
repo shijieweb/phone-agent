@@ -1427,10 +1427,40 @@ One screen, `android.app.Activity`, plain `LinearLayout` built in code (no XML
 layout file). Since v0.5.8-pad12 it is organised for the phone's owner, not for
 the operator — top to bottom:
 
-1. **Status card.** One big word, 运行中 / 已停止 (28 sp, green / red), and under
-   it one small line: 无障碍 已开启 · 电池白名单 on · v0.5.8-pad12. Refreshed
-   every 2 s from the static snapshot `RcAgentService` holds; never any network
-   I/O on the UI thread.
+1. **Status card (v0.6.2-pad12).** One 24 dp lamp, one big word (28 sp) and one
+   small grey line, then three 12 dp lamps in an equal-width row labelled
+   无障碍 / 电池 / 自连ADB. The verdict is `HealthPlan.evaluate` over four
+   *freshly probed* facts and has three states:
+
+   | lamp | word | colour | when |
+   |---|---|---|---|
+   | green | 运行中 | `#2E7D32` | service running and all three probes fine |
+   | amber | 部分异常 | `#F9A825` | service running, at least one probe not fine |
+   | red | 已停止 | `#C62828` | service not running, **whatever the other three say** |
+
+   The small line names **only the things that are wrong**, in a fixed order
+   (无障碍 → 电池 → 自连 ADB), and says 一切正常 when nothing is: a list of four
+   facts forces the owner to work out the verdict herself, and an `issues` set
+   would reorder itself between builds. A stopped service is red even when the
+   other three are green — calling that 部分异常 would read as "still usable" and
+   nobody would press 启动. All three missing is still amber, never red. The tail
+   of the line names the one repair that actually helps: 建议点下面的一键设置权限
+   when a permission is missing, 建议先 shconnect 连上自连 ADB when only the ADB
+   link is down (the wizard does not touch ADB, so pointing at it would look
+   broken).
+
+   The four probes are read again on every refresh — `RcAgentService.running`,
+   `Admin.accessibilityEnabled(this)`, `Battery.isExempt(this)`,
+   `SelfAdb.isConnected()`. None of them is cached, because two of them change
+   without notifying us (the ROM can revoke accessibility and the battery
+   whitelist), and a cached green lamp is worse than no lamp. All four are local
+   reads: no network, no disk, nothing that can block the UI thread.
+
+   Refreshed once in `onResume` and then every **3 s** while the page is in front;
+   `onPause` clears the callback *and* a `@Volatile foreground` flag makes an
+   already-queued run a no-op, so nothing probes the phone while the page is
+   behind another one. The service's heartbeat thread is untouched by this: it is
+   blocked on a socket, and the UI thread does no I/O to compete with it.
 2. **The one main button**, `启动 / 停止` (`UiText.START` / `UiText.STOP`) →
    starts/stops `RcAgentService`, and **writes the auto-start flag in the same
    press**: stopping sets `auto_start = false` *before* the service is touched,
@@ -1481,6 +1511,14 @@ the real device with `click apply <text>`, not with coordinates: two controls
 with the same text is a mis-click, and a label that changes with state is a
 control that cannot be found. `UiText.clickable` is asserted unique in
 `PermPlanTest`.
+
+The non-clickable labels (`RELAY_LABEL`, `ID_LABEL`, `SECRET_LABEL` and the
+three lamp labels) live there too, and `HealthPlanTest` asserts that no lamp
+label *contains* a clickable label or vice versa. That is not pedantry: the
+matcher is `text.lowercase().contains(needle)` (§3.1), so a lamp labelled
+无障碍 would be found by `click apply 一键设置权限`'s neighbours and, worse, a
+`click apply` whose needle is a substring of a lamp label reports 只匹配到不可点
+文本 instead of pressing the button.
 
 Buttons must not crash when the service was never started.
 

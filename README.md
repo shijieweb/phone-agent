@@ -40,6 +40,14 @@ screen stayed invisible to `tree` — and therefore to `click apply` — until t
 window was re-activated. The screen is also read twice, 150 ms apart, and the
 later answer wins when the two disagree. See `SPEC.md` §5.
 
+Since v0.6.2-pad12 the config page answers one question — 现在到底好不好 — with
+one lamp and one word: green 运行中, amber 部分异常, red 已停止, plus three small
+lamps for 无障碍 / 电池 / 自连ADB. The line under it names only what is wrong, in
+a fixed order, and the verdict is red the moment the service stops no matter how
+green the rest is. All four facts are re-probed every 3 s while the page is in
+front (never cached, never on a background thread, never any network). See
+`SPEC.md` §6.
+
 Since v0.6.1-pad12 the accessibility service also subscribes to content-change
 events (collected, never acted on), which is what keeps that cache fresh; and
 `tree uia` reads the same tree as **uid 2000** through `uiautomator` for the
