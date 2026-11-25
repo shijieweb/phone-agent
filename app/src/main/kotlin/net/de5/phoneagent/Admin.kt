@@ -396,21 +396,27 @@ internal object Admin {
     // ----------------------------------------------------------------- logcat
 
     /**
-     * logs [n] — a logcat tail.
+     * logs [n] — a logcat tail, **App 自读回落路径**（v0.5.9-pad12 起不再是首选）。
      *
-     * READ_LOGS is signature|development: grantable with `pm grant`, never with
-     * Device Owner alone. Without it logcat prints its own permission error and we
-     * report that text as-is rather than guessing.
+     * Android 16 给 logcat 加了运行时「日志访问」授权：以 App 自己的 uid 读日志
+     * 会弹 `com.android.systemui.logcat.LogAccessDialogActivity`，只给「允许一次」，
+     * 每次都要重弹。无人值守的机器上没人点，于是拿不到任何输出。
+     *
+     * 所以 [CommandExecutor.logs] 先试自连 ADB（uid 2000，零弹窗），只有连不上
+     * 才走到这里；这里的失败文案必须指路（见 [LogSource.localEmptyText]），
+     * 不能只说「READ_LOGS 未授予」——那句话会把人引向 `pm grant`，而实测
+     * `pm grant` 之后 dumpsys 显示 granted=true、弹框照旧。
      *
      * Reading stops after LOGCAT_MAX_LINES lines: the relay truncates stdout at
      * 190 000 chars and a chatty log would push the useful part out.
      */
     fun readLogcat(lines: Int): String {
-        val wanted = lines.coerceIn(1, LOGCAT_MAX_LINES * 2)
+        // 参数由 [LogSource] 统一生成：它同时决定「走哪条路」，命令形状只能有一份。
+        val wanted = LogSource.clamp(lines)
         var process: Process? = null
         val collected = ArrayList<String>(LOGCAT_MAX_LINES)
         return try {
-            process = ProcessBuilder("logcat", "-d", "-t", wanted.toString()).start()
+            process = ProcessBuilder(LogSource.localArguments(wanted)).start()
             val output = process.inputStream.bufferedReader()
             val reader = Thread {
                 try {
@@ -435,10 +441,7 @@ internal object Admin {
             reader.join(1000L)
             val text = synchronized(collected) { collected.toList() }
             if (text.isEmpty()) {
-                return error(
-                    "logcat 无输出（READ_LOGS 未授予：adb shell pm grant " +
-                        "net.de5.phoneagent android.permission.READ_LOGS）"
-                )
+                return error(LogSource.localEmptyText(lines))
             }
             val joined = text.joinToString("\n")
             if (text.size >= LOGCAT_MAX_LINES) {

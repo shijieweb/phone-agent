@@ -170,7 +170,7 @@ reach the `unknown command` branch.
 | `uninstall PACKAGE` | open the system uninstall confirmation for `PACKAGE`; a package that is not installed is already done |
 | `confirm [apply] [t=SECONDS] TEXT` | **dry run** by default; `apply` waits for a *pressable* node whose text/desc contains `TEXT` and presses it (see §3.2) |
 | `settings [get\|put] global\|secure\|system KEY [VALUE]` | read or write a system setting |
-| `logs [lines]` | logcat tail, default 120, cap 500 |
+| `logs [lines]` | logcat tail, default 120, cap 500. **Read as uid 2000 over self-ADB when it is connected** — on Android 16 the app's own uid triggers a system log-access dialog that only offers 「允许一次」 and re-appears every time, so the app-read path is a fallback, not the default (§3.19) |
 | `logs size` | what the logs occupy, in three separate ledgers: the in-memory ring (`AgentLog`, cap 400), the guard log `/data/local/tmp/phoneagent-guard.log` (cap 64 KB, measured over self-ADB) and leftover APKs in `cacheDir` (§3.18) |
 | `logs trim [apply]` | **dry run** by default; `apply` cuts the guard log back to its last 200 lines when it is over 64 KB and deletes cached APKs older than 24 h |
 | `admin status` | authority report: Device Owner, admin, each development permission, installer app-op, accessibility |
@@ -1219,6 +1219,46 @@ our own adbd (§3.16) with a 10 s timeout, so:
 The debug page measures this ledger on its own 30 s timer
 (`DebugActivity.GUARD_REFRESH_MS`), not on the 2 s summary refresh: one round
 trip per two seconds would keep the shell busy for no new information.
+
+### 3.19 `logs` on Android 16: read it as uid 2000, never as ourselves
+
+Android 16 added a **runtime** "log access" grant on top of the `READ_LOGS`
+permission. When the app starts `logcat` with its own uid, the system puts up
+`com.android.systemui.logcat.LogAccessDialogActivity` — 「允许 Phone Agent 访问所有
+设备日志吗？」 with 允许访问一次 / 不允许 — and it comes back **every time**, because
+the only answer on offer is "once". On a phone nobody is holding, that dialog is
+never answered, so the app-read path returns nothing at all.
+
+`pm grant android.permission.READ_LOGS` does **not** fix it: `dumpsys` then shows
+`granted=true` and the dialog still appears. The permission and the runtime grant
+are two different questions, and only one of them is answerable from adb.
+
+uid 2000 is not asked at all. `sh apply logcat -d -t 5` over our own adbd (§3.16)
+returns output with no dialog, so `logs` now tries that first:
+
+```
+LogSource.plan(SelfAdb.isConnected(), lines)
+  connected    -> Plan.Adb("logcat -d -t N")        // SelfAdb.shell, 30 s budget
+  not connected -> Plan.Local(["logcat","-d","-t",N]) // ProcessBuilder, as before
+```
+
+Both paths clamp to `Commands.LOGS_LINES_MAX` through the same `LogSource.clamp`,
+so the two branches can never disagree about how many lines were asked for. The
+decision itself is a pure function and is pinned in `LogSourceTest`.
+
+When the fallback returns nothing, the message has to redirect rather than
+describe. It says the dialog exists, that it re-appears every time so it cannot
+be answered remotely, that `pm grant` is not the fix, and then names the way out:
+
+> logcat 无输出。Android 16 起 App 直接读日志要弹系统授权框（「允许 Phone Agent 访问
+> 所有设备日志吗？」，只给「允许一次」，每次都要重弹），远程点不了，所以这条路在
+> 无人值守时不可用；pm grant READ_LOGS 也没用（权限显示已授予，弹框照旧）。建议先
+> shconnect 连上自连 ADB 再执行 logs，或直接 sh apply logcat -d -t N
+
+Exit codes: a disconnected self-ADB link is `exit=6` (permission/precondition,
+same as `sh`), a shell that never answers is `exit=4`, and a non-zero remote exit
+still returns `exit=0` with the text — the command ran, it just had nothing
+useful to say, and the operator can read the remote `exit=N` in the body.
 
 ### Exit codes
 | Code | Meaning |

@@ -676,15 +676,42 @@ class CommandExecutor(
         adminResult(Admin.setSetting(context, command.namespace, command.key, command.value))
 
     /**
-     * logs [n] — no Device Owner needed to *try*; the framework decides whether
-     * READ_LOGS is held and logcat prints its own refusal, which we pass through.
+     * logs [n] — 自连 ADB 优先（v0.5.9-pad12）。
+     *
+     * Android 16 给 logcat 加了运行时「日志访问」授权：App 以自己的 uid 起
+     * logcat，系统就弹 `LogAccessDialogActivity`，只给「允许一次」，**每次都要
+     * 重弹**。无人值守的机器上没人点那个框，所以 App 自读这条路在真机上等于
+     * 不可用（`pm grant READ_LOGS` 也救不了，权限 granted=true 弹框照旧）。
+     *
+     * uid 2000 的 logcat 不需要这个授权，所以连上自连 ADB 就走它；没连上才
+     * 退回 App 自读，并把「为什么这条路是死的、出路在哪」写清楚（[LogSource]）。
      */
-    private fun logs(command: Command.Logs): ExecutionResult {
-        val text = Admin.readLogcat(command.lines)
-        if (text.startsWith(Admin.ERROR_PREFIX)) {
-            return ExecutionResult(EXIT_PERMISSION, "", text)
+    private fun logs(command: Command.Logs): ExecutionResult =
+        when (val plan = LogSource.plan(SelfAdb.isConnected(), command.lines)) {
+            is LogSource.Plan.Adb -> logsViaAdb(plan.command)
+            is LogSource.Plan.Local -> {
+                val text = Admin.readLogcat(command.lines)
+                if (text.startsWith(Admin.ERROR_PREFIX)) {
+                    ExecutionResult(EXIT_PERMISSION, "", text)
+                } else {
+                    ExecutionResult(EXIT_OK, text, "")
+                }
+            }
         }
-        return ExecutionResult(EXIT_OK, text, "")
+
+    /**
+     * 走自连 ADB 读日志（uid 2000，不弹框）。
+     *
+     * 失败要区分「链路没通」和「命令超时」：前者是操作员该去 shconnect 的事，
+     * 后者是等一会儿重试的事，混成一句话会让人一直重连。
+     */
+    private fun logsViaAdb(command: String): ExecutionResult {
+        val result = offMain(LOGS_ADB_TIMEOUT_MS + SH_SLACK_MS) {
+            SelfAdb.shell(command, LOGS_ADB_TIMEOUT_MS)
+        } ?: return ExecutionResult(EXIT_TIMEOUT, "", SelfAdbPlan.timeoutText(LOGS_ADB_TIMEOUT_MS))
+        if (result.precondition) return ExecutionResult(EXIT_PERMISSION, "", result.text)
+        if (result.code == null) return ExecutionResult(EXIT_TIMEOUT, "", result.text)
+        return ExecutionResult(EXIT_OK, SelfAdbPlan.output(result.text), "")
     }
 
     /**
@@ -1327,6 +1354,12 @@ class CommandExecutor(
 
         /** `sh` 的看门狗余量：哨兵要等命令自己结束，边界上不能误判超时。 */
         private const val SH_SLACK_MS = 5_000L
+
+    /**
+     * 自连 ADB 读日志的预算。logcat -d 是 dump 完就退出，30 秒足够；
+     * 给太短会把「日志有点多」误报成链路故障。
+     */
+    private const val LOGS_ADB_TIMEOUT_MS = 30_000L
 
 
         /** 配对/连接的外部预算比发现预算各多给 10 秒，留出 TLS 握手时间。 */

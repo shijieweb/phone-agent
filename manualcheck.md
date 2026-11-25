@@ -397,6 +397,25 @@ that, only notice it the next time it is opened.
 6. Nothing here may touch `/sdcard/Movies` or any downloaded film: trimming is
    limited to `cacheDir` and the guard log.
 
+### `logs` when self-ADB is down (v0.5.9-pad12)
+
+1. With self-ADB **connected**, `logs 20` returns lines and **no system dialog**
+   appears. On Android 16 the app's own uid is what triggers
+   `LogAccessDialogActivity`; uid 2000 is never asked. That is the whole reason
+   this path exists.
+2. Disconnect self-ADB (`shdisconnect` or stop the pairing), then `logs 20`. The
+   reply is a refusal that **redirects**: it names the 允许访问一次 dialog, says it
+   re-appears every time so it cannot be answered remotely, says `pm grant READ_LOGS`
+   也没用 (granted=true and the dialog still appears — verified on the real phone),
+   and ends with 建议先 shconnect 连上自连 ADB 再执行 logs，或直接 sh apply logcat -d -t 20.
+   A message that only says READ_LOGS 未授予 is a regression: it sends the operator
+   to a grant that does not help.
+3. Grant `READ_LOGS` anyway (`adb shell pm grant net.de5.phoneagent
+   android.permission.READ_LOGS`) and repeat step 2: the dialog still appears and the
+   reply is unchanged. Nothing in the app may claim that grant fixed it.
+4. `logs size` and `logs trim` are **not** affected — they measure files, not
+   logcat, and must behave exactly as in the previous section with self-ADB down.
+
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
 1. Get a direct video link (any host, `http` or `https`, no login page).
