@@ -165,7 +165,7 @@ reach the `unknown command` branch.
 | `loc` | one location fix, stdout = one-line JSON |
 | `locloop INTERVAL` | start periodic reporting every `INTERVAL` s (min 30, max 3600) |
 | `locstop` | stop periodic reporting |
-| `stop` | stop the agent service (result is sent first) |
+| `stop` | stop the agent service (result is sent first). **Identical to pressing 停止**: it clears `auto_start` before `stopSelf()`, so the guard is disarmed and neither a reboot nor a UI open can revive it (see §3.17) |
 | `install URL` | download to cache, then open the system installer on it (see §3.3) |
 | `uninstall PACKAGE` | open the system uninstall confirmation for `PACKAGE`; a package that is not installed is already done |
 | `confirm [apply] [t=SECONDS] TEXT` | **dry run** by default; `apply` waits for a *pressable* node whose text/desc contains `TEXT` and presses it (see §3.2) |
@@ -1043,13 +1043,31 @@ every 60 s:
 - **`arm` only when there is something to guard.** `WatchdogPlan.shouldArm(pids,
   serviceRunning)` is `pids.isEmpty() && serviceRunning` — a guard started before
   the service exists would immediately `am start` a UI for no reason.
-- **Stop means stop.** Pressing 停止 writes the marker *and* `pkill -f
-  phoneagent-guard.sh`. `WatchdogPlan.shouldDisarm(autoStart)` keys off
-  `autoStart`, not off the service state: `START_STICKY` restarts the service
-  after a kill while `autoStart` is still true, and that restart must not be
-  read as "the operator wants the guard back". Without the marker a killed guard
-  would be resurrected by the next heartbeat and the service would come back two
-  minutes after the operator silenced it.
+- **Stop means stop, through both doors.** Pressing 停止 writes the marker *and*
+  `pkill -f phoneagent-guard.sh`. The relay's `stop` command does exactly the same,
+  because it routes through the same rule: `StartPolicy.onRemoteStop()` returns the
+  identical `Decision(start=false, autoStart=false)` that `onToggle(wasRunning=true)`
+  returns, and the service lambda applies it before `stopSelf()`. v0.5.5 got this
+  wrong — `Executor.stopAgent()` called `stopSelf()` and left `auto_start` true, so
+  `shouldDisarm(true)` declined to disarm, the guard saw a dead service 60 s later
+  and ran `am start`, and opening the UI would have revived it too. `onRemoteStop`
+  exists so the two stop paths cannot fork again; `StartPolicyTest` asserts the
+  remote decision equals the button decision and that `shouldDisarm` accepts it.
+  `WatchdogPlan.shouldDisarm(autoStart)` keys off `autoStart`, not off the service
+  state: `START_STICKY` restarts the service after a kill while `autoStart` is still
+  true, and that restart must not be read as "the operator wants the guard back".
+  Without the marker a killed guard would be resurrected by the next heartbeat and
+  the service would come back two minutes after the operator silenced it.
+
+**The guard is only as available as self-ADB, which needs Wi-Fi.** Self-ADB talks
+to `127.0.0.1`, but the port it dials is discovered through mDNS, and mDNS
+multicast does not leave a mobile-data interface. Measured on the target phone
+while it was on cellular (`10.201.131.111`): `adbheal` set `adb_wifi_enabled=1`
+yet neither `NsdManager` nor a raw mDNS query found `_adb-tls-connect._tcp`, so
+`shconnect` cannot succeed and `watchdog arm` degrades to
+`守护未启用：自连 ADB 未连接`. On cellular the guard is simply not available; the
+UI-open trigger (§ above) is the only self-start path, and it still works because
+it needs no ADB at all.
 
 **When self-ADB is not connected, arming is skipped silently** — one `AgentLog`
 line, `守护未启用：自连 ADB 未连接`, and no error. A phone whose wireless
@@ -1339,7 +1357,10 @@ Buttons must not crash when the service was never started.
   by the heartbeat at a 5 min cadence, and disarmed in `onDestroy` **only when**
   `WatchdogPlan.shouldDisarm(prefs.autoStart)` — a `START_STICKY` restart must not
   tear down the guard that is about to revive it.
-- `stop` command → send the result, then `stopSelf()`.
+- `stop` command → send the result, then `stopSelf()` — **after** applying
+  `StartPolicy.onRemoteStop()`, which clears `auto_start` exactly like the button
+  (§3.17). `stop` is a stop, not a pause: the guard is disarmed in `onDestroy`
+  because `shouldDisarm` now sees `autoStart=false`.
 - Read config from `Prefs` **once at start**; if the URL or secret is blank,
   stop immediately and surface `未配置 relay 地址或口令` in the UI status.
 
@@ -1499,6 +1520,15 @@ framework** — do not mock `AccessibilityService`. Required cases:
       refuses when the service is not running, and `shouldDisarm` keys off
       `autoStart` rather than the service state.
 
+  19. The v0.5.6 remote-stop repair: `StartPolicy.onRemoteStop()` equals
+      `onToggle(wasRunning = true)` (same `Decision`, `start=false`,
+      `autoStart=false`), `WatchdogPlan.shouldDisarm(onRemoteStop().autoStart)` is
+      true while the start branch keeps the guard, and
+      `shouldStartOnOpen(configured = true, autoStart = onRemoteStop().autoStart,
+      running = false)` is false — the relay's `stop` and the UI button are one
+      rule, and the v0.5.5 leak (guard reviving a silenced agent 60 s later) cannot
+      come back through either door.
+
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
 that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
@@ -1510,8 +1540,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (525 cases at
-  v0.5.5-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (528 cases at
+  v0.5.6-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

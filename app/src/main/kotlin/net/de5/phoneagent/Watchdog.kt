@@ -80,7 +80,7 @@ internal object Watchdog {
      */
     fun arm(): String {
         if (!SelfAdb.isConnected()) {
-            lastNote = WatchdogPlan.adbUnavailable()
+            lastNote = WatchdogPlan.armUnavailable()
             return lastNote!!
         }
         val before = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
@@ -147,7 +147,7 @@ internal object Watchdog {
     /** 停止：写标记 + pkill + 回读确认。 */
     fun disarm(): String {
         if (!SelfAdb.isConnected()) {
-            lastNote = WatchdogPlan.adbUnavailable()
+            lastNote = WatchdogPlan.disarmUnavailable()
             return lastNote!!
         }
         val exit = run(WatchdogPlan.disarmCommand())

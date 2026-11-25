@@ -252,7 +252,8 @@ and compare against the expectation below.
 | `watchdog status` | exit 0, seven lines. With self-ADB connected: `守护: 运行中（pid N）` or `未运行`; with it down: `守护: 未知（自连 ADB 未连接）`. `停止标记: 不存在` in normal operation. `status` JSON gains `"guard":"running"\|"off"\|"unknown"` and every other field is unchanged. |
 | `watchdog arm` | exit 0, `守护已启动（pid N）`; run it three times in a row and `watchdog status` must still show **one** pid with `…未重复启动` on the repeats |
 | `watchdog disarm` | exit 0, `守护已停止`; `watchdog status` then shows `未运行` + `停止标记: 存在`, and no `phoneagent-guard.sh` process remains |
-| `watchdog arm` with self-ADB down | exit 6, stderr `守护未启用：自连 ADB 未连接` — a refusal, not a crash, and the heartbeat retries by itself once `shconnect` works |
+| `watchdog arm` with self-ADB down | exit 6, stderr `守护启用失败: 自连 ADB 未连接（先执行 shconnect）` — a refusal, not a crash, and the heartbeat retries by itself once `shconnect` works |
+| `stop` (relay command) | exit 0, stdout `stopping`; the service stops **and** `auto_start` becomes false. Prove it: wait 2 minutes and the agent must not come back, then open the app — it must stay stopped. This is the v0.5.6 fix; on v0.5.5 the guard revived it after 60 s |
 
 ### 5.1 Self-ADB: pair the app with its own adbd
 
@@ -333,6 +334,14 @@ shows `自连 ADB: 已连接`).
 `watchdog status`: exactly one pid, and the second and third answers contain
 `未重复启动`. A phone left running for a day re-arms every 5 minutes; without
 this rule it would collect roughly 288 copies.
+
+**On mobile data the guard is unavailable, and that is expected.** Self-ADB
+discovers its port over mDNS, and mDNS multicast does not leave a cellular
+interface. On cellular (`adbinfo` shows an address like `10.201.131.111`),
+`adbheal` flips `adb_wifi_enabled` to 1 but neither `NsdManager` nor a raw mDNS
+query resolves, `shconnect` fails, and `watchdog arm` answers
+`守护启用失败: 自连 ADB 未连接`. Do not read that as a bug: only step 1 (opening
+the UI) can restart the agent on cellular. Run the whole of 5.3 on Wi-Fi.
 
 **What this cannot prove.** The guard lives in `/data/local/tmp`, so a reboot
 wipes it — boot recovery is `BootReceiver` (§6). A ROM that aggressively reaps

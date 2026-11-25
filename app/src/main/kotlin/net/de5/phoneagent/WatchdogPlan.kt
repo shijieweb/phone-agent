@@ -186,7 +186,18 @@ internal object WatchdogPlan {
         return sb.toString()
     }
 
+    /** 自动 arm 时的静默降级：只记一行日志，不当错误喊出来。 */
     fun adbUnavailable(): String = "守护未启用：自连 ADB 未连接"
+
+    /**
+     * 手动 arm / disarm 时的拒绝文案。
+     *
+     * 必须带 [Admin.ERROR_PREFIX]：Executor 只靠这个前缀把失败翻成 exit 6，
+     * 少了它「自连 ADB 没连上」会被当成成功回 exit 0，控制器就会以为守护已开。
+     */
+    fun armUnavailable(): String = Admin.ERROR_PREFIX + "守护启用失败: 自连 ADB 未连接（先执行 shconnect）"
+
+    fun disarmUnavailable(): String = Admin.ERROR_PREFIX + "守护停止失败: 自连 ADB 未连接（先执行 shconnect）"
 
     fun armOk(pids: List<Int>): String =
         "已启用守护（pid " + pids.joinToString(",") + "，每 " + INTERVAL_SECONDS + "s 检查一次）"

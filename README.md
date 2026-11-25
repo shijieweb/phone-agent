@@ -40,9 +40,11 @@ nothing needs to be exposed on the phone's network.
 | Self-start | opening the app starts the agent again when 开机自动启动 is ticked; a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`, and `watchdog [status\|arm\|disarm]` drives it by hand |
 | Lifecycle | `ping`, `stop` |
 
-`stop` is authoritative: pressing it in the app also clears "start on boot", so
-the agent cannot come back by itself after a reboot or an update. Re-arm it with
-the `启动` button or the `开机自动启动` checkbox.
+`stop` is authoritative, and it is the same rule from both doors: pressing 停止 in
+the app and sending `stop` over the relay both clear "start on boot" before the
+service is touched, so the guard is disarmed and the agent cannot come back by
+itself after a reboot, an update, a `force-stop` or somebody opening the UI.
+Re-arm it with the `启动` button or the `开机自动启动` checkbox.
 
 Everything is driven by one-line commands delivered over the relay's long poll,
 and every command returns `exit` + `stdout` + `stderr`.
@@ -74,6 +76,12 @@ watchdog status     # 守护: 运行中（pid 12345）/ 最近重启: … / 停�
 watchdog arm        # start it by hand; refuses to start a second copy
 watchdog disarm     # write the stop marker and pkill it
 ```
+
+**The guard needs Wi-Fi.** It drives self-ADB, whose port is found over mDNS, and
+mDNS multicast does not leave a mobile-data interface — measured on cellular
+(`10.201.131.111`): `adbheal` sets `adb_wifi_enabled=1` but nothing resolves, so
+`shconnect` fails and `watchdog arm` answers `守护未启用：自连 ADB 未连接`. On
+cellular only trigger 1 (opening the UI) can restart the agent; it needs no ADB.
 
 Three rules keep it honest: `arm` probes `pgrep -f phoneagent-guard.sh` first so a
 5-minute re-arm never stacks copies; `arm` is skipped with one log line

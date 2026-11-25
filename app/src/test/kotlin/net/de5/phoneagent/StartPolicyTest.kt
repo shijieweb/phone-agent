@@ -51,6 +51,39 @@ class StartPolicyTest {
         assertFalse(StartPolicy.shouldStartOnOpen(configured = true, autoStart = false, running = false))
     }
 
+    /**
+     * v0.5.6：`stop` 走 relay 命令这条路必须和按按钮等价。
+     *
+     * v0.5.5 的漏洞就是这条没测：Executor 只 stopSelf() 不清 autoStart，
+     * 守护 60 秒后把服务拉回来，直接违反「停止就彻底停止」。
+     */
+    @Test
+    fun remoteStopClearsAutoStartJustLikeTheButton() {
+        val remote = StartPolicy.onRemoteStop()
+        val button = StartPolicy.onToggle(wasRunning = true)
+        assertFalse(remote.start)
+        assertFalse(remote.autoStart)
+        assertEquals(button, remote)
+    }
+
+    @Test
+    fun remoteStopLetsTheWatchdogDisarm() {
+        // onDestroy 用 shouldDisarm(autoStart) 决定要不要收守护：清掉才收。
+        assertTrue(WatchdogPlan.shouldDisarm(StartPolicy.onRemoteStop().autoStart))
+        assertFalse(WatchdogPlan.shouldDisarm(StartPolicy.onToggle(wasRunning = false).autoStart))
+    }
+
+    @Test
+    fun remoteStopKeepsTheUiFromRevivingTheAgent() {
+        assertFalse(
+            StartPolicy.shouldStartOnOpen(
+                configured = true,
+                autoStart = StartPolicy.onRemoteStop().autoStart,
+                running = false
+            )
+        )
+    }
+
     @Test
     fun theHintMentionsBothDirections() {
         assertTrue(StartPolicy.HINT.contains("停止后不会自动启动"))

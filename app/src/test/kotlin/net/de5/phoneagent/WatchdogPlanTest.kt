@@ -217,6 +217,12 @@ class WatchdogPlanTest {
         assertTrue(WatchdogPlan.armAlready(listOf(12)).contains("未重复启动"))
         assertTrue(WatchdogPlan.disarmOk().contains("停止标记"))
         assertEquals("守护未启用：自连 ADB 未连接", WatchdogPlan.adbUnavailable())
+        // 手动 arm/disarm 必须带错误前缀，否则 Executor 会把它当成功回 exit 0，
+        // 控制器就以为守护已经开起来了。
+        assertTrue(WatchdogPlan.armUnavailable().startsWith(Admin.ERROR_PREFIX))
+        assertTrue(WatchdogPlan.disarmUnavailable().startsWith(Admin.ERROR_PREFIX))
+        assertTrue(WatchdogPlan.armUnavailable().contains("shconnect"))
+        assertTrue(WatchdogPlan.disarmUnavailable().contains("shconnect"))
     }
 
     @Test

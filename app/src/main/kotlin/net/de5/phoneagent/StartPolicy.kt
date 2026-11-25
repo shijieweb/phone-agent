@@ -19,6 +19,16 @@ internal object StartPolicy {
     fun onToggle(wasRunning: Boolean): Decision =
         if (wasRunning) Decision(start = false, autoStart = false) else Decision(start = true, autoStart = true)
 
+    /**
+     * `stop` 走 relay 命令时的语义：和按界面上的「停止」按钮**必须一模一样**。
+     *
+     * v0.5.5 漏了这一条：Executor 只 stopSelf()，没清 autoStart，于是 onDestroy 里
+     * shouldDisarm(autoStart=true) 返回 false，守护不收；60 秒后守护发现服务没了，
+     * `am start` 把它拉回来，下次打开界面也会复活（shouldStartOnOpen 同样看
+     * autoStart）。两条停止路径共用同一个 Decision，别再分叉。
+     */
+    fun onRemoteStop(): Decision = Decision(start = false, autoStart = false)
+
     /** Both conditions are required; a factory-fresh install stays quiet. */
     fun shouldAutoStart(autoStart: Boolean, configured: Boolean): Boolean = autoStart && configured
 

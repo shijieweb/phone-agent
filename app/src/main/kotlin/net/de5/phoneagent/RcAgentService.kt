@@ -191,7 +191,13 @@ class RcAgentService : Service() {
             context = this,
             locations = helper,
             onLocationFix = { fix -> submitFix(fix) },
-            onStopRequested = { stopSelf() },
+            // `stop` 命令 = 按界面上的「停止」按钮：先清 autoStart 再 stopSelf。
+            // 只 stopSelf 的话 onDestroy 里 shouldDisarm(autoStart=true) 会放过守护，
+            // 60 秒后它把服务拉回来（v0.5.5 的真漏洞，v0.5.6 修）。
+            onStopRequested = {
+                prefs.autoStart = StartPolicy.onRemoteStop().autoStart
+                stopSelf()
+            },
             // Screenshots leave through PUT /agent/blob, not stdout: the relay
             // truncates stdout at 200 000 chars and big screenshots do not fit.
             blobs = relay?.let { rc -> BlobUploader { name, bytes -> rc.uploadBlob(name, bytes) } }
