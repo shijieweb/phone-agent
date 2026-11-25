@@ -40,6 +40,12 @@ screen stayed invisible to `tree` — and therefore to `click apply` — until t
 window was re-activated. The screen is also read twice, 150 ms apart, and the
 later answer wins when the two disagree. See `SPEC.md` §5.
 
+Since v0.6.1-pad12 the accessibility service also subscribes to content-change
+events (collected, never acted on), which is what keeps that cache fresh; and
+`tree uia` reads the same tree as **uid 2000** through `uiautomator` for the
+times it goes stale anyway — same line format, needs `shconnect`. The dump is
+left at `/data/local/tmp/phoneagent-tree.xml` as evidence. See `SPEC.md` §5.1.
+
 | Area | Commands |
 |---|---|
 | Screen | `shot [b64] [maxPx] [quality]` (screenshot, no MediaProjection prompt — uploaded as a blob and answered with one line of JSON; `b64` forces the old base64-on-stdout output), `tree` (node tree), `status` |

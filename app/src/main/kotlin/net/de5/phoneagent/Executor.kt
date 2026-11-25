@@ -472,6 +472,7 @@ class CommandExecutor(
      * a slow command — one retry, 150 ms, nothing more (SPEC.md section 5).
      */
     private fun tree(command: Command.Tree): ExecutionResult {
+        if (command.viaUia) return treeViaUia(command.maxNodes)
         val service = PhoneAccessibilityService.instance ?: return notConnected()
         val first = readTree(service, command.maxNodes)
             ?: return ExecutionResult(EXIT_TIMEOUT, "", "tree timed out")
@@ -488,6 +489,53 @@ class CommandExecutor(
     /** @return the formatted tree, or null when the main thread never answered. */
     private fun readTree(service: PhoneAccessibilityService, maxNodes: Int): String? =
         onMain(TREE_TIMEOUT_MS) { UiTree.format(service.roots(), maxNodes) }
+
+    /**
+     * `tree uia` — read the screen as uid 2000 through uiautomator (v0.6.1-pad12).
+     *
+     * The escape hatch for the accessibility channel going stale: on this phone
+     * `rootInActiveWindow` keeps answering with the window as it was at the last
+     * window event, while `uiautomator dump` reads the live view tree at the same
+     * moment. Same line format either way ([UiaDump] hands its tree to
+     * [UiTree.format]), so a caller can swap one for the other.
+     *
+     * Needs the self-ADB link: only uid 2000 may run uiautomator. Without it the
+     * answer names the fix instead of quietly falling back — a silent fallback
+     * would return the very stale tree this command exists to escape.
+     */
+    private fun treeViaUia(maxNodes: Int): ExecutionResult {
+        if (!SelfAdb.isConnected()) {
+            return ExecutionResult(
+                EXIT_PERMISSION,
+                "",
+                Admin.ERROR_PREFIX + "tree uia 走 uid 2000 的 uiautomator，需要自连 ADB：" +
+                    SelfAdbPlan.notConnected()
+            )
+        }
+        val result = offMain(UIA_TIMEOUT_MS + SH_SLACK_MS) {
+            SelfAdb.shell(UiaDump.dumpCommand(), UIA_TIMEOUT_MS)
+        } ?: return ExecutionResult(EXIT_TIMEOUT, "", SelfAdbPlan.timeoutText(UIA_TIMEOUT_MS))
+        if (result.precondition) return ExecutionResult(EXIT_PERMISSION, "", result.text)
+        if (result.code == null) return ExecutionResult(EXIT_TIMEOUT, "", result.text)
+        if (UiaDump.failed(result.text)) {
+            return ExecutionResult(
+                EXIT_PERMISSION,
+                "",
+                Admin.ERROR_PREFIX + "uiautomator dump 失败（uid 2000 也读不到这份视图树）；" +
+                    "回执: " + SelfAdbPlan.output(result.text)
+            )
+        }
+        val tree = UiaDump.parse(result.text, maxNodes)
+        if (tree.isEmpty()) {
+            return ExecutionResult(
+                EXIT_NOT_FOUND,
+                "",
+                Admin.ERROR_PREFIX + "uiautomator dump 没给出可解析的 <hierarchy>（文件 " +
+                    UiaDump.DUMP_PATH + "，留着可手动取证）"
+            )
+        }
+        return ExecutionResult(EXIT_OK, tree, "")
+    }
 
     private fun tap(command: Command.Tap): ExecutionResult {
         val service = PhoneAccessibilityService.instance ?: return notConnected()
@@ -1358,6 +1406,8 @@ class CommandExecutor(
 
     companion object {
         private const val TREE_TIMEOUT_MS = 15_000L
+        /** `tree uia` — one dump plus the cat back, measured at 1-2 s on the phone. */
+        private const val UIA_TIMEOUT_MS = 15_000L
         /** The accessibility rescue sleeps ~2 s on purpose; leave room for it. */
         private const val A11Y_TIMEOUT_MS = 15_000L
         private const val TEXT_TIMEOUT_MS = 10_000L

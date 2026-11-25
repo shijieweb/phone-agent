@@ -99,6 +99,9 @@ class DebugActivity : Activity() {
         addLabel(root, "快捷动作")
         addButton(root, "截图 shot") { runCommand("shot") }
         addButton(root, "节点树 tree 30") { runCommand("tree 30") }
+        // 无障碍那条路在 Flyme / Android 16 上会慢一拍（v0.6.0 真机实测），
+        // 这个按钮走 uid 2000 的 uiautomator，用来对照同一时刻的另一份读数。
+        addButton(root, "节点树 tree uia 30（uid 2000）") { runCommand("tree uia 30") }
         addButton(root, "日志 logs 200") { runCommand("logs 200") }
         // 日志占用与裁剪（v0.5.8-pad12）：dry-run 与真删分开两个按钮，
         // 免得手快点掉了一次真的删除。

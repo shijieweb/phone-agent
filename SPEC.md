@@ -149,7 +149,7 @@ reach the `unknown command` branch.
 | `ping` | stdout `pong` |
 | `status` | one-line JSON (see below) |
 | `shot [b64] [maxPx] [quality]` | screenshot, stdout = one-line blob JSON (see §4). `b64` forces the legacy base64 stdout |
-| `tree [maxNodes]` | indented node tree, default `maxNodes=400`, cap 800 |
+| `tree [uia] [maxNodes]` | indented node tree, default `maxNodes=400`, cap 800. `uia` reads it as uid 2000 through `uiautomator` instead of the accessibility channel (see §5) |
 | `tap X Y` | tap at ints X,Y |
 | `long X Y [ms]` | long press, default 600 ms, cap 5000 |
 | `swipe X1 Y1 X2 Y2 [ms]` | swipe, default 300 ms, cap 3000 |
@@ -1374,6 +1374,51 @@ One node per line:
   `... truncated at <n> nodes`.
 - Accessibility service not connected → `exit=3`, stderr `accessibility service not connected`.
 
+### 5.1 `tree uia`: the same tree read as uid 2000 (v0.6.1-pad12)
+
+`tree` without arguments keeps using the accessibility channel. On this phone
+that channel can go stale — the framework only keeps a window's content cache
+current for the event types the service subscribed to, and until v0.6.1-pad12
+the service subscribed to window changes only (`accessibility_service_config.xml`).
+The config now also subscribes to `typeWindowContentChanged` / `typeViewClicked`
+/ `typeViewFocused` / `typeViewScrolled`, and `onAccessibilityEvent` stays empty:
+we collect the events and do nothing with them. That is mechanism A.
+
+Mechanism B is the escape hatch, and it is the one that cannot be defeated by a
+ROM's accessibility cache:
+
+```
+tree uia [maxNodes]
+```
+
+1. Requires the self-ADB link (`SelfAdb.isConnected`). Without it the answer is
+   `exit=6` and names the fix (`shconnect`) — never a silent fallback, because a
+   fallback would hand back the very stale tree this command exists to escape.
+2. One shell round trip (`UiaDump.dumpCommand`): `uiautomator dump
+   /data/local/tmp/phoneagent-tree.xml`, then `cat` it back in the same line, so
+   the PTY is crossed once (~1 s) instead of twice. Budget 15 s
+   (`Executor.UIA_TIMEOUT_MS`); the dump itself measured 1–2 s.
+3. The file is **left in place** on purpose — it is the evidence an operator
+   needs when the two channels disagree. Read it with `sh cat
+   /data/local/tmp/phoneagent-tree.xml`.
+4. `UiaDump.parse` turns the XML into the format above, through the same
+   `UiTree.format` the accessibility path uses, so flags, the 60-char field
+   clipping, the `|`/`\n` neutralising and `... truncated at <n> nodes` are
+   identical by construction. Two differences the XML forces:
+   - `depth` is not an attribute. The parser keeps a stack of open `<node>` tags
+     and attaches every node to the nearest enclosing one, so depth is the length
+     of that stack (the `<hierarchy>` element itself is not a node).
+   - `editable` is not an attribute either. A node counts as editable when
+     `editable="true"` or when its class ends in `EditText` — the accessibility
+     channel reports `e` for every `EditText`, so the two channels must agree.
+5. `uiautomator` is uid 2000 only; the app's own uid cannot run it. That is why
+   this needs `shconnect`, and why it is the trustworthy reading when `tree`
+   and `uiautomator dump` disagree.
+
+Measured on the real phone (Flyme / Android 16, 2026-11): with 高级设置 expanded
+and then collapsed, `tree` reported 3 `EditText` in both states (one window
+activation behind), while `tree uia` reported 3 then 0 at the same moments.
+
 ---
 
 ## 6. UI (`MainActivity`)
@@ -1463,7 +1508,7 @@ process, same executor.
     drives — not a second copy of it. The answer is `exit=N` first, then stdout,
     then stderr, in a monospace `TextView`. Off the UI thread always: `tree`
     waits on the main looper, `shot` uploads a blob, `logs` walks logcat.
-  - **C. Quick actions:** `shot`, `tree 30`, `logs 200`,
+  - **C. Quick actions:** `shot`, `tree 30`, `tree uia 30`, `logs 200`,
     `logs size`, `logs trim` (dry run), `logs trim apply`,
     `Diagnostics.run` (≈1 min, copied to the clipboard, previewed),
     `Diagnostics.stateOnly` (zero network, copied), clear the log.

@@ -375,6 +375,31 @@ because every step is a check:
    for them, and neither may appear twice (a duplicate would double every match
    count and make `click apply` ambiguous).
 
+### `tree` and `tree uia` must agree on a fresh screen (v0.6.1-pad12)
+
+The bug from v0.6.0 was that the accessibility channel kept answering with the
+window as it was at the last window event, so `rootInActiveWindow` and
+`refresh()` were not enough. This version adds two independent mechanisms; run
+the check with 高级设置 collapsed at the start.
+
+1. `tree 200` → count `EditText` lines → **0**. Then `click apply 高级设置` and
+   `tree 200` **immediately** → **3**. If this step alone now works, mechanism A
+   (subscribing to `typeWindowContentChanged`) did it.
+2. At the same moment run `tree uia 200` → **3** as well. This is the reading
+   that does not depend on our accessibility channel at all: it comes from
+   `uiautomator dump` as uid 2000. `sh cat /data/local/tmp/phoneagent-tree.xml`
+   must show the same screen; the file is deliberately left behind.
+3. `click apply 高级设置` to collapse, then `tree 200` and `tree uia 200` → both
+   **0**. A pair that disagrees here means the two channels are looking at
+   different moments; note which one is behind and in which direction.
+4. Turn the self-ADB link off (or reboot and do not `shconnect`), then
+   `tree uia 200` → `exit=6` and the stderr names `shconnect`. It must **not**
+   quietly fall back to the accessibility tree.
+5. Time both: `tree` under 500 ms, `tree uia` about 1–2 s (15 s budget). A slow
+   `tree uia` that still answers is a slow dump, not a hang.
+6. `tree uia 5` → exactly five lines and the closing `... truncated at 5 nodes`,
+   same wording as `tree 5`.
+
 ### The debug page (v0.5.7-pad12)
 
 1. Open the app and scroll to the bottom. The last line is just `v0.5.7-pad12` —

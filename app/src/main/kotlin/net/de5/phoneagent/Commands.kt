@@ -38,7 +38,14 @@ sealed class Command {
         val quality: Int,
         val forceBase64: Boolean = false
     ) : Command()
-    data class Tree(val maxNodes: Int) : Command()
+    /**
+     * `tree [uia] [maxNodes]` — the node tree (SPEC.md section 5).
+     *
+     * [viaUia] picks the uid-2000 uiautomator dump instead of the accessibility
+     * channel, which on Flyme / Android 16 reports the window as it was at the
+     * last window event (v0.6.1-pad12).
+     */
+    data class Tree(val maxNodes: Int, val viaUia: Boolean = false) : Command()
     data class Tap(val x: Int, val y: Int) : Command()
     data class LongPress(val x: Int, val y: Int, val ms: Int) : Command()
     data class Swipe(val x1: Int, val y1: Int, val x2: Int, val y2: Int, val ms: Int) : Command()
@@ -434,6 +441,8 @@ object Commands {
 
     /** Shared shapes of the element-verb usage errors, so the text never drifts. */
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
+
+    private val TREE_USAGE = "usage: tree [uia] [maxNodes]"
     private val CLICK_USAGE = "usage: click [apply] SEL"
     private val LONGCLICK_USAGE = "usage: longclick [apply] SEL"
     private val CONFIRM_USAGE = "usage: confirm [apply] [t=SECONDS] TEXT"
@@ -489,9 +498,11 @@ object Commands {
 
             "tree" -> {
                 val args = splitArgs(rest)
-                val maxNodes = optionalInt(args, 0, TREE_MAXNODES_DEFAULT)
-                    ?: return Command.BadUsage("usage: tree [maxNodes]")
-                Command.Tree(maxNodes.coerceIn(1, TREE_MAXNODES_MAX))
+                val viaUia = args.firstOrNull()?.equals("uia", true) == true
+                val counted = if (viaUia) args.drop(1) else args
+                val maxNodes = optionalInt(counted, 0, TREE_MAXNODES_DEFAULT)
+                    ?: return Command.BadUsage(TREE_USAGE)
+                Command.Tree(maxNodes.coerceIn(1, TREE_MAXNODES_MAX), viaUia)
             }
 
             "tap" -> {

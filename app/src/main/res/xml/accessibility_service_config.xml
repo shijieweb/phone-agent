@@ -11,12 +11,19 @@
   flagReportViewIds        : gives us resource ids, which make the tree
                              far easier to target than raw text.
 
-  Note: `notificationTimeout` is left at the default. We do not subscribe to
-  TYPE_WINDOW_CONTENT_CHANGED on purpose - it fires constantly and would keep
-  the agent busy re-reading the tree for no benefit.
+  Event types: we subscribe to content changes as well as window changes, and
+  onAccessibilityEvent stays empty - we collect the events and do nothing with
+  them. The old comment here said the opposite ("it fires constantly"), but the
+  cost of an empty callback is nil and the cost of NOT subscribing is real: the
+  framework only keeps a window's content cache current for the event types a
+  service asked for, so without typeWindowContentChanged getRootInActiveWindow
+  hands back the snapshot from the last window event. Measured on the real phone
+  (v0.6.0-pad12): expanding 高级设置 drew three EditTexts and tree kept answering
+  0 after one second, after six seconds and after a scroll; only re-activating
+  the window refreshed it. If tree ever goes stale again, check this line first.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused|typeViewScrolled"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
