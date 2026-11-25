@@ -27,15 +27,21 @@
 | v0.5.4 | **PTY 通道**：这版 Flyme 的 raw shell 全死，只有 `shell:` 空命令能开；哨兵 `echo "__RC=$?"` |
 | v0.5.5 | 打开即自启 + uid 2000 守护脚本（活过 force-stop）+ `watchdog status/arm/disarm` |
 | v0.5.6 | relay `stop` 必须清 autoStart，否则守护把它拉回来 |
+| v0.5.7 | relay/secret/agentId 编译期内置（走 `local.properties`，public 仓库不进库）；`DebugActivity` 抽出 |
+| v0.5.8 | 配置页瘦身（状态卡 + 单按钮 + 一键设置权限向导 + 高级设置默认收起）；日志三处封顶（内存 400 行 / 守护日志 64KB 保 200 行 / APK 残留 24h）；`logs size`、`logs trim` |
+| v0.5.9 | Android 16 下 `logs` 改走 uid 2000（App 自己读必弹系统授权框，每次都要重弹） |
+| v0.6.0 | `tree` 读活动窗口而非旧快照（`WindowPicker` 合并多窗口 + `TreeSettle` 重取） |
+| v0.6.1 | 无障碍配置补订阅 `typeWindowContentChanged` 等六类事件（框架靠订阅决定要不要维护内容缓存）；新增 `tree uia`（uid 2000 跑 uiautomator dump）作独立通道 |
+| v0.6.2 | 配置页三盏状态灯：24dp 大灯三态（运行中/部分异常/已停止）+ 只列不对的项 + 无障碍/电池/自连ADB 三盏小灯；四项现探不缓存，前台每 3 秒重跑 |
 
-### v0.5.7 —— 保活 + 本地 OCR（未做）
+### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）
 - ML Kit 本地文字识别：`ocr` 命令，截图直接出文字，省掉把 base64 传回模型的成本
 
-### v0.6.0-pad12 —— 界面重构
-- 拆成两个 Activity：`MainActivity`（配置，妈妈看的）+ `DebugActivity`（调试，我看的）
-- 配置界面走"向导式"：第一步填 relay，第二步点启动，第三步给权限，每步一行状态
-- 调试界面按命令分组：屏幕 / 元素 / 文件 / 通知 / 语音 / 通话 / 特权 / 网络
+### 界面重构（已完成 3 步）
+- v0.5.7：拆 `MainActivity`（配置，妈妈看的）+ `DebugActivity`（调试，我看的，exported=false，5 连点版本号进入）
+- v0.5.8：配置页瘦身 + 一键设置权限向导（每点一次做下一件缺的事）
+- v0.6.2：状态灯（一眼知道好坏）
 
 ## 不抄 dsh-go 的部分
 宠物、酒馆、分享回放、悬浮条美学、技能自动草稿、不打扰模式（虚拟屏在 Android 12 上没有，且妈妈平板不需要）。
