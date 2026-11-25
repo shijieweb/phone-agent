@@ -321,6 +321,9 @@ class CommandExecutor(
             is Command.ShDest ->
                 shDest(command)
 
+            is Command.Watchdog ->
+                watchdog(command)
+
             is Command.Stop ->
                 stopAgent()
 
@@ -344,6 +347,9 @@ class CommandExecutor(
         json.put("loop", locations.loopInterval)
         json.put("opt", Battery.flag(context))
         json.put("queue", 0)
+        // 新增字段（v0.5.5）：守护进程的缓存状态。既有字段一个都没改名 ——
+        // 控制器那侧按名字取值，改一个就是断一次。真值用 `watchdog status`。
+        json.put("guard", Watchdog.state())
         return ExecutionResult(EXIT_OK, json.toString(), "")
     }
 
@@ -1070,6 +1076,35 @@ class CommandExecutor(
         return ExecutionResult(EXIT_OK, text, "")
     }
 
+    /**
+     * `watchdog [status|arm|disarm]` —— uid 2000 看门脚本。
+     *
+     * 三件事都走自连 ADB，所以每一次都可能卡在网络/进程上，统一 offMain 加超时。
+     * status 恒 exit 0（只读报告）；arm/disarm 失败按 EXIT_PERMISSION，因为绝大多数
+     * 失败原因是「自连 ADB 没连上」，那是权限/前置条件问题，不是命令写错。
+     */
+    private fun watchdog(command: Command.Watchdog): ExecutionResult {
+        return when (command.action) {
+            "arm" -> {
+                val text = offMain(WATCHDOG_TIMEOUT_MS) { Watchdog.arm() }
+                    ?: return ExecutionResult(EXIT_TIMEOUT, "", "守护启用超时（" + WATCHDOG_TIMEOUT_MS / 1000 + "s）")
+                if (text.startsWith(Admin.ERROR_PREFIX)) ExecutionResult(EXIT_PERMISSION, "", text)
+                else ExecutionResult(EXIT_OK, text, "")
+            }
+            "disarm" -> {
+                val text = offMain(WATCHDOG_TIMEOUT_MS) { Watchdog.disarm() }
+                    ?: return ExecutionResult(EXIT_TIMEOUT, "", "守护停止超时（" + WATCHDOG_TIMEOUT_MS / 1000 + "s）")
+                if (text.startsWith(Admin.ERROR_PREFIX)) ExecutionResult(EXIT_PERMISSION, "", text)
+                else ExecutionResult(EXIT_OK, text, "")
+            }
+            else -> {
+                val text = offMain(WATCHDOG_TIMEOUT_MS) { Watchdog.status() }
+                    ?: return ExecutionResult(EXIT_TIMEOUT, "", "守护状态查询超时（" + WATCHDOG_TIMEOUT_MS / 1000 + "s）")
+                ExecutionResult(EXIT_OK, text, "")
+            }
+        }
+    }
+
     private fun shKey(command: Command.ShKey): ExecutionResult {
         if (!command.regen) return ExecutionResult(EXIT_OK, SelfAdb.keyReport(), "")
         if (!command.apply) return ExecutionResult(EXIT_OK, SelfAdbPlan.regenDryRun(), "")
@@ -1242,5 +1277,11 @@ class CommandExecutor(
 
         /** 与 SelfAdbPlan.importFailed 的前缀保持一致，用来判定失败退出码。 */
         private const val IMPORT_FAILED_PREFIX = "导入失败："
+
+        /**
+         * 守护命令的预算。写脚本 + setsid + 回读进程表是三次 shell 往返，
+         * 单次 10 秒（Watchdog.RUN_TIMEOUT_MS），这里给三倍余量。
+         */
+        private const val WATCHDOG_TIMEOUT_MS = 35_000L
     }
 }

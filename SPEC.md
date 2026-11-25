@@ -211,6 +211,8 @@ reach the `unknown command` branch.
 | `shkey import URL [PUBURL]` | download a ready-made key pair and install it; the way around the hidden-API block on Android 16 (see §3.16) |
 | `shkey adopt` | not implemented: `/data/misc/adb/adb_keys` is adbd-private and `uid 2000` cannot read it on a `user` build (see §3.16) |
 | `shdest DEST` | debug verb: open `DEST` verbatim, read up to 8 s, report bytes/hex/text. Always `exit 0` — the report is evidence, not a verdict (see §3.16) |
+| `watchdog [status]` | is the uid-2000 guard alive, its pids, the last restart stamp, whether the stop marker exists (see §3.17) |
+| `watchdog arm` / `watchdog disarm` | start / stop the guard by hand; `arm` refuses to start a second copy (see §3.17) |
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
@@ -984,6 +986,98 @@ import`, and it exits **6** rather than pretending to have worked.
 either); no writing to another app's private storage. It is the same authority
 `adb shell` has over USB — nothing more.
 
+### 3.17 `watchdog`: surviving an install, and surviving the app being killed
+
+Flyme never delivers `MY_PACKAGE_REPLACED` (§3.15 measured it), and the app is
+not a launcher, so after a silent `pm install -r` nothing on the phone has any
+reason to start it. Two independent mechanisms cover that, and they are
+deliberately separate because they fail differently.
+
+**Trigger 1 — opening the UI starts the service.** `MainActivity.onCreate` ends
+with the same decision the boot receiver makes:
+
+```
+StartPolicy.shouldStartOnOpen(configured, autoStart, running)
+  = configured && autoStart && !running
+```
+
+`autoStart` is a hard gate, not a hint. Pressing 停止 writes `auto_start=false`
+(§6), so a phone the operator deliberately silenced cannot be revived by
+somebody opening the app. The four rows of that truth table are unit-tested
+(`StartPolicyTest`); the failure mode this prevents is the v0.2.9 regression
+where "stop" was a suggestion.
+
+**Trigger 2 — a guard script that outlives the app.** Once the agent is running
+and self-ADB is connected, `Watchdog.armQuietly()` writes
+`/data/local/tmp/phoneagent-guard.sh`, `chmod 755`, and starts it with
+`setsid sh … >/dev/null 2>&1 &`. `setsid` detaches it from the app's process
+group, and the script runs as `uid 2000`, so `am force-stop net.de5.phoneagent`
+does not touch it — measured on the target device: a `setsid`-detached `sleep 25`
+survived a force-stop and wrote its file 32 s later.
+
+The script is generated in Kotlin and written through the PTY shell; it is
+never downloaded. Its loop:
+
+```
+every 60 s:
+  if the stop marker exists -> exit
+  if `dumpsys activity services net.de5.phoneagent` mentions RcAgentService -> sleep
+  else append a timestamp to phoneagent-guard.log and `am start -n …/.MainActivity`
+```
+
+`am start` works from `uid 2000` (measured: `Starting: Intent { cmp=…/.MainActivity }`,
+`topResumedActivity` becomes ours), so the guard needs nobody to touch the screen.
+
+| File | Purpose |
+|---|---|
+| `/data/local/tmp/phoneagent-guard.sh` | the loop above, `chmod 755` |
+| `/data/local/tmp/phoneagent-guard.log` | one `YYYY-MM-DDTHH:MM:SS restart` line per revival |
+| `/data/local/tmp/phoneagent-guard.off` | stop marker; its existence is the first thing the loop checks |
+
+**Three rules the guard has to obey**, each with a test:
+
+- **Never two copies.** `arm` probes `pgrep -f phoneagent-guard.sh` first and
+  returns `…未重复启动` with the existing pids instead of starting another. The
+  heartbeat re-arms on a 5 min cadence (`Watchdog.ensureArmed`), so without this
+  rule a long-running phone would collect a copy per heartbeat.
+- **`arm` only when there is something to guard.** `WatchdogPlan.shouldArm(pids,
+  serviceRunning)` is `pids.isEmpty() && serviceRunning` — a guard started before
+  the service exists would immediately `am start` a UI for no reason.
+- **Stop means stop.** Pressing 停止 writes the marker *and* `pkill -f
+  phoneagent-guard.sh`. `WatchdogPlan.shouldDisarm(autoStart)` keys off
+  `autoStart`, not off the service state: `START_STICKY` restarts the service
+  after a kill while `autoStart` is still true, and that restart must not be
+  read as "the operator wants the guard back". Without the marker a killed guard
+  would be resurrected by the next heartbeat and the service would come back two
+  minutes after the operator silenced it.
+
+**When self-ADB is not connected, arming is skipped silently** — one `AgentLog`
+line, `守护未启用：自连 ADB 未连接`, and no error. A phone whose wireless
+debugging the ROM keeps switching off (§3.4) would otherwise log a refusal every
+five minutes forever. The heartbeat retries, so the guard appears by itself as
+soon as `shconnect` succeeds.
+
+**`watchdog status`** prints seven lines and never fails (it is a report):
+
+```
+守护: 运行中（pid 12345）| 未运行 | 未知（自连 ADB 未连接）
+最近重启: 2026-11-25T16:20:31 | (无记录)
+自连 ADB: 已连接 | 未连接
+停止标记: 存在 | 不存在
+脚本: /data/local/tmp/phoneagent-guard.sh
+间隔: 60s
+命令: watchdog [status] | watchdog arm | watchdog disarm
+```
+
+`status` also gains one JSON field, `"guard":"running"|"off"|"unknown"`. No
+existing field is renamed — a controller that only reads `ver`/`acc`/`bat` keeps
+working.
+
+**What it cannot do.** The guard cannot survive a reboot (`/data/local/tmp` is
+wiped and nothing restarts it — the boot path is `BootReceiver`, §7), it cannot
+survive the ROM clearing `uid 2000` background processes, and it does not touch
+`auto_start`: if the operator stopped the agent, the guard exits at its next tick
+and stays gone.
 ### 3.1 Element selectors (`SEL`)
 
 The whole rest of the line after the command name is the selector, **verbatim**
@@ -1189,6 +1283,10 @@ layout file). Fields:
   a state that is not in force.
 - A hint line under them (`StartPolicy.HINT`): 停止后不会自动启动，除非重新点「启动」；
   勾选「开机自动启动」时，重启或装新版会自己拉起。
+- Opening the UI starts the service when `StartPolicy.shouldStartOnOpen` says so
+  (§3.17). This is not a convenience: Flyme delivers no package-replaced
+  broadcast, so after a silent `pm install -r` the only signal the app ever gets
+  is somebody bringing the activity up.
 - `请求权限` button → requests `POST_NOTIFICATIONS`,
   `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, then (second pass)
   `ACCESS_BACKGROUND_LOCATION`
@@ -1237,6 +1335,10 @@ Buttons must not crash when the service was never started.
   and the heartbeat covers the rest at a 5 min cadence. Flyme delivers neither
   broadcast — see §3.15 for the measurement. None of this is part of the boot
   path: on a plain boot Android restores the entry itself.
+- The uid-2000 guard (§3.17) is armed by `start()` on a worker thread, re-checked
+  by the heartbeat at a 5 min cadence, and disarmed in `onDestroy` **only when**
+  `WatchdogPlan.shouldDisarm(prefs.autoStart)` — a `START_STICKY` restart must not
+  tear down the guard that is about to revive it.
 - `stop` command → send the result, then `stopSelf()`.
 - Read config from `Prefs` **once at start**; if the URL or secret is blank,
   stop immediately and surface `未配置 relay 地址或口令` in the UI status.
@@ -1385,6 +1487,18 @@ framework** — do not mock `AccessibilityService`. Required cases:
       when the sentinel never arrives. `hasSentinel` only accepts a whole line,
       `channelLine` distinguishes PTY from RAW, and `status` prints the channel.
 
+  18. The v0.5.5 self-start pair: `StartPolicy.shouldStartOnOpen` over all four
+      rows (configured × autoStart × running), including "the operator pressed
+      stop, so opening the app must not revive it"; and `WatchdogPlan` — the
+      generated script exits on the stop marker before it looks at anything else
+      and contains no single quote (it is written with `echo '…'`), `writeCommand`
+      stays on one line because the PTY shell splits on newlines, `armCommand`
+      removes the marker before `setsid`, `disarmCommand` writes the marker
+      **before** `pkill`, `parseStatus` ignores blank lines (the trailing newline
+      used to reset `offMarker` to false), `shouldArm` refuses a second copy and
+      refuses when the service is not running, and `shouldDisarm` keys off
+      `autoStart` rather than the service state.
+
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
 that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
@@ -1396,8 +1510,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (493 cases at
-  v0.5.4-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (525 cases at
+  v0.5.5-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

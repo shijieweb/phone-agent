@@ -97,6 +97,17 @@ class MainActivity : Activity() {
         // fails", and the repair is cheap. Asynchronous, so the UI never waits on
         // the ~2 s rescue sequence.
         A11yHeal.checkNow(this)
+
+        // 装完自己起来（v0.5.5）。Flyme 不投 MY_PACKAGE_REPLACED，静默安装之后
+        // 没有任何广播会到；界面被打开是这个 App 唯一能拿到的「刚装完」信号。
+        // autoStart 为 false 时一行都不动——老板点过停止就是真停。
+        if (StartPolicy.shouldStartOnOpen(prefs.isConfigured(), prefs.autoStart, RcAgentService.running)) {
+            try {
+                startForegroundService(Intent(this, RcAgentService::class.java))
+            } catch (t: Throwable) {
+                AgentLog.add("boot", "打开界面时自启服务被拒: " + describe(t))
+            }
+        }
     }
 
     override fun onResume() {

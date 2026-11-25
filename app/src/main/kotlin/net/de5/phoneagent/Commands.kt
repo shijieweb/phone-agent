@@ -328,6 +328,14 @@ sealed class Command {
      */
     data class ShDest(val destination: String) : Command()
 
+    /**
+     * `watchdog [status] | watchdog arm | watchdog disarm` — uid 2000 看门脚本。
+     *
+     * 三态而不是两态（没有单独的 object WatchdogStatus）：不带参数与 `status` 等价，
+     * 和 `anim` / `call state` 的写法保持一致。
+     */
+    data class Watchdog(val action: String) : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -673,6 +681,8 @@ object Commands {
             "shkey" -> parseShKey(rest)
 
             "shdest" -> parseShDest(rest)
+
+            "watchdog" -> parseWatchdog(rest)
 
             "stop" -> Command.Stop
 
@@ -1289,6 +1299,24 @@ object Commands {
         val destination = rest.trim()
         if (destination.isEmpty()) return SH_USAGE
         return Command.ShDest(destination)
+    }
+
+    /**
+     * `watchdog [status] | watchdog arm | watchdog disarm`。
+     *
+     * 不带参数等同 `status`：运维最常问的是「现在到底有没有在守」，
+     * 让他少打一个词。多余参数一律 usage，不猜。
+     */
+    private fun parseWatchdog(rest: String): Command {
+        val parts = splitArgs(rest)
+        if (parts.isEmpty()) return Command.Watchdog("status")
+        if (parts.size > 1) return Command.BadUsage(WatchdogPlan.USAGE)
+        return when (parts[0].lowercase()) {
+            "status" -> Command.Watchdog("status")
+            "arm" -> Command.Watchdog("arm")
+            "disarm" -> Command.Watchdog("disarm")
+            else -> Command.BadUsage(WatchdogPlan.USAGE)
+        }
     }
 
     private fun isPackageName(value: String): Boolean {

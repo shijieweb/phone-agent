@@ -123,6 +123,14 @@ class RcAgentService : Service() {
         }
         // Only deregister ourselves (see `isCurrent` above).
         if (isCurrent) current = null
+        // 停止就彻底停止：老板按下停止时 autoStart 已被清成 false，守护进程必须一起
+        // 收掉，否则它 60 秒后就把服务又拉起来，直接违反 v0.2.9 的语义。放独立线程：
+        // 一次 shell 往返可能等 10 秒，onDestroy 不能卡。
+        if (isCurrent && WatchdogPlan.shouldDisarm(Prefs(this).autoStart)) {
+            val off = Thread(Runnable { Watchdog.disarm() }, "rc-watchdog-off")
+            off.isDaemon = true
+            off.start()
+        }
         super.onDestroy()
     }
 
@@ -193,6 +201,11 @@ class RcAgentService : Service() {
 
         pollThread = worker("rc-poll") { pollLoop(generation) }
         heartThread = worker("rc-heartbeat") { heartLoop(generation) }
+
+        // 守护进程（v0.5.5）：自己起来之后顺手把 uid 2000 的看门脚本 arm 上，这样
+        // 下一次被 force-stop 或静默安装顶掉时，有人替我们 `am start` 把界面拉起来。
+        // 独立线程：一次 shell 往返可能要 10 秒，不能占轮询或心跳的线程。
+        worker("rc-watchdog") { Watchdog.armQuietly() }
     }
 
     private fun worker(name: String, body: () -> Unit): Thread {
@@ -331,6 +344,8 @@ class RcAgentService : Service() {
             }
             selfHealAccessibility()
             observeAdbPort()
+            // 自连 ADB 常常比服务晚连上，所以守护要能补 arm（内部 5 分钟节流）。
+            Watchdog.ensureArmed()
             sleep(HEARTBEAT_CHECK_MS)
         }
     }

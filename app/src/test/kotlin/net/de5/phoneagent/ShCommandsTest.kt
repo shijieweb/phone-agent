@@ -131,6 +131,29 @@ class ShCommandsTest {
         assertTrue(command.apply)
     }
 
+    // ------------------------------------------------------------ watchdog
+
+    @Test
+    fun watchdogDefaultsToStatus() {
+        assertEquals(Command.Watchdog("status"), Commands.parse("watchdog"))
+        assertEquals(Command.Watchdog("status"), Commands.parse("watchdog status"))
+    }
+
+    @Test
+    fun watchdogParsesArmAndDisarm() {
+        assertEquals(Command.Watchdog("arm"), Commands.parse("watchdog arm"))
+        assertEquals(Command.Watchdog("disarm"), Commands.parse("watchdog disarm"))
+        // 大小写不敏感，和其它命令一致。
+        assertEquals(Command.Watchdog("arm"), Commands.parse("WATCHDOG Arm"))
+    }
+
+    @Test
+    fun watchdogRejectsGarbage() {
+        assertTrue(Commands.parse("watchdog restart") is Command.BadUsage)
+        assertTrue(Commands.parse("watchdog arm now") is Command.BadUsage)
+        assertTrue(Commands.parse("watchdog status disarm") is Command.BadUsage)
+    }
+
     @Test
     fun shKeyRejectsGarbage() {
         assertTrue(Commands.parse("shkey rotate") is Command.BadUsage)

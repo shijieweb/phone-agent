@@ -37,6 +37,7 @@ nothing needs to be exposed on the phone's network.
 | Calls | `call [apply] <number>` (dry run until `apply`), `call answer`, `call hangup`, `call state`, `call speaker [on\|off]` (no argument = report) |
 | Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
 | Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [show]` / `shkey regen [apply]` / `shkey import <url>` — the app talks to **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
+| Self-start | opening the app starts the agent again when 开机自动启动 is ticked; a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`, and `watchdog [status\|arm\|disarm]` drives it by hand |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative: pressing it in the app also clears "start on boot", so
@@ -51,6 +52,39 @@ at 200 000 chars), so `shot` **uploads the JPEG as a blob** — `PUT
 /agent/blob/<name>` — and answers with one line of JSON naming it. The
 controller then fetches `/ctl/blob/<name>`. `shot b64` restores the old
 base64-on-stdout output for a human at a terminal.
+
+### After a silent install, what starts the app?
+
+A silent `pm install -r` (see Self-ADB above) leaves nothing running, and Flyme
+delivers **no** package-replaced broadcast — measured, not assumed. Two things
+cover it:
+
+1. **Opening the UI starts the service**, gated by `StartPolicy.shouldStartOnOpen`
+   (`configured && autoStart && !running`). Pressing 停止 clears `auto_start`, so
+   the app cannot be revived by somebody opening it on a phone you silenced.
+2. **A guard script that outlives the app.** Once self-ADB is connected the agent
+   writes `/data/local/tmp/phoneagent-guard.sh` and starts it with `setsid`, so it
+   runs as `uid 2000` outside the app's process group: `am force-stop` does not
+   reach it. Every 60 s it checks `dumpsys activity services net.de5.phoneagent`
+   and runs `am start -n net.de5.phoneagent/.MainActivity` if the service is gone,
+   appending a timestamp to `/data/local/tmp/phoneagent-guard.log`.
+
+```
+watchdog status     # 守护: 运行中（pid 12345）/ 最近重启: … / 停止标记: 不存在
+watchdog arm        # start it by hand; refuses to start a second copy
+watchdog disarm     # write the stop marker and pkill it
+```
+
+Three rules keep it honest: `arm` probes `pgrep -f phoneagent-guard.sh` first so a
+5-minute re-arm never stacks copies; `arm` is skipped with one log line
+(`守护未启用：自连 ADB 未连接`) when self-ADB is down, instead of logging a
+refusal every five minutes; and pressing 停止 writes the marker **and** kills the
+guard, so "stop" still means stop — a killed guard would otherwise be resurrected
+by the next heartbeat and the service would return two minutes later.
+
+`status` gains one field, `"guard":"running"|"off"|"unknown"`; no existing field
+changed. The guard does not survive a reboot (`/data/local/tmp` is wiped — the
+boot path is `BootReceiver`).
 
 ### What it deliberately cannot do
 

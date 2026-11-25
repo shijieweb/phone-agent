@@ -249,6 +249,11 @@ and compare against the expectation below.
 | `shpair 000000` (wrong code) | exit 6 with `配对失败: …`; the old pairing (if any) must still work |
 | `shpair 12345` | exit 2 — a code that is not six digits is refused before any network work |
 
+| `watchdog status` | exit 0, seven lines. With self-ADB connected: `守护: 运行中（pid N）` or `未运行`; with it down: `守护: 未知（自连 ADB 未连接）`. `停止标记: 不存在` in normal operation. `status` JSON gains `"guard":"running"\|"off"\|"unknown"` and every other field is unchanged. |
+| `watchdog arm` | exit 0, `守护已启动（pid N）`; run it three times in a row and `watchdog status` must still show **one** pid with `…未重复启动` on the repeats |
+| `watchdog disarm` | exit 0, `守护已停止`; `watchdog status` then shows `未运行` + `停止标记: 存在`, and no `phoneagent-guard.sh` process remains |
+| `watchdog arm` with self-ADB down | exit 6, stderr `守护未启用：自连 ADB 未连接` — a refusal, not a crash, and the heartbeat retries by itself once `shconnect` works |
+
 ### 5.1 Self-ADB: pair the app with its own adbd
 
 This is the only part of the surface that needs a ritual, because Android's
@@ -303,6 +308,36 @@ not, authorise that key once from a PC (`adb connect <phone-ip>:<port>` and acce
 the prompt) and re-run `shconnect`; re-importing changes nothing, because the key
 bytes are already correct.
 
+### 5.3 Self-start: proving the phone comes back on its own
+
+Do this on the phone with 开机自动启动 ticked and self-ADB connected (`shinfo`
+shows `自连 ADB: 已连接`).
+
+1. `watchdog status` → `守护: 运行中（pid N）`. If it says 未运行, run
+   `watchdog arm` once and check again.
+2. From the PC: `sh apply am force-stop net.de5.phoneagent` → exit 0. The relay
+   now reports `PHONE-MEIZU` offline, and `watchdog status` cannot answer because
+   the app that would answer is gone.
+3. Wait 90 s **without touching the phone**. `python scripts/rc.py list` must show
+   `PHONE-MEIZU` online again, with a fresh `age_sec`. That is the guard: it ran
+   `am start`, the activity started the service (§3.17 trigger 1), and the service
+   re-armed the guard.
+4. `watchdog status` → `运行中`, and `最近重启` shows the timestamp of step 2.
+   The same line is in `/data/local/tmp/phoneagent-guard.log`.
+5. Now prove stop still means stop: in the app press 停止, then
+   `sh apply am force-stop net.de5.phoneagent`. Wait **two minutes**. The agent
+   must **not** come back — the stop marker makes the guard exit at its next tick.
+   `watchdog status` answers only after you start the agent again.
+
+**Arming never stacks copies.** Run `watchdog arm` three times in a row and then
+`watchdog status`: exactly one pid, and the second and third answers contain
+`未重复启动`. A phone left running for a day re-arms every 5 minutes; without
+this rule it would collect roughly 288 copies.
+
+**What this cannot prove.** The guard lives in `/data/local/tmp`, so a reboot
+wipes it — boot recovery is `BootReceiver` (§6). A ROM that aggressively reaps
+`uid 2000` background processes can kill the guard too; the app cannot prevent
+that, only notice it the next time it is opened.
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
 1. Get a direct video link (any host, `http` or `https`, no login page).
