@@ -100,6 +100,111 @@ internal object SelfAdbKeys {
         return a || b
     }
 
+
+    /** 导入结果：要么给出名字与指纹，要么给出能指路的失败原因。 */
+    internal sealed class KeyImport {
+        internal class Ok(val name: String?, val fingerprint: String?) : KeyImport()
+        internal class Failed(val message: String) : KeyImport()
+    }
+
+    /**
+     * 导入外部密钥（私钥 PKCS#8 PEM + adb 格式公钥）。
+     *
+     * 为什么需要它：Android 16 把 Conscrypt 的 exportKeyingMaterial 拦成了
+     * 非 SDK 接口，配对阶段拿不到 TLS exporter 就没法完成 PAKE。于是改走
+     * 「借一把已被手机授权过的密钥」——手机上 /data/misc/adb/adb_keys 里
+     * 已经有这把公钥，导进来直接连接即可，不再需要配对。
+     *
+     * 三条纪律：
+     * 1. **先全量校验，再落盘**。校验失败时原密钥一个字节都不动——把一把
+     *    能用的密钥换成半截文件，比拒绝导入糟得多。
+     * 2. **写临时文件再改名**。改名在同一文件系统上是原子的，中途断电也
+     *    只会留下旧密钥，不会留下半个新密钥。
+     * 3. **写完必须清 TLS 缓存**。SslUtils 的 SSLContext 是进程级缓存，不清
+     *    就会拿旧 KeyPair 握手，表现为「导入成功却连不上」。
+     */
+    fun import(context: android.content.Context, pemText: String, pubText: String): KeyImport {
+        SelfAdbPlan.pemProblem(pemText)?.let { return KeyImport.Failed(it) }
+        SelfAdbPlan.pubProblem(pubText)?.let { return KeyImport.Failed(it) }
+        val providedBlob = SelfAdbPlan.pubBlob(pubText)
+            ?: return KeyImport.Failed("导入失败：公钥不是合法的 base64")
+        val privateKey = try {
+            val der = SelfAdbPlan.unbase64(SelfAdbPlan.stripPemText(pemText))
+                ?: return KeyImport.Failed("导入失败：私钥 PEM 里有非法 base64 字符")
+            KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(der))
+        } catch (t: Throwable) {
+            return KeyImport.Failed("导入失败：私钥无法解析（需要 PKCS#8 的 RSA 私钥）")
+        }
+        val crt = privateKey as? RSAPrivateCrtKey
+            ?: return KeyImport.Failed("导入失败：私钥不是 RSA CRT 私钥（拿不到模数）")
+        val publicKey = try {
+            KeyFactory.getInstance("RSA").generatePublic(
+                java.security.spec.RSAPublicKeySpec(crt.modulus, crt.publicExponent)
+            ) as RSAPublicKey
+        } catch (t: Throwable) {
+            return KeyImport.Failed("导入失败：从私钥推不出公钥")
+        }
+        // 私钥与公钥必须是一对：adb 编码是确定性的（n0inv / rr 都由模数算出），
+        // 所以两边算出来的 524 字节结构体应当逐字节相同。对不上就说明下载到
+        // 了别人的公钥，那种情况下手机一定会拒绝认证。
+        val ours = try {
+            val encoded = AdbKeyCodec.encodePublicKey(publicKey, SelfAdbPlan.DEVICE_NAME)
+            val cut = encoded.indexOf(' '.code.toByte())
+            SelfAdbPlan.unbase64(String(if (cut > 0) encoded.copyOfRange(0, cut) else encoded, Charsets.US_ASCII))
+        } catch (t: Throwable) {
+            null
+        }
+        if (ours == null || !ours.contentEquals(providedBlob.copyOfRange(0, SelfAdbPlan.PUB_BLOB_SIZE))) {
+            return KeyImport.Failed("导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）")
+        }
+        val material = build(privateKey)
+            ?: return KeyImport.Failed("导入失败：无法由私钥生成自签证书")
+
+        val target = dir(context)
+        if (!target.isDirectory && !target.mkdirs()) {
+            return KeyImport.Failed("导入失败：无法创建目录 " + target.absolutePath)
+        }
+        return try {
+            val pubBytes = pubText.trim().toByteArray(Charsets.UTF_8)
+            writeAtomically(privateFile(context), pem(privateKey.encoded).toByteArray(Charsets.UTF_8))
+            writeAtomically(publicFile(context), pubBytes)
+            writeAtomically(originFile(context), "imported".toByteArray(Charsets.UTF_8))
+            AdbKeyCodec.clearTlsCache()
+            KeyImport.Ok(SelfAdbPlan.pubName(pubText), fingerprint(material.publicKey))
+        } catch (t: Throwable) {
+            KeyImport.Failed("导入失败：写入 " + target.absolutePath + " 出错（" + describe(t) + "）")
+        }
+    }
+
+    /** 密钥来源（generated / imported）；老版本留下的密钥没有这个文件。 */
+    fun origin(context: android.content.Context): String? = try {
+        val file = originFile(context)
+        if (file.isFile) file.readText().trim().ifBlank { null } else null
+    } catch (t: Throwable) {
+        null
+    }
+
+    fun originFile(context: android.content.Context): File =
+        File(dir(context), SelfAdbPlan.ORIGIN_NAME)
+
+    /** 先写同目录临时文件再改名：断电只会留旧文件，不会留半个新文件。 */
+    private fun writeAtomically(file: File, bytes: ByteArray) {
+        val temp = File(file.parentFile, file.name + ".tmp")
+        temp.writeBytes(bytes)
+        if (!temp.renameTo(file)) {
+            // renameTo 在某些实现上不覆盖已存在文件，退化成删了再改名。
+            file.delete()
+            if (!temp.renameTo(file)) {
+                temp.delete()
+                throw java.io.IOException("rename failed: " + file.name)
+            }
+        }
+    }
+
+    private fun describe(t: Throwable): String {
+        val message = t.message
+        return if (message.isNullOrBlank()) t.javaClass.simpleName else t.javaClass.simpleName + ": " + message
+    }
     /**
      * 指纹：对 adb 编码后的公钥（524 字节）做 SHA-256，再 base64 去掉尾部 =。
      * 与 AOSP `adb keygen` 打印的 `SHA256:...` 同一算法，方便跟手机对账。

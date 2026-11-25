@@ -36,7 +36,7 @@ nothing needs to be exposed on the phone's network.
 | SMS | `sms [list [n]]`, `sms send [apply] <number> <text>` — sending is a dry run until `apply` |
 | Calls | `call [apply] <number>` (dry run until `apply`), `call answer`, `call hangup`, `call state`, `call speaker [on\|off]` (no argument = report) |
 | Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
-| Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [regen [apply]]` — the app pairs with **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
+| Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [show]` / `shkey regen [apply]` / `shkey import <url>` — the app talks to **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative: pressing it in the app also clears "start on boot", so
@@ -81,6 +81,43 @@ shkey             # 公钥 + SHA256: fingerprint, to compare against 已配对�
 `shkey regen` alone only prints a warning; `shkey regen apply` really replaces the
 key and **invalidates the pairing**, so the old entry has to be removed on the
 phone before pairing again.
+
+**The command must be sent as `shell:COMMAND` (v0.5.2).** adbd dispatches an
+`OPEN` by destination string and the destination has to be `<service>:<args>`.
+v0.5.1 sent the bare text, adbd found no such service and answered `CLSE`, and
+every `sh apply` came back as exit 4 with 连不上 adbd 端口 while `shinfo` still
+said 已连接 — the socket was healthy, the request was malformed. The prefix is now
+a constant and the two failures are worded differently: a rejected stream says
+adbd 拒绝了这条命令, a refused socket still says 连不上 adbd 端口.
+
+**Pairing is blocked on Android 16, and `shkey import` is the way around it.**
+Pairing mixes the TLS exporter's key material into the PAKE password, and the
+only entry point to that exporter is `Conscrypt.exportKeyingMaterial(...)` — a
+non-SDK interface. With `targetSdk 34` on Android 16, hidden-API enforcement
+makes the reflective lookup throw `NoSuchMethodException`, so the pairing
+handshake cannot finish. Connecting is unaffected (plain TLS + RSA auth), which
+is why an already-authorised key still works. If pairing fails this way the
+answer says so and names the escape hatch:
+
+```
+配对失败：本机系统禁止非 SDK 接口（exportKeyingMaterial）。请改用 shkey import <url> 导入一把已被手机授权的密钥。
+```
+
+```
+shkey import http://host/adbkey   # defaults the .pub URL to <url>.pub
+shconnect                         # no pairing needed: the phone already trusts it
+shkey show                        # 来源: 导入 / 公钥 / 指纹
+```
+
+It needs **no `apply`** (it does not tap the screen or delete user data, only
+this app's own key files), but it **replaces the current key** — any pairing made
+with the old one is gone. Validation runs before anything is written, so a bad
+download leaves the working key untouched.
+
+`shkey adopt` — appending our own key to `/data/misc/adb/adb_keys` — is
+deliberately **not implemented**: on a `user` build that directory is
+adbd-private and `uid 2000` gets `Permission denied` just listing it. The verb
+exists only to explain that and point at `shkey import`.
 
 **No silent install or uninstall either.** `INSTALL_PACKAGES` / `DELETE_PACKAGES`
 are `signature|privileged` without the `development` flag, so a sideloaded app

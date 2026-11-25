@@ -155,27 +155,69 @@ public final class PairingConnectionCtx implements Closeable {
 
     @SuppressLint("PrivateApi") // Conscrypt is a stable private API
     private byte[] exportKeyingMaterial(SSLSocket sslSocket, int length) throws SSLException {
-        // Conscrypt#exportKeyingMaterial(SSLSocket socket, String label, byte[] context, int length): byte[]
-        //          throws SSLException
-        try {
-            Class<?> conscryptClass;
-            if (SslUtils.isCustomConscrypt()) {
-                conscryptClass = Class.forName("org.conscrypt.Conscrypt");
-            } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                // Although support for conscrypt has been added in Android 5.0 (Lollipop),
-                // TLS1.3 isn't supported until Android 9 (Pie).
-                throw new SSLException("TLSv1.3 isn't supported on your platform. Use custom Conscrypt library instead.");
-            } else {
-                conscryptClass = Class.forName("com.android.org.conscrypt.Conscrypt");
-            }
-            Method exportKeyingMaterial = conscryptClass.getMethod("exportKeyingMaterial", SSLSocket.class,
-                    String.class, byte[].class, int.class);
-            return (byte[]) exportKeyingMaterial.invoke(null, sslSocket, EXPORTED_KEY_LABEL, null, length);
-        } catch (SSLException e) {
-            throw e;
-        } catch (Throwable th) {
-            throw new SSLException(th);
+        // TLS exporter 的三种入口，按「越靠近公开 API 越先试」的顺序。
+        //
+        // 为什么需要三级：Android 16 的 hidden API 拦截会让第一级（Conscrypt 的
+        // 4 参静态方法）在 getMethod 时直接抛 NoSuchMethodException——方法本身
+        // 还在，只是 targetSdk < 系统版本时不允许反射。实测真机就是这一级挂掉，
+        // 所以必须有后备路径，否则配对功能在最新系统上等于不可用。
+        if (!SslUtils.isCustomConscrypt() && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            // Although support for conscrypt has been added in Android 5.0 (Lollipop),
+            // TLS1.3 isn't supported until Android 9 (Pie).
+            throw new SSLException("TLSv1.3 isn't supported on your platform. Use custom Conscrypt library instead.");
         }
+
+        // 一级：Conscrypt.exportKeyingMaterial(SSLSocket, String, byte[], int)
+        Throwable first = null;
+        try {
+            Class<?> conscrypt = Class.forName(conscryptClassName());
+            Method method = conscrypt.getMethod("exportKeyingMaterial", SSLSocket.class,
+                    String.class, byte[].class, int.class);
+            return (byte[]) method.invoke(null, sslSocket, EXPORTED_KEY_LABEL, null, length);
+        } catch (Throwable th) {
+            first = th;
+        }
+
+        // 二级：AbstractSession.exportKeyingMaterial(String, byte[], int)，从 SSLSession 取。
+        // 这是实例方法，签名与一级不同；某些实现把它放在 session 上而不是静态工具类上。
+        try {
+            Object session = sslSocket.getSession();
+            if (session != null) {
+                Method method = session.getClass().getMethod("exportKeyingMaterial",
+                        String.class, byte[].class, int.class);
+                return (byte[]) method.invoke(session, EXPORTED_KEY_LABEL, null, length);
+            }
+        } catch (Throwable ignored) {
+            // 继续下一级；真正的原因由第一级的异常代表（它才是操作员看到的那个）
+        }
+
+        // 三级：在 session 的实现类里扫一遍同名方法（个别实现把它声明在中间父类上，
+        // 直接 getMethod 拿不到但遍历能找到）。
+        //
+        // 注意：SSLSocket 没有公开的 getEngine()，所以「SSLEngine 版」这条入口
+        // 在阻塞式 socket 上根本够不着，不要写进来。
+        try {
+            Object session = sslSocket.getSession();
+            if (session != null) {
+                for (Class<?> type = session.getClass(); type != null; type = type.getSuperclass()) {
+                    for (Method candidate : type.getDeclaredMethods()) {
+                        if (!"exportKeyingMaterial".equals(candidate.getName())) continue;
+                        Class<?>[] params = candidate.getParameterTypes();
+                        if (params.length != 3) continue;
+                        candidate.setAccessible(true);
+                        return (byte[]) candidate.invoke(session, EXPORTED_KEY_LABEL, null, length);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+            // 三级全挂，把一级的异常抛出去：它是 hidden API 拦截的直接证据，
+            // 上层 SelfAdbPlan.isHiddenApiBlock 靠它认路。
+        }
+        throw new SSLException(first);
+    }
+
+    private static String conscryptClassName() {
+        return SslUtils.isCustomConscrypt() ? "org.conscrypt.Conscrypt" : "com.android.org.conscrypt.Conscrypt";
     }
 
     private void writeHeader(@NonNull PairingPacketHeader header, @NonNull byte[] payload) throws IOException {

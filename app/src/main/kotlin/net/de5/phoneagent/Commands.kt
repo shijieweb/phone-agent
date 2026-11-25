@@ -305,6 +305,21 @@ sealed class Command {
      */
     data class ShKey(val regen: Boolean, val apply: Boolean) : Command()
 
+    /** `shkey show` — 只读：这把密钥是自生成的还是导入的，公钥与指纹。 */
+    object ShKeyShow : Command()
+
+    /**
+     * `shkey import URL [PUBURL]` — 从 http(s) 下载一把现成的密钥。
+     *
+     * 存在的原因：Android 16 把 Conscrypt 的 exportKeyingMaterial 拦成非 SDK
+     * 接口，配对阶段根本走不通。改借一把手机已经授权过的密钥，连上即可，
+     * 不需要配对。**不需要 apply**：它不点屏、不删用户数据，只覆盖自己的密钥文件。
+     */
+    data class ShKeyImport(val pemUrl: String, val pubUrl: String?) : Command()
+
+    /** `shkey adopt` — 把本机公钥写进手机授权表；user 版系统上必然失败，只回说明。 */
+    object ShKeyAdopt : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -390,7 +405,9 @@ object Commands {
     private val CALL_USAGE = Command.BadUsage(CallPlan.USAGE)
     private val SH_USAGE = Command.BadUsage(SelfAdbPlan.USAGE)
     private val SHPAIR_USAGE = Command.BadUsage("usage: shpair 123456")
-    private val SHKEY_USAGE = Command.BadUsage("usage: shkey | shkey regen [apply]")
+    private val SHKEY_USAGE = Command.BadUsage(
+        "usage: shkey [show] | shkey regen [apply] | shkey import URL [PUBURL] | shkey adopt"
+    )
 
     /** Shared shapes of the element-verb usage errors, so the text never drifts. */
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
@@ -1216,12 +1233,39 @@ object Commands {
     private fun parseShKey(rest: String): Command {
         val tokens = splitArgs(rest)
         if (tokens.isEmpty()) return Command.ShKey(regen = false, apply = false)
+        when (tokens[0].lowercase()) {
+            "show" -> if (tokens.size == 1) return Command.ShKeyShow else return SHKEY_USAGE
+            "adopt" -> if (tokens.size == 1) return Command.ShKeyAdopt else return SHKEY_USAGE
+            "import" -> return parseShKeyImport(tokens)
+        }
         if (tokens[0].lowercase() != "regen") return SHKEY_USAGE
         if (tokens.size == 1) return Command.ShKey(regen = true, apply = false)
         if (tokens.size == 2 && tokens[1].lowercase() == "apply") {
             return Command.ShKey(regen = true, apply = true)
         }
         return SHKEY_USAGE
+    }
+
+    /**
+     * `shkey import URL [PUBURL]`。
+     *
+     * 只做形状检查（http/https、无空白）；能不能真下下来由 Executor 去试。
+     * 这里不猜、不补 http:// 前缀——把 URL 猜错只会让人多查一轮。
+     */
+    private fun parseShKeyImport(tokens: List<String>): Command {
+        if (tokens.size < 2 || tokens.size > 3) return SHKEY_USAGE
+        val pem = tokens[1]
+        if (!isHttpUrl(pem)) return SHKEY_USAGE
+        val pub = if (tokens.size == 3) tokens[2] else null
+        if (pub != null && !isHttpUrl(pub)) return SHKEY_USAGE
+        return Command.ShKeyImport(pemUrl = pem, pubUrl = pub)
+    }
+
+    /** http/https 绝对地址；其它一律不认（file:// 之类不是给人用的）。 */
+    private fun isHttpUrl(value: String): Boolean {
+        val lower = value.lowercase()
+        if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+        return value.none { it.isWhitespace() }
     }
 
     /** A dotted, non-empty application id: what `uninstall` accepts. */

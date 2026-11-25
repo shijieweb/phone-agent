@@ -17,6 +17,23 @@ internal object SelfAdbPlan {
     /** adb 格式公钥文件名：`<base64> <name>\0`。 */
     const val PUB_NAME = "adbkey.pub"
 
+    /** 密钥来源的旁注文件名，只给人看，协议不读它。 */
+    const val ORIGIN_NAME = "adbkey.origin"
+
+    /**
+     * adb 公钥二进制结构体的长度：3 个 uint32 + 2 × 256 字节模数/RR。
+     *
+     * 这个 524 不是我们定的，是 AOSP `android_pubkey.cpp` 的结构体大小；
+     * 导入外部密钥时必须逐字节对上，否则手机端解出来是另一把公钥。
+     */
+    const val PUB_BLOB_SIZE = 524
+
+    /** 结构体第一个 uint32 是「模数占几个 32 位字」，2048 位 = 64。 */
+    const val PUB_MODULUS_WORDS = 64
+
+    const val PEM_BEGIN = "-----BEGIN PRIVATE KEY-----"
+    const val PEM_END = "-----END PRIVATE KEY-----"
+
     /**
      * 只连回环地址。
      *
@@ -31,6 +48,15 @@ internal object SelfAdbPlan {
     /** 无线调试的两个 mDNS 服务名（AOSP 的常量，别改）。 */
     const val SERVICE_PAIRING = "adb-tls-pairing"
     const val SERVICE_CONNECT = "adb-tls-connect"
+
+    /**
+     * adbd 的 shell 服务名。
+     *
+     * OPEN 的 destination 必须是 `<service>:<args>` 的完整形式，adbd 靠冒号前的
+     * 名字找服务；只发命令文本（如 `id`）会匹配不到任何服务，adbd 直接回 CLSE，
+     * 表现成「流被对端拒绝」——真机上就是 sh apply 全部 exit 4。
+     */
+    const val SERVICE_SHELL = "shell"
 
     const val SHELL_TIMEOUT_DEFAULT_MS = 30_000L
     const val SHELL_TIMEOUT_MIN_MS = 1_000L
@@ -59,7 +85,7 @@ internal object SelfAdbPlan {
     /** `sh` 家族的用法串，Commands 与文档共用一份，避免文案漂移。 */
     const val USAGE =
         "usage: shinfo | sh [t=SECONDS] [apply] COMMAND | shpair 123456 | shconnect | " +
-            "shkey | shkey regen [apply]"
+            "shkey [show] | shkey regen [apply] | shkey import URL [PUBURL] | shkey adopt"
 
     /**
      * 一次 shell 调用的结果。
@@ -100,8 +126,15 @@ internal object SelfAdbPlan {
 
     // ---------------------------------------------------------------- 哨兵
 
-    /** 把用户命令包成「跑完再回显退出码」的一行脚本。 */
-    fun shellCommand(command: String): String = command + "\necho " + RC_MARK + "\$?"
+    /**
+     * 把用户命令包成 OPEN 的 destination：`shell:<命令>\necho __RC=$?`。
+     *
+     * 两件事都不能省：
+     * 1) 必须以 `shell:` 开头，否则 adbd 找不到服务，直接 CLSE 拒绝 OPEN；
+     * 2) 末尾补 `echo __RC=$?`，因为 shell 服务只回 stdout/stderr，协议层不带退出码。
+     */
+    fun shellCommand(command: String): String =
+        SERVICE_SHELL + ":" + command + "\necho " + RC_MARK + "\$?"
 
     /**
      * 剥出退出码。
@@ -238,6 +271,140 @@ internal object SelfAdbPlan {
         return out.toByteArray()
     }
 
+    // ---------------------------------------------------------------- 导入密钥
+
+    /**
+     * 私钥 PEM 的形状检查。
+     *
+     * 只查「是不是 PKCS#8 PEM、base64 能不能解」——真正的密码学校验（能否
+     * 解析成 RSAPrivateCrtKey、公钥是否匹配）留给 SelfAdbKeys，因为那需要
+     * JCA，而这个文件要能在纯 JVM 单测里跑。
+     *
+     * 返回 null 表示形状没问题。
+     */
+    fun pemProblem(text: String?): String? {
+        if (text.isNullOrBlank()) return "导入失败：私钥内容为空（URL 可能 404 或返回了 HTML）"
+        if (!text.contains(PEM_BEGIN)) {
+            return "导入失败：私钥不是 PKCS#8 PEM（需要 " + PEM_BEGIN + " 开头）"
+        }
+        if (!text.contains(PEM_END)) {
+            return "导入失败：私钥 PEM 没有结束行 " + PEM_END + "（文件可能被截断）"
+        }
+        val der = unbase64(stripPemText(text)) ?: return "导入失败：私钥 PEM 里有非法 base64 字符"
+        if (der.isEmpty()) return "导入失败：私钥 PEM 解码后是空的"
+        return null
+    }
+
+    /** 去掉 PEM 的头尾行，只留 base64 正文（正文里可能夹换行，unbase64 会忽略空白）。 */
+    fun stripPemText(pem: String): String = pem
+        .replace(PEM_BEGIN, "")
+        .replace(PEM_END, "")
+
+    /**
+     * adb 格式公钥（base64 + 空格 + 名字 + NUL）→ 524 字节结构体。
+     *
+     * 取第一个空白或 NUL 之前的 base64 段；后面那段名字只用于展示。
+     */
+    fun pubBlob(text: String?): ByteArray? {
+        if (text.isNullOrBlank()) return null
+        val head = text.trimStart().takeWhile { !it.isWhitespace() && it != '\u0000' }
+        if (head.isEmpty()) return null
+        return unbase64(head)
+    }
+
+    /** 公钥结构体的形状检查；返回 null 表示形状没问题。 */
+    fun pubProblem(text: String?): String? {
+        if (text.isNullOrBlank()) return "导入失败：公钥内容为空（URL 可能 404 或返回了 HTML）"
+        val blob = pubBlob(text)
+            ?: return "导入失败：公钥不是合法的 base64（需要 adb 的 adbkey.pub 格式）"
+        if (blob.size < PUB_BLOB_SIZE) {
+            return "导入失败：公钥只有 " + blob.size + " 字节，adb 结构体需要 " + PUB_BLOB_SIZE + " 字节"
+        }
+        // 前 4 字节是「模数占几个 32 位字」，小端；2048 位密钥固定是 64。
+        val words = (blob[0].toInt() and 0xff) or
+            ((blob[1].toInt() and 0xff) shl 8) or
+            ((blob[2].toInt() and 0xff) shl 16) or
+            ((blob[3].toInt() and 0xff) shl 24)
+        if (words != PUB_MODULUS_WORDS) {
+            return "导入失败：公钥模数长度是 " + words + " 字，不是 2048 位（" + PUB_MODULUS_WORDS + " 字）"
+        }
+        return null
+    }
+
+    /** 公钥里带的名字（adbkey.pub 空格后那段），没有就回 null。 */
+    fun pubName(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        val trimmed = text.trimStart()
+        val cut = trimmed.indexOfFirst { it.isWhitespace() }
+        if (cut <= 0) return null
+        return trimmed.substring(cut + 1).trim().trim('\u0000').ifBlank { null }
+    }
+
+    /** 密钥来源：自生成还是导入。写进 adbkey.origin 供 shkey show 显示。 */
+    fun originLabel(origin: String?): String = when (origin?.trim()?.lowercase()) {
+        "imported" -> "导入"
+        "generated" -> "自生成"
+        null, "" -> "未知（旧版本留下的密钥）"
+        else -> origin.trim()
+    }
+
+    fun importOk(name: String?, fingerprint: String?): String =
+        "已导入密钥 " + (name ?: DEVICE_NAME) +
+            (if (fingerprint.isNullOrBlank()) "" else " 指纹 " + fingerprint) +
+            "\n现在可以执行 shconnect（这把密钥若已在手机上授权，就不需要再配对）"
+
+    fun importFailed(why: String): String = "导入失败：" + why
+
+    /** shkey show：来源 + 公钥 + 指纹，三行，只读。 */
+    fun showReport(origin: String?, publicLine: String?, fingerprint: String?): String {
+        val sb = StringBuilder()
+        sb.append("来源: ").append(originLabel(origin)).append('\n')
+        sb.append("公钥: ").append(if (publicLine.isNullOrBlank()) "(未生成)" else publicLine).append('\n')
+        sb.append("指纹: ").append(if (fingerprint.isNullOrBlank()) "(未生成)" else fingerprint)
+        return sb.toString()
+    }
+
+    /**
+     * shkey adopt：把本机公钥塞进手机的授权表。
+     *
+     * 为什么不做：/data/misc/adb/adb_keys 属于 adbd 的私有目录，user 版
+     * 系统上连 uid 2000 都进不去（lead 真机实测 ls -l /data/misc/adb/ 直接
+     * Permission denied，getprop ro.build.type 回 user）。所以这条路在非
+     * 工程机上没有实现，只留一条能指路的说明。
+     */
+    fun adoptUnsupported(): String =
+        "shkey adopt 在本机不可用：/data/misc/adb/adb_keys 属于 adbd 私有目录，" +
+            "user 版系统上 uid 2000 也读不到（真机实测 Permission denied）。" +
+            "请改用 shkey import <url> 导入一把已被手机授权的密钥。"
+
+    /**
+     * 配对被 hidden API 拦死时的定论文案。
+     *
+     * 这条必须能指路：操作员看到 NoSuchMethodException 只会以为是我们代码
+     * 写错了，而真正的原因是本机系统禁止非 SDK 接口。
+     */
+    fun hiddenApiBlocked(): String =
+        "配对失败：本机系统禁止非 SDK 接口（exportKeyingMaterial）。" +
+            "请改用 shkey import <url> 导入一把已被手机授权的密钥。"
+
+    /** 异常链里是否有「exportKeyingMaterial 被 hidden API 拦掉」的痕迹。 */
+    fun isHiddenApiBlock(t: Throwable): Boolean {
+        var node: Throwable? = t
+        var depth = 0
+        while (node != null && depth < 8) {
+            val name = node.javaClass.simpleName
+            val message = node.message ?: ""
+            val reflective = name == "NoSuchMethodException" ||
+                name == "IllegalAccessException" ||
+                name == "NoSuchFieldException"
+            if (reflective && message.contains("exportKeyingMaterial")) return true
+            if (message.contains("exportKeyingMaterial") && message.contains("NoSuchMethod")) return true
+            node = node.cause
+            depth++
+        }
+        return false
+    }
+
     // ---------------------------------------------------------------- 异常
 
     /**
@@ -274,6 +441,12 @@ internal object SelfAdbPlan {
 
             name == "SocketTimeoutException" -> "连接超时：adbd 没有应答，执行 shconnect 重试"
 
+            // 同一类异常两种成因，必须分开报：
+            // ① adbd 收到 OPEN 后直接回 CLSE（服务名/参数不对），TCP 其实是通的；
+            // ② 端口根本连不上（无线调试关了 / adbd 重启换了端口）。
+            name == "ConnectException" && message.contains("actively rejected") ->
+                "adbd 拒绝了这条命令（服务名不被接受）：执行 shinfo 确认连接状态，再重试；反复出现请执行 shkey show 核对密钥指纹"
+
             name == "ConnectException" -> "连不上 adbd 端口：无线调试可能已关闭"
 
             name == "InterruptedException" -> "等待被中断"
@@ -300,7 +473,7 @@ internal object SelfAdbPlan {
         }
         sb.append("地址: ").append(HOST).append("（只连本机回环，不连局域网 IP）\n")
         sb.append("配对服务: ").append(SERVICE_PAIRING).append(" / 连接服务: ").append(SERVICE_CONNECT).append('\n')
-        sb.append("命令: sh [t=SECONDS] [apply] COMMAND | shpair 123456 | shconnect | shkey [regen [apply]]\n")
+        sb.append("命令: ").append(USAGE.removePrefix("usage: ")).append('\n')
         sb.append("最近: ").append(if (lastNote.isNullOrBlank()) "(本次进程内无记录)" else lastNote)
         return sb.toString()
     }

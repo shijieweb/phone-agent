@@ -206,7 +206,10 @@ reach the `unknown command` branch.
 | `sh [t=SECONDS] [apply] COMMAND` | **dry run** by default; `apply` runs `COMMAND` as uid 2000 through our own adbd, timeout default 30 s, cap 300 s, stdout capped at 8000 chars (see §3.16) |
 | `shpair 123456` | pair with this phone's own adbd using the six-digit code from 无线调试, then try one connect (see §3.16) |
 | `shconnect` | connect to this phone's own adbd; pairing only swaps keys, connecting is a separate step (see §3.16) |
-| `shkey [regen [apply]]` | print the public key and its `SHA256:` fingerprint; `regen` is a dry run, `regen apply` really replaces the key (see §3.16) |
+| `shkey [show]` | print where the key came from (自生成 / 导入), the public key line and its `SHA256:` fingerprint (see §3.16) |
+| `shkey regen [apply]` | `regen` alone is a dry run; `regen apply` really replaces the key (see §3.16) |
+| `shkey import URL [PUBURL]` | download a ready-made key pair and install it; the way around the hidden-API block on Android 16 (see §3.16) |
+| `shkey adopt` | not implemented: `/data/misc/adb/adb_keys` is adbd-private and `uid 2000` cannot read it on a `user` build (see §3.16) |
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
@@ -761,7 +764,9 @@ shinfo
 sh [t=SECONDS] [apply] COMMAND
 shpair 123456
 shconnect
-shkey | shkey regen [apply]
+shkey | shkey show | shkey regen [apply]
+shkey import URL [PUBURL]
+shkey adopt
 ```
 
 **Why loopback only.** `127.0.0.1` is a constant, not a parameter. Connecting to
@@ -793,6 +798,16 @@ like our own `EXIT_TIMEOUT`:
 | not paired / not connected | 6 | the sentence names the next command to run |
 | no result within `t` | 4 | stderr `命令超时（Ns 内没有返回）` |
 | ran, but the sentinel never came back | 4 | stdout is the raw text, no `exit=` line |
+
+**The destination is `shell:COMMAND`, and the prefix is not optional.**
+adbd dispatches an `OPEN` by its destination string, and the destination must be
+`<service>:<args>`. v0.5.1 sent the bare command text, adbd matched no service and
+answered with `CLSE`, and every `sh apply` failed with `ConnectException("Stream
+open actively rejected by remote peer.")` while `shinfo` still said 已连接 — the
+socket was fine, the *request* was malformed. v0.5.2 prefixes the service name
+(`SelfAdbPlan.SERVICE_SHELL`) and the two failures are now told apart: a rejected
+stream says 拒绝了这条命令 (the service name was not accepted), a refused socket
+still says 连不上 adbd 端口 (wireless debugging is off).
 
 **How the remote exit code is recovered.** The `shell:` service multiplexes
 stdout and stderr into one stream and the protocol carries no exit status, so the
@@ -835,6 +850,66 @@ process-wide TLS context — without that last step the old `KeyPair` stays pinn
 in the cached `SSLContext` and the symptom is "pairing succeeds but connecting
 fails".
 
+**Why pairing needs an escape hatch (v0.5.1).** Pairing appends the TLS
+exporter's key material to the PAKE password, and the only way to reach that
+exporter is `Conscrypt.exportKeyingMaterial(SSLSocket, String, byte[], int)` —
+a **non-SDK** interface. On Android 16 with `targetSdk 34`, hidden-API
+enforcement makes `getMethod` throw `NoSuchMethodException` even though the
+method exists, so the pairing handshake cannot complete. Connecting is
+unaffected (it is plain TLS + RSA auth), which is why `shconnect` on an
+already-authorised key still works.
+
+The exporter is tried in three tiers before giving up — the Conscrypt static
+4-arg form, an instance method on the `SSLSession`, then a scan of the
+session's declared methods. If all three fail, the answer is a sentence that
+names the next command, never a stack trace:
+
+```
+配对失败：本机系统禁止非 SDK 接口（exportKeyingMaterial）。请改用 shkey import <url> 导入一把已被手机授权的密钥。
+```
+
+**`shkey import URL [PUBURL]`** is the way around it: take a key pair that the
+phone already trusts (`adb_keys` already contains its public half) and install
+it into `filesDir/adb/`. Default `PUBURL` is `URL + ".pub"`. It needs **no
+`apply`** — it does not tap the screen or delete user data, it only overwrites
+this app's own key files — but the spec is explicit that it **replaces the
+current key**, so any pairing made with the old one is gone.
+
+Validation happens **before** anything is written, and the current key is left
+untouched when validation fails:
+
+| Check | Failure text |
+|---|---|
+| private key is PKCS#8 PEM | `导入失败：私钥不是 PKCS#8 PEM（需要 -----BEGIN PRIVATE KEY----- 开头）` |
+| private key parses as RSA CRT | `导入失败：私钥无法解析（需要 PKCS#8 的 RSA 私钥）` |
+| public key decodes to 524 bytes | `导入失败：公钥只有 N 字节，adb 结构体需要 524 字节` |
+| public key declares 64 modulus words | `导入失败：公钥模数长度是 N 字，不是 2048 位（64 字）` |
+| the two halves match | `导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）` |
+
+The halves are compared by re-encoding the private key's public half with
+`AndroidPubkey.encode` and comparing it byte for byte against the downloaded
+blob: the adb encoding is deterministic (both `n0inv` and `rr` derive from the
+modulus), so a mismatch means someone else's public key was served and the
+phone would reject authentication anyway.
+
+Files are written to a temporary name and renamed, so a crash leaves the old
+key intact rather than half a new one, and the process-wide `SSLContext` is
+cleared afterwards — otherwise the old `KeyPair` stays pinned and the symptom
+is "import succeeded but connecting fails". The self-signed certificate is
+recomputed from the imported private key for the same reason.
+
+**`shkey show`** is the read-only counterpart: three lines, `来源: 导入|自生成|未知（旧版本留下的密钥）`,
+`公钥: …`, `指纹: SHA256:…`. The origin is recorded in `filesDir/adb/adbkey.origin`,
+so a key that predates this version is reported honestly as unknown rather than
+guessed.
+
+**`shkey adopt` is deliberately not implemented.** The idea was to append this
+app's own public key to `/data/misc/adb/adb_keys`, which would have made pairing
+unnecessary. Measured on the target device (`ro.build.type=user`): `ls -l
+/data/misc/adb/` as `uid 2000` is `Permission denied` — the **directory** is
+adbd-private, not just the file, and no shell command can get past it. The verb
+therefore exists only to answer with that explanation and point at `shkey
+import`, and it exits **6** rather than pretending to have worked.
 **What it still cannot do.** No root (`id` reports `uid=2000(shell)`); no
 `pm grant` for signature permissions (the shell user cannot hand those out
 either); no writing to another app's private storage. It is the same authority
@@ -1213,6 +1288,24 @@ framework** — do not mock `AccessibilityService`. Required cases:
     `AdbAuthenticationFailedException` → "run shkey regen apply"). `ShCommandsTest`
     pins the grammar: `apply`/`t=` are only eaten before the payload,
     `sh echo apply` stays a dry run, and `shkey regen` alone never replaces the key.
+ 15. The v0.5.1 escape hatch: `SelfAdbPlan.pemProblem`/`pubProblem` rejecting a
+     blank body, a missing `-----BEGIN PRIVATE KEY-----`, a truncated PEM, illegal
+     base64, a 100-byte blob and a 32-word (1024-bit) modulus header, while
+     accepting a well-formed pair; `pubBlob`/`pubName` splitting the adb line at
+     the first whitespace; `originLabel` never guessing a key that predates the
+     origin file; `showReport` always printing three lines and `(未生成)` when
+     empty; `adoptUnsupported`/`hiddenApiBlocked` naming the next command; and
+     `isHiddenApiBlock` walking the cause chain to recognise a `NoSuchMethodException`
+     about `exportKeyingMaterial` wrapped in an `SSLException` while leaving an
+     ordinary handshake failure alone. `ShKeyCommandsTest` pins the grammar:
+     `show`/`adopt` refuse arguments, `import` needs an http(s) URL and accepts an
+     optional second one, and the usage line names all four verbs.
+  16. The v0.5.2 destination fix: `shellCommand` always starts with `shell:` (the
+      regression that made every `sh apply` exit 4), and `errorText` separates a
+      *rejected stream* (`ConnectException` whose message says `actively
+      rejected`) from a *dead port* (`Connection refused`), so the operator is
+      pointed at the connection state instead of being told to check wireless
+      debugging when it is already on.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -1225,8 +1318,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (421 cases at
-  v0.5.0-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (455 cases at
+  v0.5.2-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

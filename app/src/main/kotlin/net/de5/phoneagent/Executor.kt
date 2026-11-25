@@ -309,6 +309,15 @@ class CommandExecutor(
             is Command.ShKey ->
                 shKey(command)
 
+            is Command.ShKeyShow ->
+                ExecutionResult(EXIT_OK, SelfAdb.showKey(), "")
+
+            is Command.ShKeyImport ->
+                shKeyImport(command)
+
+            is Command.ShKeyAdopt ->
+                ExecutionResult(EXIT_PERMISSION, "", SelfAdb.adopt())
+
             is Command.Stop ->
                 stopAgent()
 
@@ -1046,6 +1055,23 @@ class CommandExecutor(
         return ExecutionResult(EXIT_OK, SelfAdb.regenerate(), "")
     }
 
+    /**
+     * `shkey import` 不需要 apply：它不点屏、不删用户数据，只覆盖自己的密钥文件。
+     *
+     * 但下载要走网络，可能卡住，所以套一层超时，超时按 EXIT_TIMEOUT 报，
+     * 别让操作员对着一条永远不返回的命令猜。
+     */
+    private fun shKeyImport(command: Command.ShKeyImport): ExecutionResult {
+        val text = offMain(IMPORT_TIMEOUT_MS) {
+            SelfAdb.importKey(command.pemUrl, command.pubUrl)
+        } ?: return ExecutionResult(EXIT_TIMEOUT, "", "导入超时（" + IMPORT_TIMEOUT_MS / 1000 + "s 内没下完）")
+        return if (text.startsWith(IMPORT_FAILED_PREFIX)) {
+            ExecutionResult(EXIT_PERMISSION, "", text)
+        } else {
+            ExecutionResult(EXIT_OK, text, "")
+        }
+    }
+
     private fun stopAgent(): ExecutionResult {
         onStopRequested()
         return ExecutionResult(EXIT_OK, "stopping", "")
@@ -1189,5 +1215,11 @@ class CommandExecutor(
         /** 配对/连接的外部预算比发现预算各多给 10 秒，留出 TLS 握手时间。 */
         private const val PAIR_TIMEOUT_MS = 30_000L
         private const val CONNECT_TIMEOUT_MS = 30_000L
+
+        /** 两次 HTTP 各给 15s 连接 + 30s 读取，40s 足够，再久就是网真的不通。 */
+        private const val IMPORT_TIMEOUT_MS = 40_000L
+
+        /** 与 SelfAdbPlan.importFailed 的前缀保持一致，用来判定失败退出码。 */
+        private const val IMPORT_FAILED_PREFIX = "导入失败："
     }
 }

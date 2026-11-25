@@ -234,6 +234,13 @@ and compare against the expectation below.
 | `sh apply echo apply` | exit 0, stdout `dry-run: would run sh: echo apply` — the `apply` here is payload, not a flag |
 | `shkey` | exit 0, `公钥: <one long base64 line> phone-agent@dsh` and `指纹: SHA256:<43 chars>`; the same fingerprint appears in 手机 无线调试 → 已配对的设备 |
 | `shkey regen` | exit 0, **dry run**: `dry-run: 会删除现有密钥并重新生成…` and `shkey` still prints the old fingerprint |
+| `shkey show` | exit 0, three lines: `来源: 自生成` (or `导入`), `公钥: …`, `指纹: SHA256:…` — the same fingerprint `shkey` prints |
+| `shkey import <url>` (bad URL) | exit 6 with `导入失败：下载私钥失败（…）`; `shkey` must still print the **old** fingerprint — a failed import never damages the working key |
+| `shkey import <url>` (good pair) | exit 0, `已导入密钥 <name> 指纹 SHA256:…` then `现在可以执行 shconnect…`; `shkey show` says `来源: 导入`; `shconnect` succeeds **without** pairing |
+| `shkey import <url>` (private/public mismatch) | exit 6 with `导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）` — swap one half and re-run to see it |
+| `shkey adopt` | exit **6** with the explanation that `/data/misc/adb/adb_keys` is adbd-private and points at `shkey import`; it must not claim success |
+| `sh apply id` on the v0.5.2 build | exit 0 and stdout ends with `uid=2000(shell)` — on v0.5.1 this same command returned exit 4 with 连不上 adbd 端口, because the `OPEN` destination was missing the `shell:` service prefix. If you still see 拒绝了这条命令, the destination is wrong again (not the connection) |
+| `shpair 000000` after the v0.5.1 build | exit 6, and if the system blocks the exporter the text is exactly `配对失败：本机系统禁止非 SDK 接口（exportKeyingMaterial）。请改用 shkey import <url> 导入一把已被手机授权的密钥。` — **not** a stack trace |
 | `shpair 000000` (wrong code) | exit 6 with `配对失败: …`; the old pairing (if any) must still work |
 | `shpair 12345` | exit 2 — a code that is not six digits is refused before any network work |
 
@@ -261,6 +268,35 @@ time the dialog opens.
 After a reboot the pairing survives; only `shconnect` is needed. After
 `shkey regen apply` the pairing is **gone** — delete the old `phone-agent@dsh`
 entry under 已配对的设备 and start again from step 2.
+
+### 5.2 Self-ADB when pairing is impossible (Android 16)
+
+On Android 16 the pairing step above cannot complete: it needs the TLS exporter
+(`Conscrypt.exportKeyingMaterial`), which is a non-SDK interface, and hidden-API
+enforcement blocks the reflective lookup. Step 3 then answers with the
+`本机系统禁止非 SDK 接口` sentence instead of a stack trace.
+
+The way in is to borrow a key the phone already trusts:
+
+1. On a PC that has already been authorised by this phone, take its
+   `adbkey` + `adbkey.pub` and serve them over http (any static host works;
+   the app's network config only permits cleartext to the known relay hosts).
+2. `shkey import http://<host>/adbkey` — the `.pub` URL defaults to `<url>.pub`.
+3. `shconnect` — **no pairing**, because `/data/misc/adb/adb_keys` on the phone
+   already contains that public half.
+4. `sh apply id` → `uid=2000(shell)`. That is the whole proof.
+
+If the import refuses, the reason names the half that is wrong (`私钥不是 PKCS#8
+PEM`, `公钥只有 N 字节`, `私钥与公钥不是一对`), and the previous key keeps
+working — the import only swaps files after every check passes.
+
+**If `shkey import` succeeds but `shconnect` still answers `设备要求先配对`**, the
+import itself worked and the phone simply does not have that public half in
+`/data/misc/adb/adb_keys`. Check it without guessing: the fingerprint printed by
+`shkey show` must appear under 无线调试 → 已配对的设备 on the phone. If it does
+not, authorise that key once from a PC (`adb connect <phone-ip>:<port>` and accept
+the prompt) and re-run `shconnect`; re-importing changes nothing, because the key
+bytes are already correct.
 
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 

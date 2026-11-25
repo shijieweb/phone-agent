@@ -16,9 +16,19 @@ class SelfAdbPlanTest {
 
     // ------------------------------------------------------------ 哨兵
 
+    /**
+     * destination 必须是 `shell:<命令>`：漏了 `shell:` 前缀，adbd 找不到服务，
+     * 直接回 CLSE，真机上表现为 sh apply 全部 exit 4（v0.5.1 踩过这个坑）。
+     */
     @Test
-    fun shellCommandAppendsSentinel() {
-        assertEquals("ls /sdcard\necho __RC=$?", SelfAdbPlan.shellCommand("ls /sdcard"))
+    fun shellCommandUsesShellService() {
+        assertEquals("shell:ls /sdcard\necho __RC=$?", SelfAdbPlan.shellCommand("ls /sdcard"))
+    }
+
+    @Test
+    fun shellCommandAlwaysStartsWithShellPrefix() {
+        assertTrue(SelfAdbPlan.shellCommand("id").startsWith(SelfAdbPlan.SERVICE_SHELL + ":"))
+        assertTrue(SelfAdbPlan.shellCommand("").startsWith(SelfAdbPlan.SERVICE_SHELL + ":"))
     }
 
     /** 正常退出：剥出 0，正文保留换行。 */
@@ -243,6 +253,25 @@ class SelfAdbPlanTest {
     fun errorTextMapsProtocolError() {
         val text = SelfAdbPlan.errorText(javax.net.ssl.SSLProtocolException("Received fatal alert: protocol error"))
         assertTrue(text.contains("shpair"))
+    }
+
+    /**
+     * adbd 主动回 CLSE 拒绝 OPEN，和「端口连不上」是两回事：
+     * 前者 TCP 通、只是服务名/参数不对；混成一句会让人去查无线调试开关。
+     */
+    @Test
+    fun errorTextSplitsRejectedStreamFromDeadPort() {
+        val rejected = SelfAdbPlan.errorText(
+            java.net.ConnectException("Stream open actively rejected by remote peer.")
+        )
+        assertTrue(rejected.contains("拒绝"))
+        assertFalse(rejected.contains("无线调试可能已关闭"))
+
+        val dead = SelfAdbPlan.errorText(java.net.ConnectException("Connection refused"))
+        assertEquals("端口拒绝连接：adbd 可能刚重启，执行 shconnect 重试", dead)
+
+        val closed = SelfAdbPlan.errorText(java.net.ConnectException())
+        assertEquals("连不上 adbd 端口：无线调试可能已关闭", closed)
     }
 
     @Test

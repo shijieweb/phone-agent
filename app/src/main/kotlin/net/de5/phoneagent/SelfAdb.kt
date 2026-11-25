@@ -41,6 +41,11 @@ internal object SelfAdb {
     private const val BOUNCE_OFF_MS = 1_500L
     private const val READ_CHUNK = 8 * 1024
 
+    // 密钥文件很小（私钥 ~1.7 KB，公钥 ~0.7 KB），200 KB 已经宽松到不可能误伤，
+    // 又能挡住「URL 指到一个大文件」这种把内存吃满的情况。
+    private const val FETCH_CONNECT_TIMEOUT_MS = 15_000
+    private const val FETCH_READ_TIMEOUT_MS = 30_000
+    private const val FETCH_MAX_BYTES = 200 * 1024
     @Volatile
     private var app: Context? = null
 
@@ -107,6 +112,80 @@ internal object SelfAdb {
         return SelfAdbPlan.regenDone(SelfAdbKeys.fingerprint(fresh.publicKey))
     }
 
+    /** `shkey show`：来源（自生成/导入）+ 公钥 + 指纹，只读。 */
+    fun showKey(): String {
+        val ctx = app ?: return SelfAdbPlan.showReport(null, null, null)
+        val line = try {
+            val file = SelfAdbKeys.publicFile(ctx)
+            if (file.isFile) file.readText().trim().ifBlank { null } else null
+        } catch (t: Throwable) {
+            null
+        }
+        val loaded = ensureMaterial()
+        return SelfAdbPlan.showReport(
+            SelfAdbKeys.origin(ctx),
+            line,
+            if (loaded == null) null else SelfAdbKeys.fingerprint(loaded.publicKey)
+        )
+    }
+
+    /**
+     * `shkey import URL [PUBURL]` — 下载一把现成密钥并落盘。
+     *
+     * 下载失败必须说清是哪一段失败（私钥 / 公钥 / 网络），因为这条命令是
+     * 操作员在配对走不通时唯一的出路，含糊的报错等于把人堵死。
+     */
+    fun importKey(pemUrl: String, pubUrl: String?): String {
+        val ctx = app ?: return SelfAdbPlan.importFailed("应用上下文未就绪")
+        val pem = try {
+            fetchText(pemUrl)
+        } catch (t: Throwable) {
+            return SelfAdbPlan.importFailed("下载私钥失败（" + describe(t) + "）")
+        }
+        val pub = try {
+            fetchText(pubUrl ?: (pemUrl + ".pub"))
+        } catch (t: Throwable) {
+            return SelfAdbPlan.importFailed("下载公钥失败（" + describe(t) + "）")
+        }
+        return when (val result = SelfAdbKeys.import(ctx, pem, pub)) {
+            is SelfAdbKeys.KeyImport.Ok -> {
+                reset()
+                material = SelfAdbKeys.load(ctx)
+                lastNote = null
+                SelfAdbPlan.importOk(result.name, result.fingerprint)
+            }
+            is SelfAdbKeys.KeyImport.Failed -> result.message
+        }
+    }
+
+    /** `shkey adopt`：user 版系统上不可能成功，只回一条能指路的说明。 */
+    fun adopt(): String = SelfAdbPlan.adoptUnsupported()
+
+    /** 取一个 http(s) 文本资源；只接受 200，且不超过 [FETCH_MAX_BYTES]。 */
+    private fun fetchText(url: String): String {
+        val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        try {
+            connection.connectTimeout = FETCH_CONNECT_TIMEOUT_MS
+            connection.readTimeout = FETCH_READ_TIMEOUT_MS
+            connection.instanceFollowRedirects = true
+            connection.requestMethod = "GET"
+            val code = connection.responseCode
+            if (code != 200) throw java.io.IOException("HTTP " + code)
+            val bytes = connection.inputStream.use { it.readBytes() }
+            if (bytes.size > FETCH_MAX_BYTES) {
+                throw java.io.IOException("内容过大 " + bytes.size + " 字节")
+            }
+            return String(bytes, Charsets.UTF_8)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun describe(t: Throwable): String {
+        val message = t.message
+        return if (message.isNullOrBlank()) t.javaClass.simpleName else message
+    }
+
     fun status(): String {
         val ctx = app
         val keyed = ctx != null && SelfAdbKeys.hasKey(ctx)
@@ -139,7 +218,14 @@ internal object SelfAdb {
             lastNote = null
             SelfAdbPlan.pairOk()
         } catch (t: Throwable) {
-            note(SelfAdbPlan.pairFailed(SelfAdbPlan.errorText(t)))
+            // hidden API 拦截和普通握手失败必须分开报：前者再怎么重试都没用，
+            // 唯一出路是换一把已被手机授权的密钥（shkey import）。
+            val why = if (SelfAdbPlan.isHiddenApiBlock(t)) {
+                SelfAdbPlan.hiddenApiBlocked()
+            } else {
+                SelfAdbPlan.pairFailed(SelfAdbPlan.errorText(t))
+            }
+            note(why)
         }
     }
 
