@@ -320,6 +320,14 @@ sealed class Command {
     /** `shkey adopt` — 把本机公钥写进手机授权表；user 版系统上必然失败，只回说明。 */
     object ShKeyAdopt : Command()
 
+    /**
+     * `shdest DEST` — 调试专用：原样打开一条 destination 并把原始字节打出来。
+     *
+     * 不加哨兵、不做拼接。用途只有一个：当 `sh` 失败时，把「destination 形式
+     * 不对」和「拼接里的换行不对」这两件事分开验证。
+     */
+    data class ShDest(val destination: String) : Command()
+
     // ------------------------------------- controller built-in protocol (#rc:)
 
     /**
@@ -663,6 +671,8 @@ object Commands {
             "shconnect" -> if (splitArgs(rest).isEmpty()) Command.ShConnect else SH_USAGE
 
             "shkey" -> parseShKey(rest)
+
+            "shdest" -> parseShDest(rest)
 
             "stop" -> Command.Stop
 
@@ -1269,6 +1279,18 @@ object Commands {
     }
 
     /** A dotted, non-empty application id: what `uninstall` accepts. */
+    /**
+     * `shdest DEST` — 调试用，destination 原样取到行尾。
+     *
+     * 不做任何拼接：它的全部价值就在于「我发出去的就是我写下的」，
+     * 任何自动补前缀都会让 A/B 失去意义。
+     */
+    private fun parseShDest(rest: String): Command {
+        val destination = rest.trim()
+        if (destination.isEmpty()) return SH_USAGE
+        return Command.ShDest(destination)
+    }
+
     private fun isPackageName(value: String): Boolean {
         if (value.isEmpty()) return false
         if (value.contains(WHITESPACE)) return false

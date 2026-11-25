@@ -318,6 +318,9 @@ class CommandExecutor(
             is Command.ShKeyAdopt ->
                 ExecutionResult(EXIT_PERMISSION, "", SelfAdb.adopt())
 
+            is Command.ShDest ->
+                shDest(command)
+
             is Command.Stop ->
                 stopAgent()
 
@@ -1047,6 +1050,24 @@ class CommandExecutor(
         } else {
             ExecutionResult(EXIT_PERMISSION, "", text)
         }
+    }
+
+    /**
+     * `shdest DEST` —— 调试专用。
+     *
+     * 恒 exit 0：它的输出是给人看的证据（destination 原文 + hex + 文本 + 异常类名），
+     * 不是一次「成功/失败」的判断。用退出码表达成败会让 A/B 结果被 exit code
+     * 掩盖，而这正是它要查的东西。
+     */
+    private fun shDest(command: Command.ShDest): ExecutionResult {
+        val text = offMain(SelfAdbPlan.SHDEST_TIMEOUT_MS + SH_SLACK_MS) {
+            SelfAdb.dest(command.destination)
+        } ?: return ExecutionResult(
+            EXIT_OK,
+            SelfAdbPlan.destReportTimeout(command.destination, ByteArray(0), SelfAdbPlan.SHDEST_TIMEOUT_MS),
+            ""
+        )
+        return ExecutionResult(EXIT_OK, text, "")
     }
 
     private fun shKey(command: Command.ShKey): ExecutionResult {

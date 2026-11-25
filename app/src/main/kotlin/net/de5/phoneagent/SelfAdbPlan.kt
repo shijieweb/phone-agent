@@ -45,6 +45,29 @@ internal object SelfAdbPlan {
     /** 写进 adbkey.pub 的名字，手机「已配对设备」列表里显示的就是它。 */
     const val DEVICE_NAME = "phone-agent@dsh"
 
+    /**
+     * PTY 形式的 shell destination：只有一个冒号，冒号后为空。
+     *
+     * 为什么默认走它：魅族 Flyme（Android 16）上 adbd 对所有**带命令**的
+     * destination（kRaw 子进程路径）都在回 OKAY 之后立刻 CLSE，真机 A/B 实测
+     * exec:id / shell:id / shell,raw:id / shell,v2,raw:id 全部 IOException:
+     * Stream closed.，唯一活着的是空命令 shell: —— 它走 kPty，会给出一个真正的
+     * 交互提示符。PTY 是 POSIX 标准能力，所有 ROM 都支持，所以它比 raw 更可靠。
+     */
+    const val DEST_PTY = "shell:"
+
+    /** shinfo 里显示的当前通道，让操作员一眼看出走的是哪条路。 */
+    const val CHANNEL_PTY = "PTY（shell:）"
+    const val CHANNEL_RAW = "RAW（降级 shell:COMMAND）"
+
+    /**
+     * 等提示符的预算。
+     *
+     * 1.5 秒：PTY 一开 adbd 就吐提示符，正常在几十毫秒内；等太久没意义，
+     * 不等就直接写又可能被 shell 吞掉（真机上表现为命令没执行、退出码为 0）。
+     */
+    const val PROMPT_WAIT_MS = 1_500L
+
     /** 无线调试的两个 mDNS 服务名（AOSP 的常量，别改）。 */
     const val SERVICE_PAIRING = "adb-tls-pairing"
     const val SERVICE_CONNECT = "adb-tls-connect"
@@ -82,10 +105,25 @@ internal object SelfAdbPlan {
     const val CONNECT_BUDGET_MS = 20_000L
     const val DISCOVER_ROUND_MS = 4_000L
 
+    /**
+     * `shdest` 的读取预算。
+     *
+     * 8 秒：调试时试的是一条 destination 能不能用，不是等一条长命令跑完。
+     * 给太长会让「adbd 根本不回数据」这件事看起来像卡住。
+     */
+    const val SHDEST_TIMEOUT_MS = 8_000L
+
+    /** `shdest` 十六进制预览的字节上限；再多就不是人看的了。 */
+    const val SHDEST_HEX_MAX = 128
+
+    /** `shdest` 文本预览的字符上限。 */
+    const val SHDEST_TEXT_MAX = 400
+
     /** `sh` 家族的用法串，Commands 与文档共用一份，避免文案漂移。 */
     const val USAGE =
         "usage: shinfo | sh [t=SECONDS] [apply] COMMAND | shpair 123456 | shconnect | " +
-            "shkey [show] | shkey regen [apply] | shkey import URL [PUBURL] | shkey adopt"
+            "shkey [show] | shkey regen [apply] | shkey import URL [PUBURL] | shkey adopt | " +
+            "shdest DEST"
 
     /**
      * 一次 shell 调用的结果。
@@ -156,6 +194,110 @@ internal object SelfAdbPlan {
         return Exit(code, text.substring(0, marker))
     }
 
+    // ---------------------------------------------------------------- PTY
+
+    /**
+     * 哨兵行：echo "__RC=$?"。
+     *
+     * 必须带双引号：裸写 echo __RC=$? 打出来的是一行 0，和命令自身的输出分不开；
+     * 加引号后打出来的是一整行 __RC=0，可以按「独立成行 + 全数字」精确匹配。
+     * 而 PTY 回显出来的那一行是 echo "__RC=$?"，里面只有 $? 没有数字，不会被误判。
+     */
+    val SENTINEL_ECHO: String = "echo \"" + RC_MARK + "\$?\""
+
+    /**
+     * 写进 PTY 的内容：命令 + 哨兵行。
+     *
+     * 用换行而不是分号拼接：多行命令（for / if 块）也能原样通过，分号会把
+     * 换行结构压平，遇到块语法就废了。
+     */
+    fun ptyWrite(command: String): String = command + "\n" + SENTINEL_ECHO + "\n"
+
+    /** ANSI 颜色/光标控制序列：交互 shell 会带，剥掉才能按行判断。 */
+    private val ANSI = Regex("\\u001b\\[[0-9;]*[a-zA-Z]")
+
+    fun stripAnsi(text: String): String = ANSI.replace(text, "")
+
+    /**
+     * 行首提示符：Meizu22:/ $ 、Meizu22:/ # 、[root@box ~]# 这类。
+     *
+     * 前导的 127| / [127] 是 Flyme 把上一条命令的退出码印在提示符前面
+     * （真机实测 Meizu22 的 PTY 提示符长这样），不认它就等于没剥提示符，
+     * 回显行会漏进 stdout。
+     *
+     * 只剥行首一个，不动行内内容——输出里出现的 $ 是数据，不是提示符。
+     */
+    private val PROMPT_PREFIX = Regex("^(?:\\d+\\||\\[\\d+\\])?[A-Za-z0-9._@-]+:[^$#\\n]*[$#] ?")
+
+    fun stripPrompt(line: String): String = PROMPT_PREFIX.replaceFirst(line, "")
+
+    /** 独立成行的 __RC=<digits>；其余含 __RC= 的行都只是数据或回显。 */
+    private val SENTINEL_LINE = Regex("^" + Regex.escape(RC_MARK) + "(\\d+)$")
+
+    /**
+     * 解析 PTY 会话输出。
+     *
+     * 四件事必须做对，否则结果会「看起来成功但内容错」：
+     * 1. 剥 ANSI，否则行首判断全部失效；
+     * 2. 剥行首提示符，否则第一行输出会带着 Meizu22:/ $ ；
+     * 3. 丢掉 PTY 回显的命令行与哨兵回显行（那是我们自己打进去的字）；
+     * 4. 只认独立成行的 __RC=<数字>，且取最后一次——命令自己输出 __RC=9 时
+     *    不能被当成退出码，哨兵永远在最后。
+     */
+    fun parsePty(raw: String, command: String): Exit {
+        val clean = stripAnsi(raw).replace("\r\n", "\n").replace('\r', '\n')
+        val echoes = command.split('\n').map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        val kept = ArrayList<String>()
+        var code: Int? = null
+        for (rawLine in clean.split('\n')) {
+            val line = stripPrompt(rawLine)
+            val trimmed = line.trim()
+            if (trimmed.isEmpty()) {
+                kept.add("")
+                continue
+            }
+            val sentinel = SENTINEL_LINE.matchEntire(trimmed)
+            if (sentinel != null) {
+                code = sentinel.groupValues[1].toIntOrNull()
+                continue
+            }
+            if (trimmed in echoes) continue
+            if (trimmed == SENTINEL_ECHO) continue
+            if (trimmed.startsWith("echo") && trimmed.contains(RC_MARK)) continue
+            kept.add(line)
+        }
+        while (kept.isNotEmpty() && kept.last().isBlank()) kept.removeAt(kept.size - 1)
+        while (kept.isNotEmpty() && kept.first().isBlank()) kept.removeAt(0)
+        return Exit(code, kept.joinToString("\n"))
+    }
+
+    /**
+     * 是否已经看到提示符。
+     *
+     * 判据是「剥掉 ANSI 后，文本以 $ 空格或 # 空格结尾」：PTY 一开 adbd 就吐
+     * Meizu22:/ $ ，不等它出现就写命令，真机上命令会被 shell 吞掉（表现为
+     * 退出码 0、输出空）。
+     */
+    fun looksLikePrompt(text: String): Boolean {
+        val clean = stripAnsi(text).replace("\r", "")
+        return clean.endsWith("$ ") || clean.endsWith("# ")
+    }
+
+    /** 是否已经出现哨兵行（任意一行独立成 __RC=<数字>）。 */
+    fun hasSentinel(text: String): Boolean {
+        val clean = stripAnsi(text).replace("\r\n", "\n").replace('\r', '\n')
+        return clean.split('\n').any { SENTINEL_LINE.matchEntire(stripPrompt(it).trim()) != null }
+    }
+
+    /**
+     * 当前通道的说明行。
+     *
+     * 必须能一眼看出走的是 PTY 还是降级 RAW：两条路的输出格式不同
+     * （PTY 把 stdout 和 stderr 混在一个流里），排查时第一件事就是确认这一点。
+     */
+    fun channelLine(pty: Boolean): String =
+        "通道: " + (if (pty) CHANNEL_PTY else CHANNEL_RAW)
+
     /** 超长输出截断并注明；否则原样返回（保留换行，别替操作员改格式）。 */
     fun output(text: String): String {
         if (text.length <= SHELL_OUT_MAX) return text
@@ -208,8 +350,16 @@ internal object SelfAdbPlan {
             (if (fingerprint.isNullOrBlank()) "" else "，新指纹 " + fingerprint) +
             "；配对关系已失效，请在手机「已配对的设备」里删掉旧记录，再执行 shpair 六位码"
 
-    fun shellOk(exit: Int, text: String): String =
-        if (text.isEmpty()) "exit=" + exit else text + "exit=" + exit
+    /**
+     * 成功输出的收尾。
+     *
+     * 退出码必须独占一行：真机上输出不以换行结尾时（uid=2000(shell) ... s0），
+     * 直接拼会得到 s0exit=0，人眼和脚本都分不开。
+     */
+    fun shellOk(exit: Int, text: String): String {
+        if (text.isEmpty()) return "exit=" + exit
+        return if (text.endsWith("\n")) text + "exit=" + exit else text + "\nexit=" + exit
+    }
 
     // ---------------------------------------------------------------- 密钥
 
@@ -405,6 +555,89 @@ internal object SelfAdbPlan {
         return false
     }
 
+    // ---------------------------------------------------------------- shdest
+
+    /**
+     * `shdest` 成功的报告：destination 原文 + 字节数 + 十六进制 + 文本。
+     *
+     * 为什么要打十六进制：adbd 有时回的是控制字节或半截 UTF-8，直接当文本打
+     * 会显示成空白，看起来像「没收到任何东西」——而这两件事的结论完全不同。
+     */
+    fun destReportOk(dest: String, bytes: ByteArray): String {
+        val sb = StringBuilder()
+        sb.append("destination: ").append(showDest(dest)).append('\n')
+        sb.append("结果: OK，收到 ").append(bytes.size).append(" 字节\n")
+        sb.append("十六进制: ").append(hexDump(bytes, SHDEST_HEX_MAX)).append('\n')
+        sb.append("文本: ").append(printable(bytes, SHDEST_TEXT_MAX))
+        return sb.toString()
+    }
+
+    /** 流开了但到点没读完：把已收到的部分照样打出来，别丢证据。 */
+    fun destReportTimeout(dest: String, bytes: ByteArray, timeoutMs: Long): String {
+        val sb = StringBuilder()
+        sb.append("destination: ").append(showDest(dest)).append('\n')
+        sb.append("结果: 超时（").append(timeoutMs / 1000).append("s 内没有读完），已收到 ")
+            .append(bytes.size).append(" 字节\n")
+        sb.append("十六进制: ").append(hexDump(bytes, SHDEST_HEX_MAX)).append('\n')
+        sb.append("文本: ").append(printable(bytes, SHDEST_TEXT_MAX))
+        return sb.toString()
+    }
+
+    /**
+     * `shdest` 失败的报告：异常类名必须原样出现。
+     *
+     * 只写「流被对端关闭」这种中文会把 IOException 和 IllegalStateException 糊成
+     * 一样，而它们一个是协议层、一个是我们的调用顺序，排查方向完全不同。
+     */
+    fun destReportFail(dest: String, t: Throwable): String {
+        val sb = StringBuilder()
+        sb.append("destination: ").append(showDest(dest)).append('\n')
+        sb.append("结果: 失败 ").append(t.javaClass.name)
+        val message = t.message
+        sb.append(": ").append(if (message.isNullOrEmpty()) "(无 message)" else message)
+        var cause = t.cause
+        var depth = 0
+        while (cause != null && depth < 3) {
+            sb.append("\n原因: ").append(cause.javaClass.name)
+            val inner = cause.message
+            if (!inner.isNullOrEmpty()) sb.append(": ").append(inner)
+            cause = cause.cause
+            depth++
+        }
+        return sb.toString()
+    }
+
+    /** destination 里的换行/回车必须显式化，否则一行报告会被撑成好几行。 */
+    fun showDest(dest: String): String =
+        dest.replace("\r", "\\r").replace("\n", "\\n")
+
+    /** 小写十六进制，空格分隔；超上限时注明总长度。 */
+    fun hexDump(bytes: ByteArray, max: Int): String {
+        if (bytes.isEmpty()) return "(空)"
+        val digits = "0123456789abcdef"
+        val count = minOf(bytes.size, max)
+        val sb = StringBuilder(count * 3)
+        for (i in 0 until count) {
+            if (i > 0) sb.append(' ')
+            val value = bytes[i].toInt() and 0xff
+            sb.append(digits[value shr 4]).append(digits[value and 0x0f])
+        }
+        if (bytes.size > count) {
+            sb.append(" …（共 ").append(bytes.size).append(" 字节，只显示前 ").append(count).append("）")
+        }
+        return sb.toString()
+    }
+
+    /** 把换行压成 \n 再截断，保证一条报告占固定行数。 */
+    fun printable(bytes: ByteArray, max: Int): String {
+        if (bytes.isEmpty()) return "(空)"
+        val text = String(bytes, Charsets.UTF_8)
+            .replace("\r\n", "\\n")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        return if (text.length <= max) text else text.substring(0, max) + "…"
+    }
+
     // ---------------------------------------------------------------- 异常
 
     /**
@@ -429,7 +662,17 @@ internal object SelfAdbPlan {
 
             message.contains("Not connected to ADB") -> notConnected()
 
-            message.contains("Stream closed") -> "连接被对端关闭：重新执行 shconnect"
+            // 两种 "Stream closed" 必须分开报，它们指向完全不同的原因：
+            // ① 带句号的 "Stream closed." 是 AdbStream.read() 抛的 —— adbd 收下了
+            //    OPEN（OKAY 已到）却在没有任何输出前关了流，问题在 destination
+            //    或子进程，不在连接；
+            // ② 不带句号的 "Stream closed" 是 AdbStream.write()/flush() 抛的 ——
+            //    流在我们这边已经被关了，属于连接层，重连即可。
+            message.contains("Stream closed.") ->
+                "流被对端关闭（" + name + ": " + message + "）：adbd 收下了这条命令但没回任何输出就关了流，执行 shdest 逐条试 destination"
+
+            message.contains("Stream closed") ->
+                "连接已断开（" + name + ": " + message + "）：重新执行 shconnect"
 
             message.contains("Connection refused") -> "端口拒绝连接：adbd 可能刚重启，执行 shconnect 重试"
 
@@ -461,7 +704,13 @@ internal object SelfAdbPlan {
     /**
      * `shinfo` 的多行报告。全部是读操作，不改任何状态，所以可以随时打。
      */
-    fun status(hasKey: Boolean, fingerprint: String?, connected: Boolean, lastNote: String?): String {
+    fun status(
+        hasKey: Boolean,
+        fingerprint: String?,
+        connected: Boolean,
+        lastNote: String?,
+        pty: Boolean = true
+    ): String {
         val sb = StringBuilder()
         sb.append("自连 ADB: ").append(if (connected) "已连接" else "未连接").append('\n')
         if (hasKey) {
@@ -472,6 +721,7 @@ internal object SelfAdbPlan {
             sb.append("密钥: 未生成（执行 shkey 或 shpair 会自动生成）\n")
         }
         sb.append("地址: ").append(HOST).append("（只连本机回环，不连局域网 IP）\n")
+        sb.append(channelLine(pty)).append('\n')
         sb.append("配对服务: ").append(SERVICE_PAIRING).append(" / 连接服务: ").append(SERVICE_CONNECT).append('\n')
         sb.append("命令: ").append(USAGE.removePrefix("usage: ")).append('\n')
         sb.append("最近: ").append(if (lastNote.isNullOrBlank()) "(本次进程内无记录)" else lastNote)

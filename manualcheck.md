@@ -225,7 +225,7 @@ and compare against the expectation below.
 | `call speaker on` during a call | audio moves to the loudspeaker; `call speaker off` moves it back. Without `MODIFY_AUDIO_SETTINGS`: exit 6 naming the `pm grant` line |
 | `call speaker maybe` | exit 2 with the usage line — it must not pick a route for you |
 | `admin status` after the v0.4.0 grants | the `扩展权限:` block lists each permission with `已授予/未授予` plus 所有文件访问 / 悬浮窗 / 勿扰权限 / 通知使用权, each carrying the adb line when it is off |
-| `shinfo` before pairing | exit 0, five lines: `自连 ADB: 未连接`, `密钥: …`, `地址: 127.0.0.1（只连本机回环…）`, the two mDNS service names, and `最近:` |
+| `shinfo` before pairing | exit 0, six lines: `自连 ADB: 未连接`, `密钥: …`, `地址: 127.0.0.1（只连本机回环…）`, `通道: PTY（shell:）`, the two mDNS service names, and `最近:` |
 | `sh ls /sdcard` | exit 0, stdout is exactly `dry-run: would run sh: ls /sdcard` — **nothing runs** |
 | `sh apply id` | exit 0, stdout ends with `uid=2000(shell)` and `exit=0`. If it says `尚未配对`/`尚未连接`, that is exit **6**, not a command failure |
 | `sh apply ls /nope` | exit **0** with stdout `ls: /nope: No such file or directory` + `exit=1` — the remote code is in stdout, not in our exit |
@@ -239,7 +239,12 @@ and compare against the expectation below.
 | `shkey import <url>` (good pair) | exit 0, `已导入密钥 <name> 指纹 SHA256:…` then `现在可以执行 shconnect…`; `shkey show` says `来源: 导入`; `shconnect` succeeds **without** pairing |
 | `shkey import <url>` (private/public mismatch) | exit 6 with `导入失败：私钥与公钥不是一对（adb 公钥结构体对不上）` — swap one half and re-run to see it |
 | `shkey adopt` | exit **6** with the explanation that `/data/misc/adb/adb_keys` is adbd-private and points at `shkey import`; it must not claim success |
-| `sh apply id` on the v0.5.2 build | exit 0 and stdout ends with `uid=2000(shell)` — on v0.5.1 this same command returned exit 4 with 连不上 adbd 端口, because the `OPEN` destination was missing the `shell:` service prefix. If you still see 拒绝了这条命令, the destination is wrong again (not the connection) |
+| `sh apply id` on the v0.5.4 build | exit 0, stdout has the `uid=2000(shell) …` line and then `exit=0` **on its own line**. On v0.5.3 the same command returned exit 4 with 连接被对端关闭: this ROM closes every `OPEN` that carries a command (`kRaw`), which is why the PTY path exists |
+| `shinfo` channel line | `通道: PTY（shell:）` on this device. `通道: RAW（降级 shell:COMMAND）` means opening the PTY stream itself failed — on Flyme that should never happen, and raw will then fail every command |
+| `shdest shell:` | exit 0, `结果: 超时（8s 内没有读完）` with 12 bytes and text `Meizu22:/ $ ` — the prompt proves `kPty` works |
+| `shdest shell:id` | exit 0, `结果: 失败 java.io.IOException: Stream closed.` in ~0.0 s — this is the ROM bug the PTY path routes around, not a wrong destination |
+| `sh apply ls /data/misc/adb` | exit 0 with merged output `ls: /data/misc/adb: Permission denied` then `exit=1` — proves stderr comes back and the remote code is 1 |
+| `sh apply pm list packages net.de5.phoneagent` | exit 0, `package:net.de5.phoneagent` then `exit=0`. Quote-free form works: everything after the flags is payload |
 | `shpair 000000` after the v0.5.1 build | exit 6, and if the system blocks the exporter the text is exactly `配对失败：本机系统禁止非 SDK 接口（exportKeyingMaterial）。请改用 shkey import <url> 导入一把已被手机授权的密钥。` — **not** a stack trace |
 | `shpair 000000` (wrong code) | exit 6 with `配对失败: …`; the old pairing (if any) must still work |
 | `shpair 12345` | exit 2 — a code that is not six digits is refused before any network work |

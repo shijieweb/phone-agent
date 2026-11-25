@@ -41,6 +41,12 @@ internal object SelfAdb {
     private const val BOUNCE_OFF_MS = 1_500L
     private const val READ_CHUNK = 8 * 1024
 
+    /** PTY 轮询间隔：10ms 足够快（提示符几十毫秒内到），又不会把 CPU 烧起来。 */
+    private const val PROMPT_POLL_MS = 10L
+
+    /** 与 AgentLog 同一个 tag，logcat -s PhoneAgent:I 就能同时看到两边的行。 */
+    private const val LOGCAT_TAG = "PhoneAgent"
+
     // 密钥文件很小（私钥 ~1.7 KB，公钥 ~0.7 KB），200 KB 已经宽松到不可能误伤，
     // 又能挡住「URL 指到一个大文件」这种把内存吃满的情况。
     private const val FETCH_CONNECT_TIMEOUT_MS = 15_000
@@ -54,6 +60,15 @@ internal object SelfAdb {
 
     @Volatile
     private var material: SelfAdbKeys.Material? = null
+
+    /**
+     * 当前走的是哪条通道。
+     *
+     * 只有 PTY 开流失败才会降级到 RAW，降级之后这个标志跟着变——
+     * shinfo 里显示的必须是「实际走的」，不是「打算走的」。
+     */
+    @Volatile
+    private var ptyChannel: Boolean = true
 
     @Volatile
     private var lastNote: String? = null
@@ -195,7 +210,7 @@ internal object SelfAdb {
         } else {
             null
         }
-        return SelfAdbPlan.status(keyed, fingerprint, isConnected(), lastNote)
+        return SelfAdbPlan.status(keyed, fingerprint, isConnected(), lastNote, ptyChannel)
     }
 
     // ------------------------------------------------------------ 配对
@@ -260,8 +275,9 @@ internal object SelfAdb {
     /**
      * 跑一条 shell 命令。
      *
-     * exit code 靠哨兵法：命令后面追加 `echo __RC=$?`，取最后一行。
-     * 不这么做就只能拿到输出文本——adb 的 shell 协议本身不回退出码。
+     * 默认走 PTY（[shellPty]）。只有 PTY 连开流都失败时才降级到 raw
+     * （shell:COMMAND + 哨兵）——魅族上 raw 必挂，先试 raw 等于白等一次超时。
+     * 降级会改 ptyChannel，shinfo 里看得出来。
      */
     fun shell(command: String, timeoutMs: Long): SelfAdbPlan.Exit {
         val ctx = app ?: return precondition(SelfAdbPlan.notPaired())
@@ -270,6 +286,14 @@ internal object SelfAdb {
         if (session == null || !session.isConnected()) {
             return precondition(SelfAdbPlan.notConnected())
         }
+        val pty = shellPty(command, timeoutMs)
+        if (ptyChannel) return pty
+        // PTY 开流就失败了，才走这里。pty.text 里已经是降级前的错误，不再往外抛。
+        return shellRaw(session, command, timeoutMs)
+    }
+
+    /** raw 通道（shell:COMMAND）：只在 PTY 不可用时使用，魅族上必然失败。 */
+    private fun shellRaw(session: Manager, command: String, timeoutMs: Long): SelfAdbPlan.Exit {
         var stream: AdbStream? = null
         val timedOut = AtomicBoolean(false)
         return try {
@@ -281,11 +305,190 @@ internal object SelfAdb {
                 SelfAdbPlan.parseExit(raw)
             }
         } catch (t: Throwable) {
+            // 全栈进 logcat：给用户的文案只能带一句人话，排查要的是类名与行号。
+            // 真机上唯一能看到它的通道是 AgentLog（logcat -s PhoneAgent:I）。
+            AgentLog.add("sh", "raw fail " + t.javaClass.name + ": " + (t.message ?: "(无 message)"))
+            android.util.Log.e(LOGCAT_TAG, "sh raw fail dest=" + SelfAdbPlan.showDest(SelfAdbPlan.shellCommand(command)), t)
             if (timedOut.get()) {
                 SelfAdbPlan.Exit(null, SelfAdbPlan.timeoutText(timeoutMs))
             } else {
                 SelfAdbPlan.Exit(null, SelfAdbPlan.errorText(t))
             }
+        } finally {
+            try {
+                stream?.close()
+            } catch (t: Throwable) {
+                // 已经关了
+            }
+        }
+    }
+
+    /**
+     * 走 PTY 跑一条命令（默认路径）。
+     *
+     * 为什么是 PTY：魅族 Flyme（Android 16）上 adbd 对所有带命令的 destination
+     * （kRaw 子进程路径）都在回 OKAY 之后立刻 CLSE，真机 A/B 实测 exec:id /
+     * shell:id / shell,raw:id / shell,v2,raw:id 全是 IOException: Stream closed.，
+     * 唯一活着的是空命令 shell: —— 它走 kPty，会给出一个真正的交互提示符。
+     * PTY 是 POSIX 标准能力，所有 ROM 都支持，比 raw 更可靠。
+     *
+     * 交互式执行的三步，少一步就会「看起来成功但结果错」：
+     * 1. 先等提示符（1.5s 预算）：不等就写，命令可能被 shell 吞掉；
+     * 2. 写命令 + 换行 + 哨兵行：哨兵带双引号，保证输出是一整行 __RC=N；
+     * 3. 读到哨兵出现就收手：PTY 不会自己 EOF，等 EOF 等于等到超时。
+     *
+     * 代价：PTY 把 stdout 和 stderr 混在一个流里，分不开。文档里写明了这一点，
+     * 所以 [SelfAdbPlan.Exit] 的 text 是「合并输出」。
+     */
+    fun shellPty(command: String, timeoutMs: Long): SelfAdbPlan.Exit {
+        val ctx = app ?: return precondition(SelfAdbPlan.notPaired())
+        if (!SelfAdbKeys.hasKey(ctx)) return precondition(SelfAdbPlan.notPaired())
+        val session = manager
+        if (session == null || !session.isConnected()) {
+            return precondition(SelfAdbPlan.notConnected())
+        }
+        var stream: AdbStream? = null
+        val out = ByteArrayOutputStream(READ_CHUNK)
+        return try {
+            stream = session.open(SelfAdbPlan.DEST_PTY)
+            ptyChannel = true
+            awaitPrompt(stream)
+            val payload = SelfAdbPlan.ptyWrite(command).toByteArray(Charsets.UTF_8)
+            stream.write(payload, 0, payload.size)
+            stream.flush()
+            readUntilSentinel(stream, out, timeoutMs)
+            val raw = out.toString("UTF-8")
+            if (!SelfAdbPlan.hasSentinel(raw)) {
+                // 没等到哨兵：退出码未知，但已经收到的内容必须原样交回去，
+                // 丢掉它就等于把「命令跑到一半」误报成「什么也没发生」。
+                val partial = SelfAdbPlan.parsePty(raw, command)
+                return SelfAdbPlan.Exit(null, partial.text)
+            }
+            SelfAdbPlan.parsePty(raw, command)
+        } catch (t: Throwable) {
+            AgentLog.add("sh", "pty fail " + t.javaClass.name + ": " + (t.message ?: "(无 message)"))
+            android.util.Log.e(LOGCAT_TAG, "sh pty fail", t)
+            SelfAdbPlan.Exit(null, SelfAdbPlan.errorText(t))
+        } finally {
+            try {
+                stream?.close()
+            } catch (t: Throwable) {
+                // 已经关了
+            }
+        }
+    }
+
+    /**
+     * 等 PTY 吐出提示符。
+     *
+     * 用 available() 轮询而不是阻塞 read：读要能随时放弃，否则一个不回提示符的
+     * ROM 会把这条命令钉死在这里，连超时都走不到。
+     */
+    private fun awaitPrompt(stream: AdbStream) {
+        val deadline = System.currentTimeMillis() + SelfAdbPlan.PROMPT_WAIT_MS
+        val buffer = ByteArray(READ_CHUNK)
+        val seen = StringBuilder()
+        while (System.currentTimeMillis() < deadline) {
+            val ready = try {
+                stream.available()
+            } catch (t: IOException) {
+                return
+            }
+            if (ready <= 0) {
+                Thread.sleep(PROMPT_POLL_MS)
+                continue
+            }
+            val count = stream.read(buffer, 0, minOf(buffer.size, ready))
+            if (count <= 0) continue
+            seen.append(String(buffer, 0, count, Charsets.UTF_8))
+            if (SelfAdbPlan.looksLikePrompt(seen.toString())) return
+        }
+    }
+
+    /** 读到哨兵出现或到点；PTY 不会自己 EOF，等 EOF 等于等到超时。 */
+    private fun readUntilSentinel(stream: AdbStream, out: ByteArrayOutputStream, timeoutMs: Long) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        val buffer = ByteArray(READ_CHUNK)
+        while (System.currentTimeMillis() < deadline) {
+            val ready = try {
+                stream.available()
+            } catch (t: IOException) {
+                return
+            }
+            if (ready <= 0) {
+                Thread.sleep(PROMPT_POLL_MS)
+                continue
+            }
+            val count = stream.read(buffer, 0, minOf(buffer.size, ready))
+            if (count <= 0) continue
+            out.write(buffer, 0, count)
+            if (SelfAdbPlan.hasSentinel(out.toString("UTF-8"))) return
+        }
+    }
+
+    // ------------------------------------------------------------ 调试
+
+    /**
+     * `shdest DEST` —— 调试专用：原样打开一条 destination，把收到的字节打出来。
+     *
+     * 存在的理由：`sh` 会把命令拼成 `shell:<cmd>\necho __RC=$?`，一旦失败，
+     * 「是 destination 形式不对」和「是拼接里的换行不对」两件事就分不开。
+     * 这条命令不做任何拼接、不加哨兵，专门用来逐条试形式。
+     *
+     * 它不是给日常用的：能跑 shell 之后就没有再试的必要，留在命令面上是为了
+     * 下一次 adbd 行为变化时不必重新发一版带诊断的 APK。
+     */
+    fun dest(destination: String): String {
+        val ctx = app ?: return SelfAdbPlan.notPaired()
+        if (!SelfAdbKeys.hasKey(ctx)) return SelfAdbPlan.notPaired()
+        val session = manager
+        if (session == null || !session.isConnected()) return SelfAdbPlan.notConnected()
+        val timedOut = AtomicBoolean(false)
+        var stream: AdbStream? = null
+        val out = ByteArrayOutputStream(READ_CHUNK)
+        return try {
+            stream = session.open(destination)
+            val buffer = ByteArray(READ_CHUNK)
+            val watchdog = Thread {
+                try {
+                    Thread.sleep(SelfAdbPlan.SHDEST_TIMEOUT_MS)
+                    timedOut.set(true)
+                    try {
+                        stream.close()
+                    } catch (t: Throwable) {
+                        // 已经结束
+                    }
+                } catch (interrupted: InterruptedException) {
+                    // 正常结束
+                }
+            }
+            watchdog.isDaemon = true
+            watchdog.name = "rc-adb-dest-watchdog"
+            watchdog.start()
+            try {
+                while (true) {
+                    val count = try {
+                        stream.read(buffer, 0, buffer.size)
+                    } catch (t: IOException) {
+                        if (timedOut.get()) break
+                        throw t
+                    }
+                    if (count < 0) break
+                    out.write(buffer, 0, count)
+                }
+            } finally {
+                watchdog.interrupt()
+            }
+            val bytes = out.toByteArray()
+            if (timedOut.get()) {
+                SelfAdbPlan.destReportTimeout(destination, bytes, SelfAdbPlan.SHDEST_TIMEOUT_MS)
+            } else {
+                SelfAdbPlan.destReportOk(destination, bytes)
+            }
+        } catch (t: Throwable) {
+            AgentLog.add("shdest", "fail " + t.javaClass.name + ": " + (t.message ?: "(无 message)"))
+            android.util.Log.e(LOGCAT_TAG, "shdest fail dest=" + SelfAdbPlan.showDest(destination), t)
+            SelfAdbPlan.destReportFail(destination, t)
         } finally {
             try {
                 stream?.close()

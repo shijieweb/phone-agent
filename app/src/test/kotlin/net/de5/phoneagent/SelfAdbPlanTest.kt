@@ -147,6 +147,8 @@ class SelfAdbPlanTest {
         assertEquals("exit=0", SelfAdbPlan.shellOk(0, ""))
         assertEquals("abc\nexit=0", SelfAdbPlan.shellOk(0, "abc\n"))
         assertEquals("abc\nexit=2", SelfAdbPlan.shellOk(2, "abc\n"))
+        // 输出不以换行结尾时，退出码也必须独占一行，不能粘成 s0exit=0。
+        assertEquals("abc\nexit=0", SelfAdbPlan.shellOk(0, "abc"))
     }
 
     @Test
@@ -279,4 +281,93 @@ class SelfAdbPlanTest {
         val text = SelfAdbPlan.errorText(IllegalStateException())
         assertEquals("IllegalStateException", text)
     }
+
+    /**
+     * 两种 "Stream closed" 指向完全不同的原因，必须分开报：
+     * 带句号的是 read() 抛的（adbd 收下 OPEN 后没输出就关流），
+     * 不带句号的是 write()/flush() 抛的（我们这边已经把流关了）。
+     * 混成一句「连接被对端关闭」会让人去重连，而问题其实在 destination。
+     */
+    @Test
+    fun errorTextSplitsStreamClosedWithAndWithoutPeriod() {
+        val readSide = SelfAdbPlan.errorText(java.io.IOException("Stream closed."))
+        assertTrue(readSide.contains("流被对端关闭"))
+        assertTrue(readSide.contains("IOException"))
+        assertTrue(readSide.contains("shdest"))
+
+        val writeSide = SelfAdbPlan.errorText(java.io.IOException("Stream closed"))
+        assertTrue(writeSide.contains("连接已断开"))
+        assertTrue(writeSide.contains("shconnect"))
+        assertFalse(writeSide.contains("shdest"))
+    }
+
+    @Test
+    fun errorTextKeepsClassNameForDiagnosis() {
+        val text = SelfAdbPlan.errorText(IllegalStateException("Stream closed."))
+        assertTrue(text.contains("IllegalStateException"))
+    }
+
+    // ------------------------------------------------------------ shdest
+
+    @Test
+    fun destReportOkShowsDestBytesHexAndText() {
+        val text = SelfAdbPlan.destReportOk("shell:id", "uid=2000(shell)\n".toByteArray())
+        assertTrue(text.contains("destination: shell:id"))
+        assertTrue(text.contains("收到 16 字节"))
+        assertTrue(text.contains("十六进制: 75 69 64"))
+        assertTrue(text.contains("文本: uid=2000(shell)\\n"))
+    }
+
+    @Test
+    fun destReportFailPrintsClassNameAndCause() {
+        val boom = java.io.IOException("Stream closed.", java.net.ConnectException("refused"))
+        val text = SelfAdbPlan.destReportFail("shell:id", boom)
+        assertTrue(text.contains("destination: shell:id"))
+        assertTrue(text.contains("java.io.IOException"))
+        assertTrue(text.contains("Stream closed."))
+        assertTrue(text.contains("原因: java.net.ConnectException: refused"))
+    }
+
+    @Test
+    fun destReportFailSaysWhenMessageIsMissing() {
+        val text = SelfAdbPlan.destReportFail("exec:id", java.io.IOException())
+        assertTrue(text.contains("(无 message)"))
+    }
+
+    @Test
+    fun destReportTimeoutKeepsPartialBytes() {
+        val text = SelfAdbPlan.destReportTimeout("shell:", "hi".toByteArray(), 8_000L)
+        assertTrue(text.contains("超时（8s"))
+        assertTrue(text.contains("已收到 2 字节"))
+        assertTrue(text.contains("文本: hi"))
+    }
+
+    @Test
+    fun showDestEscapesNewlines() {
+        assertEquals("shell:id\\necho hi", SelfAdbPlan.showDest("shell:id\necho hi"))
+        assertEquals("a\\rb", SelfAdbPlan.showDest("a\rb"))
+    }
+
+    @Test
+    fun hexDumpIsLowercaseAndBounded() {
+        assertEquals("(空)", SelfAdbPlan.hexDump(ByteArray(0), 16))
+        assertEquals("00 0f ff", SelfAdbPlan.hexDump(byteArrayOf(0, 15, -1), 16))
+        val long = ByteArray(8) { it.toByte() }
+        val text = SelfAdbPlan.hexDump(long, 4)
+        assertTrue(text.startsWith("00 01 02 03"))
+        assertTrue(text.contains("共 8 字节"))
+    }
+
+    @Test
+    fun printableFlattensAndTruncates() {
+        assertEquals("(空)", SelfAdbPlan.printable(ByteArray(0), 10))
+        assertEquals("a\\nb", SelfAdbPlan.printable("a\nb".toByteArray(), 10))
+        assertTrue(SelfAdbPlan.printable("abcdef".toByteArray(), 3).endsWith("…"))
+    }
+
+    @Test
+    fun usageNamesShdestAsDebugVerb() {
+        assertTrue(SelfAdbPlan.USAGE.contains("shdest DEST"))
+    }
 }
+

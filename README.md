@@ -76,19 +76,35 @@ shconnect         # pairing only swaps keys; connecting is separate
 shinfo            # key fingerprint, connected or not, last note
 sh apply id       # uid=2000(shell) — the proof it really is a shell
 shkey             # 公钥 + SHA256: fingerprint, to compare against 已配对的设备
+shdest shell:     # debug: open a destination verbatim, show bytes/hex/text
 ```
 
 `shkey regen` alone only prints a warning; `shkey regen apply` really replaces the
 key and **invalidates the pairing**, so the old entry has to be removed on the
 phone before pairing again.
 
-**The command must be sent as `shell:COMMAND` (v0.5.2).** adbd dispatches an
-`OPEN` by destination string and the destination has to be `<service>:<args>`.
-v0.5.1 sent the bare text, adbd found no such service and answered `CLSE`, and
-every `sh apply` came back as exit 4 with 连不上 adbd 端口 while `shinfo` still
-said 已连接 — the socket was healthy, the request was malformed. The prefix is now
-a constant and the two failures are worded differently: a rejected stream says
-adbd 拒绝了这条命令, a refused socket still says 连不上 adbd 端口.
+**Commands run through a PTY, because this ROM's one-shot shell is broken (v0.5.4).**
+adbd dispatches an `OPEN` by destination string, which must be `<service>:<args>`.
+`shell:COMMAND` (the `kRaw` subprocess path) is the obvious choice and it does
+not work on Flyme/Android 16: every destination carrying a command is closed
+right after `OKAY` with `IOException: Stream closed.` — measured with the
+`shdest` debug verb, which tries destinations verbatim and reports bytes and hex.
+The one destination that stays alive is the empty-command `shell:`, which is
+the interactive PTY (`kPty`) — the same path a human gets from `adb shell` with
+no command, and POSIX-standard on every ROM.
+
+So `sh` now drives the shell like a person does: wait for the prompt (1.5 s),
+write the command plus a quoted sentinel line `echo "__RC=$?"`, then read until
+that sentinel comes back instead of waiting for an EOF a PTY never sends. Parsing
+strips ANSI escapes and the prompt (including Flyme's `127|Meizu22:/ $ ` prefix),
+drops the echoed input lines, and accepts only a standalone `__RC=<digits>` line.
+
+Two honest consequences, both in `shinfo` and in this file: `sh` reports
+**merged output** in `stdout` (the `shell:` service does not separate stderr),
+and `shinfo` prints the channel actually in use — `通道: PTY（shell:）`, or
+`通道: RAW（降级 shell:COMMAND）` if opening the PTY stream itself failed. Raw is
+only tried after PTY fails, never before: on this ROM raw always fails, so trying
+it first would burn a timeout per command.
 
 **Pairing is blocked on Android 16, and `shkey import` is the way around it.**
 Pairing mixes the TLS exporter's key material into the PAKE password, and the

@@ -210,6 +210,7 @@ reach the `unknown command` branch.
 | `shkey regen [apply]` | `regen` alone is a dry run; `regen apply` really replaces the key (see §3.16) |
 | `shkey import URL [PUBURL]` | download a ready-made key pair and install it; the way around the hidden-API block on Android 16 (see §3.16) |
 | `shkey adopt` | not implemented: `/data/misc/adb/adb_keys` is adbd-private and `uid 2000` cannot read it on a `user` build (see §3.16) |
+| `shdest DEST` | debug verb: open `DEST` verbatim, read up to 8 s, report bytes/hex/text. Always `exit 0` — the report is evidence, not a verdict (see §3.16) |
 
 Anything else: `exit=2`, stderr `unknown command: <name>`.
 
@@ -799,23 +800,91 @@ like our own `EXIT_TIMEOUT`:
 | no result within `t` | 4 | stderr `命令超时（Ns 内没有返回）` |
 | ran, but the sentinel never came back | 4 | stdout is the raw text, no `exit=` line |
 
-**The destination is `shell:COMMAND`, and the prefix is not optional.**
-adbd dispatches an `OPEN` by its destination string, and the destination must be
-`<service>:<args>`. v0.5.1 sent the bare command text, adbd matched no service and
-answered with `CLSE`, and every `sh apply` failed with `ConnectException("Stream
-open actively rejected by remote peer.")` while `shinfo` still said 已连接 — the
-socket was fine, the *request* was malformed. v0.5.2 prefixes the service name
-(`SelfAdbPlan.SERVICE_SHELL`) and the two failures are now told apart: a rejected
-stream says 拒绝了这条命令 (the service name was not accepted), a refused socket
-still says 连不上 adbd 端口 (wireless debugging is off).
+**Two destinations exist, and only one of them works on this ROM (v0.5.4).**
+adbd dispatches an `OPEN` by its destination string, which must be
+`<service>:<args>`. There are two ways to reach the shell service:
 
-**How the remote exit code is recovered.** The `shell:` service multiplexes
-stdout and stderr into one stream and the protocol carries no exit status, so the
-command is wrapped as `COMMAND` + newline + `echo __RC=$?`. The parser takes the
-**last** `__RC=<digits>` whose remainder is blank, strips it, and returns the
-number. Anything else (no sentinel, trailing output, non-digit) yields "no exit
-code" and the raw text is returned as-is — the agent never invents a 0. A command
-whose own text contains `__RC=` is therefore safe: only the final echo counts.
+| Destination | adbd path | State |
+|---|---|---|
+| `shell:` (empty command) | `kPty` — interactive PTY | **default**, works everywhere |
+| `shell:COMMAND` | `kRaw` — one-shot subprocess | broken on Flyme (Android 16) |
+
+History, because it explains the design: v0.5.1 sent the bare command text as the
+whole destination, adbd matched no service, answered `CLSE`, and every
+`sh apply` failed with `ConnectException("Stream open actively rejected by remote
+peer.")` while `shinfo` still said 已连接 — the socket was fine, the *request*
+was malformed. v0.5.2 added the service prefix. v0.5.3 then measured what adbd
+actually does with it, using the `shdest` debug verb, and got this on the
+target device (all `exit 0`; the failure is inside the report):
+
+| `shdest` argument | Result |
+|---|---|
+| `exec:id` | `IOException: Stream closed.` (0.0 s) |
+| `shell:id` / `shell,raw:id` / `shell,v2,raw:id` / `shell,v2,pty:id` | same, 0.0 s |
+| `shell,v2:true` | same, 0.0 s |
+| **`shell:`** (no command) | **12 bytes: `Meizu22:/ $ `** — a real prompt |
+| `sync:` | no data (the service opens; it just has nothing to say) |
+
+So every destination that carries a command dies right after `OKAY`: this ROM's
+`kRaw` subprocess path is broken, and the empty-command PTY is the only way in.
+That is not a workaround specific to one phone — `kPty` is the POSIX-standard
+path, and it is what a human sees in `adb shell` without a command.
+
+**PTY execution, in three steps that must not be reordered.** The shell is
+interactive now, so it has to be driven the way a person drives it:
+
+1. **Wait for the prompt** (1.5 s budget, polled every 10 ms). Writing before
+   the prompt arrives gets the command swallowed: the shell reports exit 0 with
+   no output, which reads exactly like "the command did nothing".
+2. **Write `COMMAND` + newline + the sentinel line.** A newline, not `;` —
+   block syntax (`for` / `if` / `while`) survives a newline and is flattened
+   by a semicolon.
+3. **Read until the sentinel appears, then close.** A PTY never reaches EOF on
+   its own; waiting for EOF is waiting for the timeout.
+
+The sentinel is `echo "__RC=$?"` — **with quotes**. Bare `echo __RC=$?` prints a
+lone `0` that cannot be told apart from the command's own output; quoted, it
+prints one whole line `__RC=0`. The echo of that line is `echo "__RC=$?"`, which
+contains `$?` but no digits, so it is discarded rather than misread.
+
+**Parsing PTY output** is where the subtle bugs live, so the rules are explicit:
+
+- strip ANSI escapes first — otherwise no line-start test works;
+- strip a leading prompt, including Flyme's exit-code prefix
+  (`127|Meizu22:/ $ `) — the prompt is glued to the first line of output;
+- drop the echoed command line and the echoed sentinel line (that is our own
+  typing coming back);
+- accept **only** a standalone line `__RC=<digits>`, and take the **last** one;
+- everything else is output, joined back with newlines, trailing blank lines
+  removed.
+
+A command whose own output contains `__RC=9` in the middle of a line is kept as
+data. If the command prints a *standalone* `__RC=9` line it is genuinely
+indistinguishable from the sentinel — that is the inherent cost of sentinels
+(the protocol carries no exit status); taking the last occurrence still yields
+the true code, because the sentinel is always last.
+
+**stdout and stderr are merged, and this is a documented limitation.** The
+`shell:` service multiplexes both into one stream. `sh` therefore reports
+**merged output** in its `stdout` field, and the `stderr` field is reserved for our
+own failures (not paired, timed out). `sh apply ls /data/misc/adb` proves it:
+the `Permission denied` text arrives on stdout together with `exit=1`.
+
+**Fallback to raw exists but is not the default.** If opening the PTY stream
+itself throws, `SelfAdb` falls back to `shell:COMMAND` and flips the channel
+flag. The order matters: on this ROM raw *always* fails, so trying it first
+would burn one timeout per command. `shinfo` prints the channel actually in
+use:
+
+`@
+通道: PTY（shell:）
+通道: RAW（降级 shell:COMMAND）
+`@
+
+**`shdest DEST`** is the debug verb that produced the table above: it opens the
+destination **verbatim** (no prefix is added — adding one would defeat the A/B),
+reads for up to 8 s, and reports bytes, hex and printable text. It always exits
+0, because its output is evidence, not a verdict.
 
 **Output cap.** `stdout` is capped at 8000 chars and the truncation is stated in
 the text (`… 输出被截断（原 N 字符，上限 8000）`). The relay truncates at 200 000,
@@ -1306,6 +1375,15 @@ framework** — do not mock `AccessibilityService`. Required cases:
       rejected`) from a *dead port* (`Connection refused`), so the operator is
       pointed at the connection state instead of being told to check wireless
       debugging when it is already on.
+  17. The v0.5.4 PTY channel (`PtyParseTest`, 24 cases): `ptyWrite` puts the
+      command and the quoted sentinel on separate lines and leaves a multi-line
+      command intact; `parsePty` recovers `exit 0 / 1 / 127`, keeps multi-line
+      output, handles LF-only input, strips ANSI and both prompt shapes
+      (`Meizu22:/ $ ` and Flyme's `127|Meizu22:/ $ `), drops the echoed command
+      and the echoed sentinel line, keeps a mid-line `__RC=9` as data, takes the
+      last standalone sentinel, and returns `code == null` with the partial text
+      when the sentinel never arrives. `hasSentinel` only accepts a whole line,
+      `channelLine` distinguishes PTY from RAW, and `status` prints the channel.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
@@ -1318,8 +1396,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (455 cases at
-  v0.5.2-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (493 cases at
+  v0.5.4-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.
