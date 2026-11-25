@@ -168,9 +168,10 @@ and compare against the expectation below.
 | `adbinfo` twice within a minute | the second run reports `来源 = 缓存（Ns 前发现）` and the same port; no second discovery round |
 | `adbheal` then `adbinfo` immediately | `adbinfo` reports the fresh cache, and the port matches what `adbheal` printed |
 | `dl https://<any host>/film.mp4` | exit 0, stdout exactly `已下载 film.mp4 <n> 字节 → /sdcard/Movies/film.mp4`; `<n>` matches the real file size |
-| `stop` then look at the app | the status line says `服务: 已停止`, the button reads `启动`, and the `开机自动启动` checkbox is **unchecked** (stop cleared it) |
-| press `启动` | service runs and the checkbox is ticked again — start re-arms auto-start |
-| reboot after `stop` | the agent stays down; nothing starts it (this is the whole point of the toggle). After a `启动` press, a reboot brings it back as before |
+| `stop` then look at the app | the lamp turns red, the line says 已停止, the button reads `启动`, and `watchdog status` shows 停止标记: 存在 (stop disarmed the guard) |
+| press `启动` | the lamp turns green and the service runs; the guard re-arms by itself within 5 minutes |
+| reboot after `stop` | the agent stays down; nothing starts it |
+| reboot after `启动` | **also stays down since v0.6.3-pad12** — the owner asked for 开机不自启. The phone repairs itself (stay-on timeout, accessibility binding, ADB port) but the agent waits for a human to press `启动` |
 | `files ls` | exit 0, first line `/sdcard (N 项)`, then `d\|-` rows with size and `yyyy-MM-dd HH:mm`. Open 文件管理 and compare the count |
 | `files ls DCIM 5` | at most 5 rows plus `，只显示前 5 项` when DCIM has more |
 | `files ls ../etc` | exit 2, `路径不可用: /etc（只允许 /sdcard 内的路径）` — **must not** list anything |
@@ -311,8 +312,8 @@ bytes are already correct.
 
 ### 5.3 Self-start: proving the phone comes back on its own
 
-Do this on the phone with 开机自动启动 ticked and self-ADB connected (`shinfo`
-shows `自连 ADB: 已连接`).
+Do this on the phone with the agent running (press `启动` until the lamp is green)
+and self-ADB connected (`shinfo` shows `自连 ADB: 已连接`).
 
 1. `watchdog status` → `守护: 运行中（pid N）`. If it says 未运行, run
    `watchdog arm` once and check again.
@@ -344,9 +345,41 @@ query resolves, `shconnect` fails, and `watchdog arm` answers
 the UI) can restart the agent on cellular. Run the whole of 5.3 on Wi-Fi.
 
 **What this cannot prove.** The guard lives in `/data/local/tmp`, so a reboot
-wipes it — boot recovery is `BootReceiver` (§6). A ROM that aggressively reaps
+wipes it — and since v0.6.3-pad12 `BootReceiver` does not start the agent either,
+so after a reboot a human must press `启动` (§6). A ROM that aggressively reaps
 `uid 2000` background processes can kill the guard too; the app cannot prevent
 that, only notice it the next time it is opened.
+
+### 开机不自启, and the guard's two new rules (v0.6.3-pad12)
+
+The owner asked for one thing in this version: the phone must never start the
+agent by itself. Steps 1-3 prove that; 4-6 prove the two guard repairs that came
+out of the same test round.
+
+1. Press `启动`, wait for the green lamp, then reboot the phone and **do not
+   touch the app afterwards**. The relay must report the phone offline
+   indefinitely: no `am start`, no `START_STICKY` resurrection, no guard
+   (`/data/local/tmp` is wiped by the reboot). Before v0.6.3 `BootReceiver`
+   started the service here.
+2. Now open the app: the lamp goes green by itself and the button reads `停止`.
+   That is the only automatic start left, and it needs somebody to open the app.
+3. Press `停止`, reboot, then open the app: it must **stay down** and the button
+   must read `启动`. A phone that was deliberately silenced cannot be revived by
+   opening it.
+4. `watchdog status` on a phone still running a v0.5.8 guard script, then
+   `watchdog arm`: the answer is
+   ｜已换掉旧脚本并启用守护（pid …, 版本 v0.6.3-pad12, 每 60s 检查一次）｜, and a
+   second `arm` right after answers 未重复启动. Before v0.6.3 the first `arm` said
+   未重复启动 and the old script stayed forever, so a fix to the script could never
+   reach a phone in the field.
+5. `watchdog disarm` must really stop it: `pgrep -f phoneagent-guard.sh` is empty
+   within a second and `watchdog status` says 未运行. The old `pkill -f`
+   (SIGTERM) could not kill the loop while the shell sat inside `sleep 60`, and
+   reported 还有进程 3004 for a process that was already gone. The new command is
+   `pkill -9 -f` three times, 0.5 s apart.
+6. Line 2 of `/data/local/tmp/phoneagent-guard.sh` must read
+   `# ver=v0.6.3-pad12`. Anything else means `arm` did not replace the old copy —
+   which is exactly the regression this check exists for.
 ### `tree` must see a layout change without re-activating the window (v0.6.0-pad12)
 
 This is the bug the whole version exists for. Run it in the order it was found,
@@ -428,9 +461,11 @@ and the screen on.
 7. Put the app in the background (`key home`) for half a minute, then come back:
    the values must be correct **immediately** on return (the page refreshes in
    `onResume`), not after the next 3 s tick.
-8. The controls themselves must be untouched: 启动/停止, 开机自动启动, 屏幕常亮,
-   一键设置权限, 高级设置 (still collapsed) and 保存 inside it, in that order, with
-   those exact words — `click apply <text>` still drives the phone.
+8. The controls themselves must be untouched: 启动/停止, 屏幕常亮, 一键设置权限,
+   高级设置 (still collapsed) and 保存 inside it — five clickable controls, in that
+   order, with those exact words (`click apply <text>` still drives the phone). The
+   开机自动启动 checkbox is **gone** since v0.6.3-pad12; if it is still on screen the
+   old APK is installed.
 9. `tree 200` on this page must show the lamp labels as plain text, not as
    buttons: a lamp that could be clicked would be a lamp the operator presses by
    accident.

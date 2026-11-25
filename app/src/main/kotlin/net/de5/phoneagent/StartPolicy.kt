@@ -29,9 +29,6 @@ internal object StartPolicy {
      */
     fun onRemoteStop(): Decision = Decision(start = false, autoStart = false)
 
-    /** Both conditions are required; a factory-fresh install stays quiet. */
-    fun shouldAutoStart(autoStart: Boolean, configured: Boolean): Boolean = autoStart && configured
-
     /**
      * 界面被打开时该不该顺手把服务拉起来。
      *
@@ -45,7 +42,14 @@ internal object StartPolicy {
     fun shouldStartOnOpen(configured: Boolean, autoStart: Boolean, running: Boolean): Boolean =
         configured && autoStart && !running
 
-    /** Shown under the button; the behaviour is surprising enough to spell out. */
+    /**
+     * Shown under the button; the behaviour is surprising enough to spell out.
+     *
+     * v0.6.3-pad12 改文案：界面上已经没有「开机自动启动」复选框，旧文案指着一个
+     * 不存在的控件。现在讲的是**两件事**：按了启动就一直跑到按停止；重启不会自己
+     * 起来，得再点一次。（守护脚本会在服务消失时把界面拉起来，但那要自连 ADB，
+     * 而且它不是「开机自启」，所以不写进这句给妈妈看的话里。）
+     */
     const val HINT =
-        "停止后不会自动启动，除非重新点「启动」；勾选「开机自动启动」时，重启或装新版会自己拉起。"
+        "点「启动」后它一直运行到你点「停止」；手机重启后不会自己起来，需要再点一次「启动」。"
 }

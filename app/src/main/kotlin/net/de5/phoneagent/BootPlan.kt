@@ -9,10 +9,14 @@ package net.de5.phoneagent
  * 停止 (which clears auto-start) never got a rebuild — the update installed, the
  * binding was dead, and nothing said so.
  *
- * The rule: only the **service start** is gated on auto-start. Restoring the
- * panel timeout, rebuilding accessibility and rediscovering the adb port are
- * repairs of the phone itself; "stop" means "do not run the relay poller", not
- * "leave the phone broken after an update".
+ * The rule: a broadcast only **repairs the phone**. Restoring the panel timeout,
+ * rebuilding accessibility and rediscovering the adb port are fixes to the phone
+ * itself; "stop" means "do not run the relay poller", not "leave the phone broken
+ * after an update".
+ *
+ * v0.6.3-pad12 删掉了最后一步 StartService：老板拍板「开机不自启，需要人工点
+ * 启动」。所以这里连 autoStart/configured 两个参数都不再需要——没有任何一步会
+ * 因为这两个值出现或消失，留着参数只会让人以为还有一条隐藏的自启路径。
  */
 internal object BootPlan {
 
@@ -38,18 +42,10 @@ internal object BootPlan {
 
         /** Rediscover the wireless-debugging port; it changes on every boot. */
         object DiscoverAdbPort : Step()
-
-        /** Start the relay poller — the only step auto-start gates. */
-        object StartService : Step()
     }
 
-    fun steps(
-        action: String,
-        stayOn: Boolean,
-        autoStart: Boolean,
-        configured: Boolean
-    ): List<Step> {
-        val steps = ArrayList<Step>(4)
+    fun steps(action: String, stayOn: Boolean): List<Step> {
+        val steps = ArrayList<Step>(3)
         if (stayOn) steps.add(Step.RestoreStayOn)
         // Only after a replacement, never after a plain boot: on boot Android
         // restores the entry itself, and writing it then would silently override
@@ -58,7 +54,6 @@ internal object BootPlan {
             steps.add(Step.RebuildAccessibility)
         }
         steps.add(Step.DiscoverAdbPort)
-        if (StartPolicy.shouldAutoStart(autoStart, configured)) steps.add(Step.StartService)
         return steps
     }
 }

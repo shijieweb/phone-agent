@@ -46,6 +46,14 @@ class Prefs(context: Context) {
             sp.edit().putString(KEY_AGENT_ID, sanitizeId(value)).apply()
         }
 
+    /**
+     * 用户最后一次按的是「启动」还是「停止」——**不是**「开机自启开关」。
+     *
+     * v0.6.3-pad12 起界面上没有这个复选框了（老板：开机不自启，要人工点启动）。
+     * 键名与语义都保留，因为还有两个消费者：点停止时清掉它，onDestroy 据此决定
+     * 收不收守护（[WatchdogPlan.shouldDisarm]），打开界面时据此决定拉不拉服务
+     * （[StartPolicy.shouldStartOnOpen]）。改键名会让老安装的值丢失，别改。
+     */
     var autoStart: Boolean
         get() = sp.getBoolean(KEY_AUTO_START, true)
         set(value) {

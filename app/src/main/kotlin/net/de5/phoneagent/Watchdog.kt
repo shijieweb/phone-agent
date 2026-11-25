@@ -75,8 +75,12 @@ internal object Watchdog {
     /**
      * 手动 arm。与 [armQuietly] 的区别只有一个：失败要说出来（命令有回显）。
      *
-     * 顺序：先查有没有在跑（防重复）→ 再写脚本 → 再 setsid 起 → 最后回读进程号。
+     * 顺序：查进程 + 查脚本版本 → （旧脚本先强杀）→ 写脚本 → setsid 起 → 回读进程号。
      * 回读是为了「不撒谎」：setsid 是异步的，只看命令退出码会把没起来也说成成功。
+     *
+     * v0.6.3-pad12 加了版本比对：以前发现进程在跑就直接回「已在运行」，真机上
+     * 于是留着一份 v0.5.8 的旧脚本永远换不掉（日志封不了顶）。现在版本对不上
+     * 就走「强杀 → 重写 → 重起」，杀不掉就明确报错，绝不让两个脚本同时跑。
      */
     fun arm(): String {
         if (!SelfAdb.isConnected()) {
@@ -84,13 +88,29 @@ internal object Watchdog {
             return lastNote!!
         }
         val before = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
-        if (before.isNotEmpty()) {
+        val current = WatchdogPlan.parseScriptCurrent(runText(WatchdogPlan.stampCommand()))
+        if (before.isNotEmpty() && current) {
             lastNote = WatchdogPlan.armAlready(before)
             return lastNote!!
         }
         if (!RcAgentService.running) {
             lastNote = WatchdogPlan.armNeedsService()
             return lastNote!!
+        }
+        if (before.isNotEmpty()) {
+            // 旧脚本还在跑：先按 disarm 那条路强杀（标记 + kill -9 三遍）。
+            val killed = run(WatchdogPlan.disarmCommand())
+            if (killed == null || killed.code != 0) {
+                lastNote = WatchdogPlan.armFailed((killed?.text ?: "自连 ADB 未连接").trim())
+                AgentLog.add("watchdog", lastNote!!)
+                return lastNote!!
+            }
+            val left = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
+            if (left.isNotEmpty()) {
+                lastNote = WatchdogPlan.armStuck(left)
+                AgentLog.add("watchdog", lastNote!!)
+                return lastNote!!
+            }
         }
         val written = run(WatchdogPlan.writeCommand())
         if (written == null || written.code != 0) {
@@ -107,6 +127,8 @@ internal object Watchdog {
         val after = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
         lastNote = if (after.isEmpty()) {
             WatchdogPlan.armFailed("脚本已写入但没有进程，检查 /data/local/tmp 是否可执行")
+        } else if (before.isNotEmpty()) {
+            WatchdogPlan.armReplaced(after)
         } else {
             WatchdogPlan.armOk(after)
         }
@@ -128,7 +150,9 @@ internal object Watchdog {
                 return
             }
             val existing = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
-            if (!WatchdogPlan.shouldArm(existing, RcAgentService.running)) {
+            // 版本对不上也算「该 arm」：arm() 会强杀旧脚本再重写（v0.6.3-pad12）。
+            val current = WatchdogPlan.parseScriptCurrent(runText(WatchdogPlan.stampCommand()))
+            if (!WatchdogPlan.shouldArm(existing, current, RcAgentService.running)) {
                 if (existing.isNotEmpty()) {
                     lastNote = WatchdogPlan.armAlready(existing)
                     AgentLog.add("watchdog", lastNote!!)

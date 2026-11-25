@@ -8,11 +8,10 @@ import android.content.Intent
  * Restarts the agent after boot and after our own package is replaced
  * (SPEC.md section 7).
  *
- * Only the service start is gated on auto-start. The other repairs — the panel
- * timeout, the accessibility binding, the adb port — are fixes to the phone, not
- * to the relay, so they run regardless of whether the operator pressed 停止.
- * v0.4.2 returned early on that check and silently skipped the accessibility
- * rebuild, which is how an update left the phone unable to answer any `tree`.
+ * v0.6.3-pad12：这里**不再启动服务**。老板拍板「开机不自启，需要人工点启动」，
+ * 所以广播只做三件修手机的事——恢复常亮超时、重建无障碍绑定、重新发现 adb 端口。
+ * v0.4.2 曾在这三件事前面加了个 auto-start 判断并提前 return，结果一次更新就把
+ * 无障碍绑定留成死的，任何 `tree` 都答「accessibility service not connected」。
  */
 class BootReceiver : BroadcastReceiver() {
 
@@ -44,9 +43,7 @@ class BootReceiver : BroadcastReceiver() {
         val prefs = Prefs(ctx)
         val steps = BootPlan.steps(
             if (packageReplaced) BootPlan.ACTION_MY_PACKAGE_REPLACED else action,
-            prefs.stayOn,
-            prefs.autoStart,
-            prefs.isConfigured()
+            prefs.stayOn
         )
 
         for (step in steps) {
@@ -71,14 +68,6 @@ class BootReceiver : BroadcastReceiver() {
                     // The port is new after every boot and nothing stores it; the
                     // discovery itself runs ~20 s later, once Wi-Fi is up.
                     BootHeal.schedule(ctx)
-                }
-                is BootPlan.Step.StartService -> {
-                    try {
-                        ctx.startForegroundService(Intent(ctx, RcAgentService::class.java))
-                    } catch (t: Throwable) {
-                        // Background start restrictions: nothing to retry here.
-                        AgentLog.add("boot", "启动服务被拒: " + describe(t))
-                    }
                 }
             }
         }

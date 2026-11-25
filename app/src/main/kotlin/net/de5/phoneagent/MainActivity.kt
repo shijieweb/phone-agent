@@ -30,7 +30,8 @@ import kotlin.math.roundToInt
  * user ever sees (SPEC.md section 6).
  *
  * v0.5.8-pad12 cut it down from twelve buttons to one card, one main button, two
- * switches, one permission wizard and a collapsed advanced section. The reason
+ * switches, one permission wizard and a collapsed advanced section (v0.6.3-pad12
+ * dropped the 开机自动启动 switch, leaving one). The reason
  * is not taste: twelve buttons had piled up for two different people on one
  * screen. 启动/停止, the two switches and 一键设置权限 are what the phone's owner
  * actually needs; the relay URL, the secret and the log tools belong to whoever
@@ -47,7 +48,6 @@ class MainActivity : Activity() {
     private lateinit var idEdit: EditText
     private lateinit var secretEdit: EditText
     private lateinit var toggleButton: Button
-    private lateinit var autoStartBox: CheckBox
     private lateinit var stayOnBox: CheckBox
     private lateinit var statusTitle: TextView
     private lateinit var statusDetail: TextView
@@ -129,11 +129,11 @@ class MainActivity : Activity() {
         noticeView.setPadding(0, 8, 0, 16)
         root.addView(noticeView)
 
-        // ---- 3. the two switches ----
-        autoStartBox = addCheckBox(root, UiText.AUTO_START, prefs.autoStart) { checked ->
-            prefs.autoStart = checked
-            refreshStatus()
-        }
+        // ---- 3. the one switch ----
+        // v0.6.3-pad12 去掉了「开机自动启动」：它的生命周期本来就跟启动/停止按钮
+        // 绑在一起（按启动置位、按停止清零），单独一个复选框只会让人以为还有第三
+        // 种状态。老板的原话是「开机不用考虑自启，默认不启动，要人工点启动」。
+        //
         // Same switch the `screen stayon` command flips, so the operator can set
         // it while holding the phone and still find it in force after a reboot.
         stayOnBox = addCheckBox(root, UiText.STAY_ON, prefs.stayOn) { checked ->
@@ -247,6 +247,10 @@ class MainActivity : Activity() {
      * The flag is written *before* the service is touched: if the stop is slow
      * or throws, auto-start is already off and a reboot cannot resurrect the
      * agent the operator just switched off.
+     *
+     * v0.6.3-pad12：这个标志不再有复选框显示（界面上看不到了），但**必须**继续
+     * 写——onDestroy 靠它决定收不收守护、打开界面靠它决定拉不拉服务。它现在的
+     * 唯一含义就是「最后一次按的是启动还是停止」。
      */
     private fun toggleAgent() {
         val decision = StartPolicy.onToggle(RcAgentService.running)
@@ -254,7 +258,6 @@ class MainActivity : Activity() {
         if (decision.start) {
             if (!prefs.isConfigured()) {
                 noticeView.text = "未配置 relay 地址或口令"
-                syncAutoStartBox()
                 return
             }
             try {
@@ -269,13 +272,7 @@ class MainActivity : Activity() {
                 noticeView.text = "停止失败: " + (t.message ?: "")
             }
         }
-        syncAutoStartBox()
         refreshStatus()
-    }
-
-    /** The checkbox mirrors the stored flag, so a button press never lies about it. */
-    private fun syncAutoStartBox() {
-        autoStartBox.isChecked = prefs.autoStart
     }
 
     /**
@@ -393,7 +390,6 @@ class MainActivity : Activity() {
         paintLamp(lampBattery, HealthPlan.lampOn(snap, UiText.LAMP_BATTERY))
         paintLamp(lampAdb, HealthPlan.lampOn(snap, UiText.LAMP_ADB))
         toggleButton.text = if (snap.serviceRunning) UiText.STOP else UiText.START
-        if (autoStartBox.isChecked != prefs.autoStart) autoStartBox.isChecked = prefs.autoStart
         if (stayOnBox.isChecked != prefs.stayOn) stayOnBox.isChecked = prefs.stayOn
         permHint.text = PermPlan.hint(currentStep())
     }

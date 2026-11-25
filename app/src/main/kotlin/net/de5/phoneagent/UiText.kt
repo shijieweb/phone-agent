@@ -6,19 +6,22 @@ package net.de5.phoneagent
  * 为什么值得单独拎出来：操作员在真机上靠 `click apply <文字>` 点，不靠坐标。
  * 两个控件同名就点错，文字随状态乱变就点不到。所以文字在这里集中定义，
  * [clickable] 给单测用——重复一次就红。
+ *
+ * v0.6.3-pad12 去掉了「开机自动启动」：那个开关的生命周期本来就和启动/停止按钮
+ * 绑在一起（按启动就置位、按停止就清零），单独摆一个复选框只会让人以为还有
+ * 第三种状态。现在只剩六个可点文字。
  */
 internal object UiText {
 
     const val START = "启动"
     const val STOP = "停止"
     const val SAVE = "保存"
-    const val AUTO_START = "开机自动启动"
     const val STAY_ON = "屏幕常亮"
     const val PERMISSION = "一键设置权限"
     const val ADVANCED = "高级设置"
 
     /** 启动/停止是同一个按钮的两个状态，永远只出现一个，但两个字符串仍互不相同。 */
-    val clickable = listOf(START, STOP, SAVE, AUTO_START, STAY_ON, PERMISSION, ADVANCED)
+    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED)
 
     /** 高级区里三个输入框的标题（不可点，但也不能重名，否则看图对不上）。 */
     const val RELAY_LABEL = "Relay base URL"

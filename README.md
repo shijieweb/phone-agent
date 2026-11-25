@@ -22,7 +22,7 @@ through the live agent and shows the answer — same `Commands.parse` path as th
 relay, no round trip. See `SPEC.md` §6.1.
 
 Since v0.5.8-pad12 the config page is written for the phone's owner, not for me:
-one big 运行中 / 已停止 word, one 启动 button, two switches, and a single
+one big 运行中 / 已停止 word, one 启动 button, one 屏幕常亮 switch, and a single
 一键设置权限 button that does the next missing thing instead of asking which of
 four buttons to press. URL / secret moved into a collapsed 高级设置 section.
 
@@ -47,6 +47,19 @@ a fixed order, and the verdict is red the moment the service stops no matter how
 green the rest is. All four facts are re-probed every 3 s while the page is in
 front (never cached, never on a background thread, never any network). See
 `SPEC.md` §6.
+
+Since v0.6.3-pad12 **nothing starts the agent by itself.** The owner asked for
+开机不自启, so `BootReceiver` now only repairs the phone (stay-on timeout,
+accessibility binding, wireless-ADB port) and never calls
+`startForegroundService`; `BootPlan.steps` has exactly three steps and a test
+asserts a plain boot returns only the ADB-port discovery. The two ways back are
+the 启动 button and opening the app (still gated on `auto_start`, so a phone you
+silenced stays silent). The 开机自动启动 checkbox is gone — it only ever mirrored
+what the button had already decided. Two guard repairs came out of the same
+round: `disarm` uses `pkill -9` three times (`SIGTERM` could not kill the
+`sleep 60` loop, so it reported a live pid that was already dead), and the
+script now carries `# ver=…` on line 2 so `arm` replaces a stale copy instead
+of answering 未重复启动 forever. See `SPEC.md` §3.17 and §7.
 
 Since v0.6.1-pad12 the accessibility service also subscribes to content-change
 events (collected, never acted on), which is what keeps that cache fresh; and
@@ -75,14 +88,15 @@ left at `/data/local/tmp/phoneagent-tree.xml` as evidence. See `SPEC.md` §5.1.
 | Calls | `call [apply] <number>` (dry run until `apply`), `call answer`, `call hangup`, `call state`, `call speaker [on\|off]` (no argument = report) |
 | Animation | `anim [get]`, `anim set on\|off\|<scale>`, `anim save`, `anim restore` — turn the three animation scales off to make the UI snap |
 | Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [show]` / `shkey regen [apply]` / `shkey import <url>` — the app talks to **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
-| Self-start | opening the app starts the agent again when 开机自动启动 is ticked; a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`, and `watchdog [status\|arm\|disarm]` drives it by hand |
+| Self-start | only two doors, and neither is the boot: opening the app starts the agent again (unless you pressed 停止), and a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`. A reboot never starts it — press 启动. `watchdog [status\|arm\|disarm]` drives the guard by hand |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative, and it is the same rule from both doors: pressing 停止 in
 the app and sending `stop` over the relay both clear "start on boot" before the
 service is touched, so the guard is disarmed and the agent cannot come back by
 itself after a reboot, an update, a `force-stop` or somebody opening the UI.
-Re-arm it with the `启动` button or the `开机自动启动` checkbox.
+Re-arm it with the `启动` button — since v0.6.3-pad12 that is the only way, and
+it is deliberate: the owner wanted 开机不自启.
 
 Everything is driven by one-line commands delivered over the relay's long poll,
 and every command returns `exit` + `stdout` + `stderr`.
@@ -121,12 +135,15 @@ mDNS multicast does not leave a mobile-data interface — measured on cellular
 `shconnect` fails and `watchdog arm` answers `守护未启用：自连 ADB 未连接`. On
 cellular only trigger 1 (opening the UI) can restart the agent; it needs no ADB.
 
-Three rules keep it honest: `arm` probes `pgrep -f phoneagent-guard.sh` first so a
-5-minute re-arm never stacks copies; `arm` is skipped with one log line
+Four rules keep it honest: `arm` probes `pgrep -f phoneagent-guard.sh` first so a
+5-minute re-arm never stacks copies, and replaces the script when its `# ver=` stamp
+does not match the running build; `arm` is skipped with one log line
 (`守护未启用：自连 ADB 未连接`) when self-ADB is down, instead of logging a
 refusal every five minutes; and pressing 停止 writes the marker **and** kills the
-guard, so "stop" still means stop — a killed guard would otherwise be resurrected
-by the next heartbeat and the service would return two minutes later.
+guard with `pkill -9` (three tries, 0.5 s apart — `SIGTERM` waits out the
+`sleep 60` and reports a pid that is already gone), so "stop" still means stop — a
+killed guard would otherwise be resurrected by the next heartbeat and the service
+would return two minutes later.
 
 `status` gains one field, `"guard":"running"|"off"|"unknown"`; no existing field
 changed. The guard does not survive a reboot (`/data/local/tmp` is wiped — the

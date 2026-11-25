@@ -38,7 +38,7 @@ Ship these files (all under `app/src/main/kotlin/net/de5/phoneagent/`):
 | `Gestures.kt` | tap / long press / swipe via `dispatchGesture` |
 | `ScreenShot.kt` | Accessibility screenshot → downscaled JPEG → blob upload (base64 only on `b64`/fallback) |
 | `LocationHelper.kt` | One-shot fix + periodic reporting |
-| `BootReceiver.kt` | Restart the service after boot / app update |
+| `BootReceiver.kt` | Repair the phone after boot / app update — it never starts the service (v0.6.3-pad12) |
 | `Selector.kt` | Parse an element selector (`SEL`) — pure logic, no Android imports |
 | `ElementActions.kt` | Element-level click / long click / scroll / IME enter |
 | `Wake.kt` | Layered screen wake (`wake` command) |
@@ -672,9 +672,9 @@ screen stayon [on|off] | screen timeout MS | screen on | screen off
   Android default). `screen stayon` with no argument is the **report** form:
   `常亮: 开|关 当前超时=…`, so it never changes anything.
 - The prefs flag exists because the ROM rewrites `screen_off_timeout` on every
-  boot: `BootReceiver` re-applies it **before** the auto-start check and
-  independently of whether the relay is configured — the reason to set it (a
-  phone that must answer at 3 a.m.) has nothing to do with the relay.
+  boot: `BootReceiver` re-applies it on every boot and independently of whether
+  the relay is configured — the reason to set it (a phone that must answer at
+  3 a.m.) has nothing to do with the relay.
 - `screen timeout MS` writes one explicit timeout, clamped 15000..2147483647,
   and clears `stay_on` — a hand-typed timeout is the newer decision, so a
   reboot must not put "never" back.
@@ -1036,15 +1036,22 @@ every 60 s:
 | `/data/local/tmp/phoneagent-guard.log` | one `YYYY-MM-DDTHH:MM:SS restart` line per revival |
 | `/data/local/tmp/phoneagent-guard.off` | stop marker; its existence is the first thing the loop checks |
 
-**Three rules the guard has to obey**, each with a test:
+**Four rules the guard has to obey**, each with a test:
 
 - **Never two copies.** `arm` probes `pgrep -f phoneagent-guard.sh` first and
   returns `…未重复启动` with the existing pids instead of starting another. The
   heartbeat re-arms on a 5 min cadence (`Watchdog.ensureArmed`), so without this
   rule a long-running phone would collect a copy per heartbeat.
 - **`arm` only when there is something to guard.** `WatchdogPlan.shouldArm(pids,
-  serviceRunning)` is `pids.isEmpty() && serviceRunning` — a guard started before
+  scriptCurrent, serviceRunning)` is
+  `serviceRunning && (pids.isEmpty() || !scriptCurrent)` — a guard started before
   the service exists would immediately `am start` a UI for no reason.
+- **A stale script is worth replacing.** The script carries its version on line 2
+  (`# ver=v0.6.3-pad12`); `arm` counts hits with
+  `grep -c ver=<version> <path>` and, when the count is 0, kills the old copy
+  before writing the new one. Without this, a phone armed once by v0.5.8 kept
+  running v0.5.8's script forever: `arm` saw a live pid and answered 未重复启动,
+  so a fix to the script could never reach a phone in the field.
 - **Stop means stop, through both doors.** Pressing 停止 writes the marker *and*
   `pkill -f phoneagent-guard.sh`. The relay's `stop` command does exactly the same,
   because it routes through the same rule: `StartPolicy.onRemoteStop()` returns the
@@ -1468,14 +1475,23 @@ the operator — top to bottom:
    so the button and `BootReceiver` can never disagree. Without this, "stop" was
    a suggestion: a reboot, an app update or `START_STICKY` would bring the agent
    back on a phone nobody was watching.
-3. **Two switches.** `开机自动启动` binds `Prefs.autoStart`, written on every
-   change; the button updates it too, and the box is re-synced on refresh so it
-   never shows a stale value. `屏幕常亮` is the same switch as `screen stayon`
-   (§3.14): it calls `ScreenOps.stayOn` — never a second write path — and then
-   re-reads `Prefs.stayOn`, so a refused write leaves the box unchecked instead
-   of showing a state that is not in force. A hint line under them carries
-   `StartPolicy.HINT`: 停止后不会自动启动，除非重新点「启动」；勾选「开机自动启动」时，
-   重启或装新版会自己拉起。
+3. **One switch.** `屏幕常亮` is the same switch as `screen stayon` (§3.14): it
+   calls `ScreenOps.stayOn` — never a second write path — and then re-reads
+   `Prefs.stayOn`, so a refused write leaves the box unchecked instead of showing
+   a state that is not in force. A hint line under it carries `StartPolicy.HINT`:
+   点「启动」后它一直运行到你点「停止」；手机重启后不会自己起来，需要再点一次「启动」。
+
+   v0.6.3-pad12 removed the second switch, `开机自动启动`. It was never a
+   separate decision: `Prefs.autoStart` is written by the 启动/停止 button itself
+   (`StartPolicy.onToggle`) and read by `shouldStartOnOpen` and
+   `shouldDisarm`, so the checkbox could only ever show — or fight — what the
+   button had already decided. The owner asked for "开机不自启，要人工点启动";
+   with the boot start gone (§7) the switch had no state left to display, and a
+   checkbox that does nothing is worse than no checkbox. The **flag** stays
+   (key name and default untouched — renaming it would silently reset every
+   installed phone), and `toggleAgent` keeps writing it: it is still the gate
+   that stops a relay `stop` or a `START_STICKY` restart from reviving the
+   guard (§3.17).
 4. **`一键设置权限` — one wizard instead of four buttons.** Four buttons asked the
    owner to know *which* permission was missing. The wizard asks `PermPlan.next`
    instead and does exactly the next missing thing, so pressing it repeatedly
@@ -1577,10 +1593,13 @@ process, same executor.
   renewed each iteration); release it in `onDestroy`. Guard with try/catch.
 - The poll loop runs on a dedicated `Thread` (or `HandlerThread`), never the main
   thread. All accessibility calls must run on the **main thread**.
-- **"Stop" must mean stop.** `BootReceiver` starts the service only when
-  `StartPolicy.shouldAutoStart(prefs.autoStart, prefs.isConfigured())` is true, and
-  the stop button clears `auto_start` first. There is exactly one rule, in
-  `StartPolicy`, used by both sides and unit-tested (`StartPolicyTest`).
+- **Nothing starts the service by itself.** Since v0.6.3-pad12 `BootReceiver`
+  only *repairs* the phone (stay-on timeout, accessibility binding, wireless-ADB
+  port) and never calls `startForegroundService`; `BootPlan.steps` has exactly
+  three steps and `BootPlanTest` asserts a plain boot returns only
+  `DiscoverAdbPort`. The two ways back are the 启动 button and `onCreate`'s
+  `StartPolicy.shouldStartOnOpen`, which is still gated on `auto_start` so that a
+  phone the operator silenced cannot be revived by somebody opening the app.
 - The heartbeat (every `HEARTBEAT_CHECK_MS = 15 s`) also drives two self-heals, both
   throttled and both best-effort: accessibility (`selfHealAccessibility`, 5 min
   cadence) and the wireless-debugging port (`observeAdbPort`, 10 min cadence,
@@ -1695,11 +1714,9 @@ framework** — do not mock `AccessibilityService`. Required cases:
     count, a path containing spaces, `files df` refusing arguments, `files pull`
     verbatim, `call speaker` report/on/off/synonyms and its refusal of anything
     else, `a11y status` vs `a11y heal` vs `a11y rescue`.
- 12. The v0.4.3 repairs, both of which failed silently before: `BootPlan` (the
-     step list keeps `RebuildAccessibility` when `autoStart=false` — the v0.4.2
-     rebuild never ran because the auto-start gate returned early — while
-     `StartService` alone stays gated; a plain boot never rebuilds; `stayOn`
-     restores the timeout; the full order) and `A11yOps` (a fake `SecureSink`
+ 12. The v0.4.3 repairs, both of which failed silently before: `BootPlan` (a
+     plain boot never rebuilds; `stayOn` restores the timeout; the full order) and
+     `A11yOps` (a fake `SecureSink`
      proves the list is **deleted** rather than overwritten with an empty
      string, that the master switch goes 0 -> 1 around the write, that the 2 s
      sleep is actually requested, that other services keep their order, and
@@ -1773,6 +1790,19 @@ framework** — do not mock `AccessibilityService`. Required cases:
       rule, and the v0.5.5 leak (guard reviving a silenced agent 60 s later) cannot
       come back through either door.
 
+  20. The v0.6.3-pad12 pair. `BootPlan` has exactly three steps; a plain boot
+      returns only `DiscoverAdbPort`, and no action × `stayOn` combination can
+      produce a fourth — the strongest available statement that nothing starts the
+      service after a boot (the old `StartService` step is gone and
+      `BootPlanTest` fails if it comes back). And the two guard repairs:
+      `disarmCommand` uses `pkill -9` three times, 0.5 s apart, and still reads the
+      process table; the script carries `# ver=<version>` on line 2 with no single
+      quote in it (it is written with `echo '…'`); `parseScriptCurrent` accepts only
+      whole-number lines, so the PTY's own echo of the `grep -c` command cannot fake
+      a hit; `shouldArm` re-arms over a live-but-stale pid and still refuses when
+      the service is down; `StartPolicy.HINT` no longer names the removed checkbox
+      while still promising 启动 / 停止 / 重启.
+
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions
 that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
@@ -1784,8 +1814,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (528 cases at
-  v0.5.6-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (631 cases at
+  v0.6.3-pad12).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.
