@@ -156,6 +156,9 @@ class RcAgentService : Service() {
         note = null
         running = true
         current = this
+        // v0.6.5-pad12：服务起来了就把 App 侧停止标记清掉，否则守护脚本会以为
+        // 老板还按着「停止」，服务一挂就再也不拉起。
+        StopFlag.clear(this)
 
         // Supersede any previous incarnation before spawning our own workers, so
         // a stale thread still blocked in `relay.poll()` is dead the moment it
@@ -196,6 +199,9 @@ class RcAgentService : Service() {
             // 60 秒后它把服务拉回来（v0.5.5 的真漏洞，v0.5.6 修）。
             onStopRequested = {
                 prefs.autoStart = StartPolicy.onRemoteStop().autoStart
+                // v0.6.5-pad12：relay 的 stop 与界面按「停止」走同一条路——先落
+                // App 侧停止标记，守护脚本下一轮自己退出（蜂窝下也能落，不需要 ADB）。
+                StopFlag.set(this)
                 stopSelf()
             },
             // Screenshots leave through PUT /agent/blob, not stdout: the relay

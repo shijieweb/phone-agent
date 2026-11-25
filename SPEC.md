@@ -165,7 +165,7 @@ reach the `unknown command` branch.
 | `loc` | one location fix, stdout = one-line JSON |
 | `locloop INTERVAL` | start periodic reporting every `INTERVAL` s (min 30, max 3600) |
 | `locstop` | stop periodic reporting |
-| `stop` | stop the agent service (result is sent first). **Identical to pressing 停止**: it clears `auto_start` before `stopSelf()`, so the guard is disarmed and neither a reboot nor a UI open can revive it (see §3.17) |
+| `stop` | stop the agent service (result is sent first). **Identical to pressing 停止**: it clears `auto_start` and writes the app-side stop marker `/sdcard/.phoneagent-stop` before `stopSelf()`, so the guard exits on its next beat even with no self-ADB (cellular), and neither a reboot nor a UI open can revive it (see §3.17) |
 | `install URL` | download to cache, then open the system installer on it (see §3.3) |
 | `uninstall PACKAGE` | open the system uninstall confirmation for `PACKAGE`; a package that is not installed is already done |
 | `confirm [apply] [t=SECONDS] TEXT` | **dry run** by default; `apply` waits for a *pressable* node whose text/desc contains `TEXT` and presses it (see §3.2) |
@@ -1079,19 +1079,44 @@ never downloaded. Its loop:
 
 ```
 every 60 s:
-  if the stop marker exists -> exit
+  if either stop marker exists -> exit
   if `dumpsys activity services net.de5.phoneagent` mentions RcAgentService -> sleep
-  else append a timestamp to phoneagent-guard.log and `am start -n …/.MainActivity`
+  else append a timestamp to phoneagent-guard.log, then
+       `am start-foreground-service -n …/.RcAgentService`
+    || `am start -n …/.MainActivity`   (fallback only)
 ```
 
-`am start` works from `uid 2000` (measured: `Starting: Intent { cmp=…/.MainActivity }`,
+Both `am` verbs work from `uid 2000` (measured: `Starting: Intent { cmp=…/.MainActivity }`,
 `topResumedActivity` becomes ours), so the guard needs nobody to touch the screen.
+
+**Service first, UI only as a fallback (v0.6.5-pad12).** `am start` on the activity
+necessarily brings the UI to the front, and that is what the owner complained about:
+after pressing 停止 the screen popped up again every 60 s. `am
+start-foreground-service` revives the service without building any UI, so it is
+tried first. It cannot be the only path: from Android 12 on, starting a foreground
+service from the background may be refused (`BackgroundServiceStartNotAllowed`), and
+a guard that refuses to revive anything is worse than one that occasionally flashes
+a page. Hence `|| am start`: the activity runs only when the service start failed.
 
 | File | Purpose |
 |---|---|
 | `/data/local/tmp/phoneagent-guard.sh` | the loop above, `chmod 755` |
 | `/data/local/tmp/phoneagent-guard.log` | one `YYYY-MM-DDTHH:MM:SS restart` line per revival |
-| `/data/local/tmp/phoneagent-guard.off` | stop marker; its existence is the first thing the loop checks |
+| `/data/local/tmp/phoneagent-guard.off` | stop marker written by `disarm` (uid 2000 only) |
+| `/sdcard/.phoneagent-stop` | stop marker the **app itself** can write (v0.6.5-pad12) |
+
+**Two stop markers, because one of them needs ADB (v0.6.5-pad12).** The
+`/data/local/tmp` marker and `pkill` are both reachable only through self-ADB. On
+cellular there is no self-ADB (§ below), so pressing 停止 could write neither: the
+service died, the guard survived, and 60 s later it revived the UI. The owner
+reported exactly that. `StopFlag` therefore writes `/sdcard/.phoneagent-stop` —
+the app holds `MANAGE_EXTERNAL_STORAGE`, so it can write the shared volume's root,
+and a shell running as `uid 2000` sits in `sdcard_rw` and can read it. Both markers
+are checked twice, once before the loop and once per beat. `StopFlag.set` never
+throws: it returns false and logs one line when `/sdcard` is not writable (no all-files
+access), because a silent failure here looks exactly like the original bug. `arm`
+clears the flag **before** it probes, otherwise a leftover flag makes the fresh script
+`exit 0` on its first beat — `arm` would report success and the guard would vanish.
 
 **Four rules the guard has to obey**, each with a test:
 
@@ -1109,8 +1134,10 @@ every 60 s:
   before writing the new one. Without this, a phone armed once by v0.5.8 kept
   running v0.5.8's script forever: `arm` saw a live pid and answered 未重复启动,
   so a fix to the script could never reach a phone in the field.
-- **Stop means stop, through both doors.** Pressing 停止 writes the marker *and*
-  `pkill -f phoneagent-guard.sh`. The relay's `stop` command does exactly the same,
+- **Stop means stop, through both doors and without ADB.** Pressing 停止 writes the
+  app-side marker `/sdcard/.phoneagent-stop` (no ADB needed) *and* goes through
+  `disarm`, which writes `/data/local/tmp/…off` and `pkill -f phoneagent-guard.sh`.
+  The relay's `stop` command does exactly the same,
   because it routes through the same rule: `StartPolicy.onRemoteStop()` returns the
   identical `Decision(start=false, autoStart=false)` that `onToggle(wasRunning=true)`
   returns, and the service lambda applies it before `stopSelf()`. v0.5.5 got this
@@ -1871,8 +1898,8 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 
 - `./gradlew assembleDebug` succeeds on a clean GitHub runner (that is the only
   build we have — there is no local Android SDK).
-- `./gradlew test` passes with the §10 tests, **0 failures** (631 cases at
-  v0.6.3-pad12).
+- `./gradlew test` passes with the §10 tests, **0 failures** (see the count in the
+  release commit for the current version).
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.

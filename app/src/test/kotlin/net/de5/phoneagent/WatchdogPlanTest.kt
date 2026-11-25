@@ -336,4 +336,94 @@ class WatchdogPlanTest {
         assertTrue(text.contains("pid 3004"))
         assertTrue("要给出下一步", text.contains("kill -9"))
     }
+
+    // ------------------------------------------- App 侧停止标记（v0.6.5-pad12）
+
+    /**
+     * 老板报的障：点了停止，界面每 60 秒自己弹回前台。
+     *
+     * 因为能停住脚本的两个开关（/data/local/tmp 的 off 标记、pkill）都只能经自连
+     * ADB 落地，走蜂窝时一个都写不了。所以脚本还要看一个 **App 自己能写** 的标记，
+     * 位置必须和 [StopFlag.PATH] 完全一致——两边写岔了就等于没加。
+     */
+    @Test
+    fun scriptAlsoHonoursTheStopFlagTheAppCanWrite() {
+        val script = WatchdogPlan.script()
+        val marker = StopFlag.PATH
+        assertEquals("/sdcard/.phoneagent-stop", marker)
+        assertEquals("字面量必须与 StopFlag 一致", marker, WatchdogPlan.STOP_MARKER)
+        // 与 OFF_MARKER 一样两处：进来先看一次，循环里每轮再看一次。
+        val hits = Regex(Regex.escape(marker)).findAll(script).count()
+        assertEquals("两处判断", 2, hits)
+        assertTrue(
+            "存在就自杀，不能只是记一行日志",
+            script.contains("if [ -f " + marker + " ]; then exit 0; fi")
+        )
+    }
+
+    @Test
+    fun theStopFlagCheckSitsBesideTheOldMarkerNotInsideTheServiceBranch() {
+        // 位置错了就白搭：写在 if ! dumpsys 里面时，服务还在跑的那几轮根本不会被检查。
+        val lines = WatchdogPlan.script().trimEnd('\n').split("\n")
+        val header = lines.indexOfFirst { it.startsWith("if [ -f " + WatchdogPlan.STOP_MARKER) }
+        val loop = lines.indexOf("while true; do")
+        val loopCheck = lines.indexOfFirst {
+            it.trim().startsWith("if [ -f " + WatchdogPlan.STOP_MARKER) && it.startsWith("  ")
+        }
+        assertTrue("循环之前要先看一眼", header in 0 until loop)
+        assertTrue("循环里也要看", loopCheck > loop)
+        assertTrue(
+            "两处都不能落在服务判定分支里",
+            lines.none { it.trim().startsWith("if [ -f " + WatchdogPlan.STOP_MARKER) && it.startsWith("    ") }
+        )
+    }
+
+    /**
+     * 拉起方式：先拉服务，拉不动才回退拉界面。
+     *
+     * 拉 Activity 必然把界面弹到前台——这正是老板被打断的原因。但 Android 12+
+     * 从后台起前台服务可能被拦（BackgroundServiceStartNotAllowed），所以 Activity
+     * 兜底不能删：宁可偶尔弹一次，也不能让服务永远起不来。
+     */
+    @Test
+    fun theGuardAsksTheServiceBackBeforeItTouchesTheUi() {
+        val script = WatchdogPlan.script()
+        val service = "am start-foreground-service -n " + WatchdogPlan.D + "PKG/." +
+            WatchdogPlan.SERVICE_CLASS + " >/dev/null 2>&1"
+        assertTrue("必须用 start-foreground-service: " + script, script.contains(service))
+        assertTrue(
+            "Activity 兜底不许删",
+            script.contains("am start -n " + WatchdogPlan.D + "PKG/.MainActivity >/dev/null 2>&1")
+        )
+        val serviceAt = script.indexOf(service)
+        val uiAt = script.indexOf("am start -n " + WatchdogPlan.D + "PKG/.MainActivity")
+        assertTrue("先服务后界面", serviceAt in 0 until uiAt)
+        assertTrue("两条要串成 ||，服务成功就不弹界面", script.substring(serviceAt, uiAt).trimEnd().endsWith("||"))
+    }
+
+    @Test
+    fun theServiceFallbackStillCarriesNoSingleQuote() {
+        // 与 writeCommand 同一条纪律：行内出现单引号会把 echo '行' 截断。
+        assertFalse(WatchdogPlan.script().contains("'"))
+    }
+
+    /**
+     * arm 之前先清 App 侧标记。
+     *
+     * 忘了清的后果：上次停止留下的标记让新脚本第一轮就 exit 0，arm 报「已启用」、
+     * 守护秒退，比根本起不来更难查。
+     */
+    @Test
+    fun armClearsTheStopFlagBeforeItProbes() {
+        val file = java.io.File.createTempFile("stopflag-arm", ".tmp")
+        file.delete()
+        try {
+            assertTrue("先摆一个上次停止留下的标记", StopFlag.set(file))
+            assertTrue("arm 必须报告真的清掉了", WatchdogPlan.prepareArm(file))
+            assertFalse("清完之后不许还在", StopFlag.isSet(file))
+            assertFalse("本来就没有时不算清掉（幂等，别撒谎）", WatchdogPlan.prepareArm(file))
+        } finally {
+            file.delete()
+        }
+    }
 }

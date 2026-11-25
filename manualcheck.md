@@ -497,6 +497,28 @@ and the screen on.
    start it (`adb shell am start -n net.de5.phoneagent/.DebugActivity` is
    refused: not exported).
 
+### 停止之后界面不许自己弹回来 (v0.6.5-pad12)
+
+1. Start the agent and wait until 守护 shows a pid (`watchdog status`). Put the
+   phone on **mobile data only** — wireless debugging off, self-ADB disconnected —
+   because that is the case the old code could not handle.
+2. Press 停止. The status card goes red 已停止.
+3. Put the phone down and **watch it for 130 s** without touching it. Nothing may
+   come to the front: no config page, no debug page, no white flash. On v0.6.3 the
+   guard pulled the UI up roughly every 60 s; that is the regression this proves.
+4. Check the marker exists: `adb shell ls -l /sdcard/.phoneagent-stop` (or
+   `sh apply ls -l /sdcard/.phoneagent-stop` once self-ADB is back). Delete it and
+   the guard would revive the app again — the file is the whole mechanism.
+5. Press 启动 again. The card goes green within 3 s and the marker is gone
+   (`ls` says No such file). `watchdog status` shows a pid again.
+6. With self-ADB connected, force-kill the app (`am force-stop net.de5.phoneagent`)
+   and wait one beat: the agent must come back **without the UI taking over the
+   screen**. If the phone refuses a background foreground-service start, the activity
+   fallback runs and the page does appear — that is allowed, and the guard log line
+   still records the revival.
+7. `watchdog arm` twice in a row. The second answer is 未重复启动, and no guard exits
+   immediately after being armed (that would mean the stop marker was left behind).
+
 ### Log size and trimming (v0.5.8-pad12)
 
 1. On the debug page the summary carries a fourth line: `日志: N 行/丢弃 M · 守护日志 X KB · APK 残留 K 个`.

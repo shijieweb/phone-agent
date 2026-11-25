@@ -260,12 +260,17 @@ class MainActivity : Activity() {
                 noticeView.text = "未配置 relay 地址或口令"
                 return
             }
+            // 启动前清掉 App 侧停止标记，否则守护脚本（如果还在跑）会继续按「停止」处理。
+            StopFlag.clear(this)
             try {
                 startForegroundService(Intent(this, RcAgentService::class.java))
             } catch (t: Throwable) {
                 noticeView.text = "启动失败: " + (t.message ?: "")
             }
         } else {
+            // v0.6.5-pad12：先落 App 侧停止标记再停服务。这个标记 /sdcard 上，不需要
+            // 自连 ADB 就能写——走蜂窝时正是靠它让守护脚本自己退出，界面不再被拉回前台。
+            StopFlag.set(this)
             try {
                 stopService(Intent(this, RcAgentService::class.java))
             } catch (t: Throwable) {

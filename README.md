@@ -48,6 +48,17 @@ green the rest is. All four facts are re-probed every 3 s while the page is in
 front (never cached, never on a background thread, never any network). See
 `SPEC.md` §6.
 
+Since v0.6.5-pad12 pressing 停止 really does silence the phone, on cellular too.
+The guard script could only be stopped through self-ADB, and on mobile data there is
+no self-ADB, so the guard kept reviving the app every 60 s and the screen popped up in
+front of whatever the owner was doing. The app now writes its own stop marker to
+`/sdcard/.phoneagent-stop` — a place both the app and the uid-2000 shell can reach —
+and the script exits on its next beat when it sees it. When the guard does revive the
+agent it now asks for the **service** (`am start-foreground-service`), which builds no
+UI, and only falls back to the activity if that is refused. `watchdog arm` clears the
+marker before probing, so an old stop cannot make a fresh guard exit immediately. See
+`SPEC.md` §3.17.
+
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
 port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s

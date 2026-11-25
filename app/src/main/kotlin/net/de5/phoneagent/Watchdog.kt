@@ -87,6 +87,8 @@ internal object Watchdog {
             lastNote = WatchdogPlan.armUnavailable()
             return lastNote!!
         }
+        // v0.6.5-pad12：probe 之前先清 App 侧停止标记，否则新脚本第一轮就自杀。
+        if (WatchdogPlan.prepareArm()) AgentLog.add("watchdog", "arm 前清掉了上次停止留下的标记")
         val before = WatchdogPlan.parsePids(runText(WatchdogPlan.probeCommand()))
         val current = WatchdogPlan.parseScriptCurrent(runText(WatchdogPlan.stampCommand()))
         if (before.isNotEmpty() && current) {
