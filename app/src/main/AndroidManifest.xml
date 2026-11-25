@@ -181,6 +181,16 @@
             </intent-filter>
         </activity>
 
+        <!-- The operator's own screen (v0.5.7-pad12): one command line, its
+             answer, and the six shortcuts used by hand. Reachable only by
+             pressing the version line on the config page five times — not
+             exported, and kept out of the task list like WakeActivity. -->
+        <activity
+            android:name=".DebugActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:label="@string/debug_activity_label" />
+
         <!-- ================== AGENT CORE ================== -->
         <!-- Holds the outbound long-poll to the relay. Runs until explicitly
              stopped; restarted from BootReceiver and from MainActivity. -->

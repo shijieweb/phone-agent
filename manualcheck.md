@@ -347,6 +347,33 @@ the UI) can restart the agent on cellular. Run the whole of 5.3 on Wi-Fi.
 wipes it — boot recovery is `BootReceiver` (§6). A ROM that aggressively reaps
 `uid 2000` background processes can kill the guard too; the app cannot prevent
 that, only notice it the next time it is opened.
+### The debug page (v0.5.7-pad12)
+
+1. Open the app and scroll to the bottom. The last line is just `v0.5.7-pad12` —
+   no hint, no button, nothing that says it does anything.
+2. Tap it **five times within three seconds**. The debug page opens. Go back,
+   tap it once, wait five seconds, tap four more times: it must **not** open
+   (the presses aged out).
+3. On the debug page, the summary reads 版本 / 服务 / 无障碍 / 电量 / 自连 ADB.
+   With the agent started, 服务 shows 运行中; press 停止 on the config page and
+   come back — it shows 已停止 within 2 s.
+4. Type `status` and press 执行. The answer starts with `exit=0` and carries the
+   same JSON the relay would return. Type `bogus` → `exit=2` and
+   `unknown command: bogus`.
+5. Press 节点树 tree 30 → an `exit=0` node dump, clipped with
+   `…（已截断，共 N 字符，只显示前 M 字符）` if it is long. Press 截图 shot →
+   the shot's one-line JSON, not a freeze.
+6. Stop the agent on the config page, come back to the debug page, press 执行 on
+   `status`: the panel says 服务未运行，先回配置页点启动. It must not crash and
+   must not silently do nothing.
+7. Press 诊断 Diagnostics.run → 正在诊断… for up to a minute, then the clipboard
+   holds the full report and the panel shows a clipped preview. Press
+   状态与日志 → instant, zero network, clipboard again.
+8. Press 返回配置页 → back to the config page, agent state untouched.
+9. The debug page must not appear in recents, and nothing outside the app can
+   start it (`adb shell am start -n net.de5.phoneagent/.DebugActivity` is
+   refused: not exported).
+
 ### Family scenario: a film on the tablet (the reason `dl` exists)
 
 1. Get a direct video link (any host, `http` or `https`, no login page).

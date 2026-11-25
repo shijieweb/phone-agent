@@ -1320,6 +1320,47 @@ layout file). Fields:
 
 Buttons must not crash when the service was never started.
 
+### 6.1 Two screens, two people (v0.5.7-pad12)
+
+The one screen above had grown twelve buttons for two different jobs, so it is
+now split in two. The split is a *door*, not a permission: same APK, same
+process, same executor.
+
+- **`MainActivity` — the config page.** Everything in §6 stays exactly where it
+  was, plus one new line at the very bottom: `v` + `BuildConfig.VERSION_NAME`
+  in a plain `TextView` with no hint text of any kind. Five presses within 3 s
+  (`TapGate(5, 3_000)`, timed with `SystemClock.elapsedRealtime` — a wall clock
+  can jump and strand the door shut) start `DebugActivity`. A gate that fires
+  empties itself, so a stray tap afterwards is just a tap.
+- **`DebugActivity` — the operator's page.** `exported="false"`,
+  `excludeFromRecents="true"`, not in the launcher, built in code like the config
+  page (`ScrollView` + `LinearLayout`, no XML). Four blocks:
+  - **A. Summary**, refreshed every 2 s: version, service running/stopped,
+    accessibility on/off, battery percent (`batteryPercent`), self-ADB
+    connected/not (`SelfAdb.isConnected`). All static reads — no network.
+  - **B. Command panel.** One `EditText` and 执行 / 清空. The line goes through
+    `Commands.parse` and the **live service's own** `CommandExecutor` via
+    `RcAgentService.executeLocally`, so the page tests the same path the relay
+    drives — not a second copy of it. The answer is `exit=N` first, then stdout,
+    then stderr, in a monospace `TextView`. Off the UI thread always: `tree`
+    waits on the main looper, `shot` uploads a blob, `logs` walks logcat.
+  - **C. Quick actions:** `shot`, `tree 30`, `logs 200`,
+    `Diagnostics.run` (≈1 min, copied to the clipboard, previewed),
+    `Diagnostics.stateOnly` (zero network, copied), clear the log.
+  - **D. 返回配置页** → `finish()`.
+- **Answers are clipped at 2000 chars** (`DebugPanel.PANEL_MAX_CHARS`) and the
+  cut says so: `…（已截断，共 N 字符，只显示前 M 字符）`. A 190 000-char stdout
+  would freeze the UI thread, and a silently shortened answer is worse than a
+  marked one. The cut never lands inside a surrogate pair.
+- **No service instance → no result.** `RcAgentService.executeLocally` returns
+  null when `current` or its `executor` is gone, and the panel then says
+  服务未运行，先回配置页点启动. There is deliberately no fallback that builds a
+  second `CommandExecutor`: that would mean a second `SelfAdb.init`, a second
+  location helper and a screenshot path that disagrees with the relay's.
+  `CommandExecutor` has no mutable fields (five `val`s plus a main-thread
+  `Handler`), so two callers cannot corrupt each other — the caller only has to
+  stay off the UI thread.
+
 ---
 
 ## 7. Service behaviour

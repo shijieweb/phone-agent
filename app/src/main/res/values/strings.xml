@@ -3,4 +3,7 @@
     <string name="app_name">Phone Agent</string>
     <string name="accessibility_service_label">Phone Agent</string>
     <string name="accessibility_service_description">Allows the operator to read the screen and perform taps, swipes and text input on this device.</string>
+    <!-- Title of the operator's debug screen; only ever seen by whoever opened
+         it with five presses on the version line. -->
+    <string name="debug_activity_label">调试</string>
 </resources>

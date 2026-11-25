@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.text.InputType
 import android.view.ViewGroup
@@ -34,6 +35,10 @@ class MainActivity : Activity() {
     private lateinit var autoStartBox: CheckBox
     private lateinit var stayOnBox: CheckBox
     private lateinit var statusView: TextView
+    private lateinit var versionView: TextView
+
+    /** Five presses inside three seconds open the debug screen (see onCreate). */
+    private val debugGate = TapGate(5, 3_000L)
 
     private val uiHandler = Handler(Looper.getMainLooper())
     private var askedBackgroundLocation = false
@@ -108,6 +113,19 @@ class MainActivity : Activity() {
                 AgentLog.add("boot", "打开界面时自启服务被拒: " + describe(t))
             }
         }
+
+        // 版本号 + 调试页的门（v0.5.7-pad12）。页面上不写任何提示：这一行对
+        // 用户就只是版本号，3 秒内连点 5 次才进得去调试页。计数用单调时钟，
+        // 系统时间被改过也不会把门锁死。
+        versionView = TextView(this)
+        versionView.text = "v" + BuildConfig.VERSION_NAME
+        versionView.setPadding(0, 32, 0, 0)
+        versionView.setOnClickListener {
+            if (debugGate.tap(SystemClock.elapsedRealtime())) {
+                startActivity(Intent(this, DebugActivity::class.java))
+            }
+        }
+        root.addView(versionView)
     }
 
     override fun onResume() {

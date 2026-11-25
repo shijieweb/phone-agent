@@ -566,6 +566,29 @@ class RcAgentService : Service() {
             return sb.toString()
         }
 
+        /**
+         * Run one command line from inside the app, through the *live* service's
+         * executor — the debug screen's only door (SPEC.md section 6).
+         *
+         * Null when no instance is alive: every command needs the executor the
+         * service built in [start], so there is deliberately no fallback that
+         * constructs a second [CommandExecutor] behind its back. A second one
+         * would mean a second [SelfAdb] init, a second location helper and a
+         * screenshot path that disagrees with the relay's.
+         *
+         * Safe to call from any thread. [CommandExecutor] holds no mutable state
+         * (five `val`s plus a main-thread [android.os.Handler]), so two callers
+         * cannot corrupt each other; the verbs that need the main thread
+         * (`tree`, gestures, screenshots) marshal there themselves. The caller
+         * still runs this off the UI thread — `shot` uploads a blob and `logs`
+         * walks logcat, and neither belongs on a screen refresh.
+         */
+        fun executeLocally(line: String): ExecutionResult? {
+            val service = current ?: return null
+            val worker = service.executor ?: return null
+            return worker.execute(Commands.parse(line))
+        }
+
         private fun age(now: Long, then: Long): String {
             if (then <= 0L) return "从未"
             val seconds = (now - then) / 1000L

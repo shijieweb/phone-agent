@@ -16,6 +16,11 @@ nothing needs to be exposed on the phone's network.
 
 ## What it can do
 
+The app has two screens: the config page (URL, secret, 启动) and, hidden behind
+five presses on the version line at the bottom, an operator's debug page that
+runs one command line through the live agent and shows the answer — same
+`Commands.parse` path as the relay, no round trip. See `SPEC.md` §6.1.
+
 | Area | Commands |
 |---|---|
 | Screen | `shot [b64] [maxPx] [quality]` (screenshot, no MediaProjection prompt — uploaded as a blob and answered with one line of JSON; `b64` forces the old base64-on-stdout output), `tree` (node tree), `status` |
