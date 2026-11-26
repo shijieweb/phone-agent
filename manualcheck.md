@@ -578,6 +578,17 @@ Do this on the tablet — it is the machine the owner actually keeps films on.
     screech. (If the phone's decoder happens to downmix to 2 channels itself, the
     file converts normally — that is also correct; what matters is that a 6-channel
     *decoder output* is refused.)
+12. **The page must notice a video that arrived while it was open** (v0.7.3-pad12).
+    This is the owner's own sequence, so do it exactly this way: start with the
+    folder already converted (so the page opens on 没有要转的 and a disabled
+    开始转换 — that is the interesting starting point). Open 视频转音乐 from the
+    config page. **Leave the page** so it goes to the background (do not close it),
+    copy a new video into `/sdcard/视频转音乐专用` with the file manager, then switch
+    back. The count must update **by itself** to 待转 1 with 开始转换 enabled — no
+    re-entry, no button press. Then press 刷新: the count must not stay stuck on
+    正在统计… (only one scan runs at a time), and 刷新 must be disabled while a
+    batch is running. Finally leave and re-enter the page once more: that path must
+    still work, so the new one did not break the old one.
 
 ### Log size and trimming (v0.5.8-pad12)
 

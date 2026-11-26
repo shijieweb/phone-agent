@@ -1812,7 +1812,7 @@ process, same executor.
   `Handler`), so two callers cannot corrupt each other — the caller only has to
   stay off the UI thread.
 
-### 6.2 The third screen: 视频转音乐 (v0.7.0-pad12)
+### 6.2 The third screen: 视频转音乐 (v0.7.0-pad12, re-count on resume v0.7.3-pad12)
 
 A third Activity, and the first one that belongs to the **owner** rather than the
 operator. Reached by one button on the config page (`UiText.CONVERT`,
@@ -1822,19 +1822,46 @@ like the other two.
 It shows exactly what the owner needs to decide whether to press anything:
 
 1. The source folder, selectable so it can be copied: `/sdcard/视频转音乐专用`.
-2. One line of counting, from a fresh `Mp3Converter.scan` on every entry:
+2. One line of counting, from a fresh `Mp3Converter.scan` **every time the page
+   is resumed**, not just when it is created (v0.7.3-pad12):
    视频 N 个：待转 A 个，已有 mp3 B 个，无音轨 C 个. An empty folder says so
    instead of showing 0/0/0.
 3. **开始转换** (`ConvertActivity.START_LABEL`) — deliberately *not*
    `UiText.CONVERT`: the config page's button already owns that string, and
    `click apply 视频转音乐` must not have two candidate targets. Disabled while
    nothing is pending, and disabled while a batch is running.
-4. One progress line, replaced as the batch advances (latest line wins).
-5. The full per-file list in monospace once the batch ends. Its last line *is*
+4. **刷新** (`UiText.REFRESH`) between 开始转换 and 返回 — the manual half of the
+   same re-count. See "the page must notice files that arrived while it was open"
+   below.
+5. One progress line, replaced as the batch advances (latest line wins).
+6. The full per-file list in monospace once the batch ends. Its last line *is*
    the summary (`完成 N 个，失败 M 个，跳过 K 个，无音轨 J 个，用时 X.Xs`, §3.20),
    and the page does not restate those numbers anywhere else — one source, so the
    two can never disagree. After that it re-scans, so a batch that converted
    everything immediately shows 没有要转的 instead of yesterday's count.
+
+**The page must notice files that arrived while it was open** (v0.7.3-pad12).
+This is the owner's actual order of operations, reported from the tablet: open
+视频转音乐 first, then go copy a video into `/sdcard/视频转音乐专用` with the file
+manager, then come back. Coming back only *resumes* the Activity — `onCreate` does
+not run again — so the page kept showing the count it took on the way in:
+没有要转的, button disabled, nothing to press. The only way out was to leave the page
+and re-enter it, which the owner has no reason to guess.
+
+So the re-count hangs off `onResume()` rather than `onCreate()`: after `onCreate`
+the framework always calls `onResume`, so the first screen is not missed either,
+and there is exactly one place that decides when to count. The 刷新 button is the
+fallback for the case where the automatic path does not fire (a ROM that resumes
+without the folder change being visible yet); it is the same call, so the two can
+never disagree.
+
+`refresh()` is guarded by a `scanning` flag: the three sources — resume, the
+button, and the re-count after a batch — can land at the same moment, and three
+scan threads would only race to write the summary, with the last one winning
+regardless of whether it read a newer folder. While `running` is true it does not
+scan at all: the numbers on disk are moving, so a count taken mid-batch is stale
+before it is drawn. 刷新 is disabled for the same two reasons, and re-enabled from
+the scan callback by reading `running` rather than assuming it.
 
 Two details that are not cosmetic:
 
@@ -2115,10 +2142,16 @@ framework** — do not mock `AccessibilityService`. Required cases:
       6-channel decoder output being refused with a sentence that names the
       channel count** rather than downmixed, everything missing landing on
       44100/2/short, and an explicit float output read as float.
-  24. `UiText.clickable` is now seven labels and still has no duplicates
-      (`PermPlanTest`), and no label is a substring of any lamp label
-      (`HealthPlanTest`) — 视频转音乐 must not be clickable by accident when the
-      operator means 无障碍.
+  24. `UiText.clickable` is now **eight** labels and still has no duplicates
+      (`PermPlanTest`, `UiTextTest`), and no label is a substring of any lamp
+      label (`HealthPlanTest`) — 视频转音乐 must not be clickable by accident when
+      the operator means 无障碍.
+  25. `UiTextTest` — the label contract of v0.7.3-pad12, because 刷新 is the
+      shortest string on the screen and `click apply` matches by substring: no two
+      labels equal, no label a substring of another (both directions, all pairs),
+      刷新 appears exactly once and is contained in nothing else, and the list has
+      exactly eight entries so a change in count is deliberate rather than
+      incidental.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

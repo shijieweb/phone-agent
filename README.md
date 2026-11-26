@@ -95,6 +95,15 @@ went from 10 to 30 minutes (7× realtime on the tablet covers a 3.5-hour
 recording); a timed-out file may still finish in the background, and the failure
 line says so. See `SPEC.md` §3.20.
 
+v0.7.3-pad12 fixes what the owner hit first in real use: she opened 视频转音乐,
+went off to copy a video into the folder with the file manager, came back — and the
+page still showed the count from when she arrived (没有要转的, button disabled).
+Coming back only *resumes* the Activity, and the count used to hang off `onCreate`.
+It now hangs off `onResume`, so returning to the page re-counts by itself, and a
+刷新 button next to 开始转换 is the manual fallback. Both go through the same
+guarded `refresh()`: one scan at a time, and none at all while a batch is running,
+when the numbers on disk are still moving. See `SPEC.md` §6.2.
+
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
 port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s

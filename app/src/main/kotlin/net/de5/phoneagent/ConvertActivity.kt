@@ -34,12 +34,23 @@ class ConvertActivity : Activity() {
     private lateinit var progressView: TextView
     private lateinit var resultView: TextView
     private lateinit var startButton: Button
+    private lateinit var refreshButton: Button
 
     private val uiHandler = Handler(Looper.getMainLooper())
 
     /** 转换是否在跑。主线程读写，只用来挡住重复点。 */
     @Volatile
     private var running = false
+
+    /**
+     * 扫描是否在跑（v0.7.3-pad12）。
+     *
+     * 有三个来源会叫 [refresh]：回到页面（[onResume]）、手点刷新、一批转完之后。
+     * 它们可能撞在一起（转完那一刻正好切回来），叠起三个扫描线程毫无意义，
+     * 而且后到的结果可能覆盖先到的、把数字改回旧的。所以只认第一个。
+     */
+    @Volatile
+    private var scanning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,6 +79,7 @@ class ConvertActivity : Activity() {
         root.addView(summaryView, matchWidth())
 
         startButton = addButton(root, START_LABEL) { start() }
+        refreshButton = addButton(root, UiText.REFRESH) { refresh() }
 
         progressView = TextView(this)
         progressView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -83,6 +95,18 @@ class ConvertActivity : Activity() {
         addButton(root, "返回") { finish() }
 
         setContentView(scroll)
+        // 首屏不在这里扫：onCreate 之后系统必然调 onResume，那一条路径统一负责。
+    }
+
+    /**
+     * 每次回到这一页都重数一遍（v0.7.3-pad12）。
+     *
+     * 妈妈的真实流程是「先点进这一页 → 用文件管理器往里拷视频 → 切回来」。切回来时
+     * Activity 只是 resumed，onCreate 不会再跑，页面就停在进去时那份旧统计上，
+     * 显示「没有要转的」、按钮按不了，只有退出重进才行。这一行把那条路补上。
+     */
+    override fun onResume() {
+        super.onResume()
         refresh()
     }
 
@@ -94,15 +118,23 @@ class ConvertActivity : Activity() {
     /**
      * 重新数一遍：待转几个、跳过几个、无音轨几个。
      *
-     * 每次回到这一页都重数（[onCreate] 调一次），因为主人可能是先去放文件再回来。
+     * 三个来源：回到页面（[onResume]）、手点「刷新」、一批转完之后。同一时刻只跑一个
+     * 扫描线程——叠起来除了白耗电没有别的结果，还会让先到的结果被后到的覆盖。
+     * 转换进行中也不扫：那时候盘上的数字正在变，扫出来的结论立刻就过期了。
      */
     private fun refresh() {
+        if (scanning || running) return
+        scanning = true
         summaryView.text = "正在统计…"
         startButton.isEnabled = false
+        refreshButton.isEnabled = false
         Thread({
             val scanned = Mp3Converter.scan(Mp3Plan.DEFAULT_DIR)
             uiHandler.post {
                 if (isFinishing || isDestroyed) return@post
+                scanning = false
+                // 扫描期间主人可能按了开始（按钮被禁了，但状态机不能靠按钮兜底）。
+                refreshButton.isEnabled = !running
                 val error = scanned.error
                 if (error != null) {
                     summaryView.text = Mp3Plan.failure(error)
@@ -134,6 +166,8 @@ class ConvertActivity : Activity() {
         if (running) return
         running = true
         startButton.isEnabled = false
+        // 转换期间不让重扫：盘上的数字正在变，扫出来的结论下一行就过期了。
+        refreshButton.isEnabled = false
         resultView.text = ""
         progressView.text = "准备中…"
 
@@ -144,6 +178,7 @@ class ConvertActivity : Activity() {
                 uiHandler.post {
                     if (isFinishing || isDestroyed) return@post
                     running = false
+                    refreshButton.isEnabled = true
                     progressView.text = ""
                     summaryView.text = Mp3Plan.failure(error)
                     startButton.isEnabled = false
@@ -155,6 +190,7 @@ class ConvertActivity : Activity() {
                 uiHandler.post {
                     if (isFinishing || isDestroyed) return@post
                     running = false
+                    refreshButton.isEnabled = true
                     progressView.text = ""
                     summaryView.text = "没有要转的视频"
                     startButton.isEnabled = false

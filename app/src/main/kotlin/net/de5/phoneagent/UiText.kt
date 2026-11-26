@@ -9,7 +9,8 @@ package net.de5.phoneagent
  *
  * v0.6.3-pad12 去掉了「开机自动启动」：那个开关的生命周期本来就和启动/停止按钮
  * 绑在一起（按启动就置位、按停止就清零），单独摆一个复选框只会让人以为还有
- * 第三种状态。v0.7.0-pad12 加回一个「视频转音乐」，现在共七个可点文字。
+ * 第三种状态。v0.7.0-pad12 加回一个「视频转音乐」，v0.7.3-pad12 又加了一个「刷新」
+ * （「视频转音乐」页里重数一遍用），现在共八个可点文字。
  */
 internal object UiText {
 
@@ -28,8 +29,17 @@ internal object UiText {
      */
     const val CONVERT = "视频转音乐"
 
+    /**
+     * 「视频转音乐」页里的重新统计（v0.7.3-pad12）。
+     *
+     * 妈妈的真实用法是：先点进这一页，再用文件管理器往里拷视频，然后切回来。
+     * 切回来会自动重扫（[ConvertActivity.onResume]），这个按钮是自动那条不灵时的
+     * 手动兜底——她不用去猜「为什么还是旧的」。
+     */
+    const val REFRESH = "刷新"
+
     /** 启动/停止是同一个按钮的两个状态，永远只出现一个，但两个字符串仍互不相同。 */
-    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED, CONVERT)
+    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED, CONVERT, REFRESH)
 
     /** 高级区里三个输入框的标题（不可点，但也不能重名，否则看图对不上）。 */
     const val RELAY_LABEL = "Relay base URL"
