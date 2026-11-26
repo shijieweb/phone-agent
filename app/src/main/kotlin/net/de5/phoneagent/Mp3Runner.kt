@@ -85,7 +85,12 @@ internal object Mp3Runner {
 
             if (attempt == null) {
                 failed++
-                emit(Mp3Plan.failedLine(position, todo.size, row.name, "转换超时"))
+                emit(
+                    Mp3Plan.failedLine(
+                        position, todo.size, row.name,
+                        "转换超时（超过 30 分钟，文件可能还在后台写）"
+                    )
+                )
                 AgentLog.add("mp3", "超时 " + row.name)
                 continue
             }
@@ -98,7 +103,11 @@ internal object Mp3Runner {
             }
             done++
             emit(Mp3Plan.resultLine(position, todo.size, row.name, converted.bytes, converted.elapsedMs))
-            AgentLog.add("mp3", "完成 " + row.name + " " + converted.bytes + " 字节")
+            AgentLog.add(
+                "mp3",
+                "完成 " + row.name + " " + converted.bytes + " 字节 " +
+                    converted.inRate + "Hz/" + converted.channels + "ch"
+            )
         }
 
         val elapsed = System.currentTimeMillis() - began
@@ -142,8 +151,12 @@ internal object Mp3Runner {
     }
 
     /**
-     * 单个文件的预算。本机实测编码 43 倍速，瓶颈在解码；就算一个三小时的视频
-     * 也该在几分钟内完成，十分钟是安全上限。
+     * 单个文件的预算。
+     *
+     * 按真机 7 倍速算（Lenovo TB-J607F 实测 2:30 的视频 21 s），30 分钟够转 3.5 小时
+     * 的视频——妈妈放一整场演出录像也够。注意超时只是**不再等**，转换线程是 daemon
+     * Thread，杀不掉，它可能几分钟后自己把 .part 改名成 mp3；这一批报「失败」而盘上
+     * 稍后出现成品是良性行为，SPEC §3.20 有说明，别当 bug 修。
      */
-    private const val FILE_TIMEOUT_MS = 600_000L
+    private const val FILE_TIMEOUT_MS = 30 * 60 * 1000L
 }

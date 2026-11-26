@@ -1411,16 +1411,66 @@ whole path was verified end to end with `ffmpeg -af volumedetect`: the same
 full-scale sine gives `mean_volume -4.3 dB / max_volume 0.0 dB` after the fix
 and `-91.0 / -90.3 dB` when the shift is removed.
 
+**Decode shape comes from the decoder, not the track header** (v0.7.2-pad12).
+Three numbers decide how a block of PCM is read — sample rate, channel count, and
+whether the samples are 16-bit ints or floats — and the authoritative source for
+all three is `MediaCodec.outputFormat`, not the `MediaExtractor` track format.
+`DecodeShape.decodeShapeOf` takes both sides (each field nullable, `null` meaning
+"this side did not declare it") and settles them:
+
+| field | rule |
+|---|---|
+| rate | `outRate` if > 0, else `trackRate` if > 0, else 44100 |
+| channels | `outChannels` if 1 or 2, else `trackChannels` if 1 or 2, else 2 |
+| isFloat | `outPcmEncoding == ENCODING_PCM_FLOAT`; if the output is silent about it, the track's word; else **false** (short is the platform default, not a guess) |
+
+Two real failures came out of getting this wrong, and both hit ordinary phone
+videos rather than exotic ones. A track that declares float while the decoder
+emits short (androidx/media issue #565 — pcm-encoding 4 reported as 2) used to be
+read as float, i.e. as noise. And an HE-AAC track whose header says 22050 while
+the decoder's SBR doubles it to 44100 used to trip the "解码器改变了格式" check
+and fail a perfectly good video — the encoder had already been built from the
+track header by then.
+
+So the encoder is now **created lazily**, at the first block of PCM, once
+`outputFormat` can be read. A later `INFO_OUTPUT_FORMAT_CHANGED` only updates how
+the bytes are *read* (short ↔ float, safe); if the rate or the channel count
+actually moves mid-stream it throws a sentence that says so, because re-tuning a
+running LAME instance is not something this code does.
+
+**Surround sound is refused, not downmixed.** If the decoder reports more than two
+channels, `decodeShapeOf` returns a non-null `unsupported` sentence and
+`convert()` throws it. Feeding 6-channel interleaved samples to a 2-channel
+encoder shifts every sample and produces screech — worse than failing, because
+the owner cannot tell that kind of broken from a broken file. A 6-channel *track*
+that the decoder folds down to 2 is fine: the decoder's word wins. The sentence
+travels back as `unsupported` rather than as an exception so the rule stays
+testable without try/catch around every assertion.
+
+`ConvertResult.channels` / `.inRate` report the shape the encoder actually used,
+not what the track header claimed — the two differ exactly on the HE-AAC files
+where someone would be reading those numbers to debug.
+
 The batch loop lives in `Mp3Runner` rather than in `CommandExecutor` because it
 has **two doors**: `mp3 run apply` over the relay and the 开始转换 button on
 `ConvertActivity` (§6.2). Two copies of "who gets skipped, what `force` means, how a
 failure is counted" would drift apart, and then the inventory the owner sees and
 the work the app does would disagree.
 
-Each file gets its own 10-minute budget (`Mp3Runner.FILE_TIMEOUT_MS`). A decoder
-that wedges on a corrupt container would otherwise stop the whole batch, and one
-bad file must not cost the other twenty. A timed-out or failed file is counted
-as 失败 with its reason in the body, and the loop moves on.
+Each file gets its own **30-minute** budget (`Mp3Runner.FILE_TIMEOUT_MS`). A
+decoder that wedges on a corrupt container would otherwise stop the whole batch,
+and one bad file must not cost the other twenty. The number comes from the
+measured 7× realtime on the tablet (Lenovo TB-J607F: 2:30 of video in 21 s), so
+30 minutes covers a 3.5-hour recording — a full concert, which is the worst case
+the owner is realistically going to drop in.
+
+**A timeout does not stop the conversion.** The worker is a daemon thread that
+the batch stops *waiting* on, not one it can kill: minutes later it may still
+finish and rename its `.part` to a real `.mp3`. The batch has already reported
+失败 for that file, and the next `mp3 scan` will list it as 已有 mp3. That is
+benign — the file is a good one — but it reads like a ghost if you do not know
+it, so the failure line says 转换超时（超过 30 分钟，文件可能还在后台写） and this
+paragraph exists. Do not "fix" it by deleting the late file.
 
 The `.part` rename matters: a conversion killed halfway must not leave a
 half-length mp3 that the *next* run then treats as "already done" and skips
@@ -2056,7 +2106,16 @@ framework** — do not mock `AccessibilityService`. Required cases:
       through `shr 16`. Byte counts and frame sync cannot catch that bug — a
       silent MP3 is a perfectly valid MP3 — so the scale has to be asserted
       arithmetically.
-  23. `UiText.clickable` is now seven labels and still has no duplicates
+  23. `DecodeShapeTest` — the decode-shape rules of v0.7.2-pad12, one assertion per
+      rule and no Android imports: an HE-AAC track header of 22050 losing to a
+      44100 output (the case that used to fail a good video), a float track with a
+      short output read as short (androidx/media #565), nobody declaring a PCM
+      encoding meaning short, a 6-channel track folded to mono by the decoder
+      converting normally, an output rate of 0 falling back to the track, **a
+      6-channel decoder output being refused with a sentence that names the
+      channel count** rather than downmixed, everything missing landing on
+      44100/2/short, and an explicit float output read as float.
+  24. `UiText.clickable` is now seven labels and still has no duplicates
       (`PermPlanTest`), and no label is a substring of any lamp label
       (`HealthPlanTest`) — 视频转音乐 must not be clickable by accident when the
       operator means 无障碍.

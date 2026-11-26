@@ -80,6 +80,21 @@ v0.7.0 handed it the raw values. `ffmpeg -af volumedetect` measured
 -91 dB before and -4.3 dB after. Byte counts and frame sync could never have
 caught it; a silent MP3 is a perfectly well-formed MP3.
 
+v0.7.2-pad12 fixes two ways an ordinary phone video could be misjudged, both of
+them because the app trusted the **track header** instead of the **decoder**.
+An HE-AAC track declares 22050 Hz while the decoder's SBR doubles it to 44100, so
+the app built its encoder on the wrong rate and then failed the file with
+解码器改变了格式 — a good video rejected. And a track that declares float while
+the decoder emits 16-bit shorts (a real downgrade, androidx/media issue #565) was
+read as float, i.e. as noise. Rate, channel count and sample format now all come
+from `codec.outputFormat`, and the encoder is created lazily at the first block of
+PCM so it can. Surround sound (more than two decoder channels) is now **refused
+with a sentence that names the channel count** instead of being fed to a stereo
+encoder, which would have shifted every sample into screech. The per-file timeout
+went from 10 to 30 minutes (7× realtime on the tablet covers a 3.5-hour
+recording); a timed-out file may still finish in the background, and the failure
+line says so. See `SPEC.md` §3.20.
+
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
 port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s

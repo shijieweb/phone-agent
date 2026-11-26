@@ -33,6 +33,12 @@
 | v0.6.0 | `tree` 读活动窗口而非旧快照（`WindowPicker` 合并多窗口 + `TreeSettle` 重取） |
 | v0.6.1 | 无障碍配置补订阅 `typeWindowContentChanged` 等六类事件（框架靠订阅决定要不要维护内容缓存）；新增 `tree uia`（uid 2000 跑 uiautomator dump）作独立通道 |
 | v0.6.2 | 配置页三盏状态灯：24dp 大灯三态（运行中/部分异常/已停止）+ 只列不对的项 + 无障碍/电池/自连ADB 三盏小灯；四项现探不缓存，前台每 3 秒重跑 |
+| v0.6.3 | 去掉「开机自动启动」复选框（生命周期本来就跟启动/停止按钮走）；守护两坑：disarm 改 `pkill -9` 重试三次、arm 比脚本版本号自动换新 |
+| v0.6.4 | mDNS 只认本机地址（原来会把同局域网另一台设备的端口当自己的）+ `shkey import` 不再强转 `RSAPrivateCrtKey`（Android 12 上必失败） |
+| v0.6.5 | 停止后不再被守护每 60 秒拉回前台：`/sdcard/.phoneagent-stop` 标记 + 守护改 `am start-foreground-service`（失败才回落到 `am start`） |
+| v0.7.0 | 视频转音乐：进程内 MediaExtractor + MediaCodec + vendored jump3r（71 个 .java），`mp3 scan` / `mp3 run [apply] [force]` + 配置页「视频转音乐」入口；平板实测 5–7 倍速 |
+| v0.7.1 | 修 v0.7.0 转出来是静音：`lame_encode_buffer_int` 要 ±2^31 量级，之前递 ±32768 小 65536 倍（-91 dB → -10.6 dB） |
+| v0.7.2 | LAME 编码器改成拿到 `outputFormat` 再惰性建（HE-AAC 轨道头 22050/输出 44100 不再被误判失败）；PCM float/short 口径以解码器为准；环绕声明确拒绝；单文件超时 10→30 分钟 |
 
 ### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）

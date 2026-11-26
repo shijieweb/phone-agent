@@ -563,6 +563,21 @@ Do this on the tablet — it is the machine the owner actually keeps films on.
 9. Leave the app: the conversion must keep running in the foreground Activity; if
    the screen turns off mid-batch, the file still finishes and the MP3 is valid.
    A half-written `.mp3.part` must never be left behind after a failure.
+10. **HE-AAC must convert** (v0.7.2-pad12). This is the shape of an ordinary
+    phone video and it used to fail: the track header says 22050 Hz, the decoder
+    outputs 44100. Make one on a PC with
+    `ffmpeg -i 生日.mp4 -c:v copy -c:a aac -profile:a aac_he -b:a 32k he.mp4`,
+    copy it into the folder, then `mp3 scan` and `mp3 run apply`. It must convert
+    with no `解码器改变了格式` anywhere, and the result line reports the shape the
+    encoder really used (`44100Hz/2ch`), not what the header claimed. Listen to
+    the output: right speed, no chipmunk pitch.
+11. **Surround sound must fail loudly, not quietly.** Make a 5.1 sample with
+    `ffmpeg -i 生日.mp4 -c:v copy -c:a aac -ac 6 surround.mp4` and convert it.
+    The batch must print `失败: … 6 声道（环绕声）…` for that one file and carry on
+    with the others; what it must **not** do is produce a stereo MP3 full of
+    screech. (If the phone's decoder happens to downmix to 2 channels itself, the
+    file converts normally — that is also correct; what matters is that a 6-channel
+    *decoder output* is refused.)
 
 ### Log size and trimming (v0.5.8-pad12)
 
