@@ -540,9 +540,16 @@ Do this on the tablet — it is the machine the owner actually keeps films on.
    second press while it runs.
 5. When it ends, `生日.mp3` sits next to `生日.mp4`, the result block lists
    `→ 生日.mp3 X MB，用时 Ns`, and the summary line counts 1 done / 0 failed.
-   `无声.mp4` was skipped, not failed. Play the MP3 in the phone's own player:
-   3 minutes of video must be a few seconds of work (the encoder alone runs at
-   ~45× realtime; the decoder is the slower half).
+   `无声.mp4` was skipped, not failed. 3 minutes of video must be a few seconds
+   of work (the encoder alone runs at ~45× realtime; the decoder is the slower
+   half).
+   **Then actually listen to it.** Play the MP3 in the phone's own player at a
+   normal volume: speech and music must come out at the same loudness as the
+   video does, not as a faint hiss and not as silence. This is the check that
+   v0.7.0-pad12 failed while every structural check passed — a silent MP3 is
+   still a valid MP3, so "it plays" proves nothing. If you want a number instead
+   of an ear, `ffmpeg -i 生日.mp3 -af volumedetect -f null -` on a PC must report
+   `mean_volume` near the source's, not -90 dB.
 6. Press 开始转换 again with the MP3 already there: nothing is converted, the
    counts show it as 已有 mp3. Then from the relay `mp3 run apply force` — now it
    re-encodes and overwrites. `mp3 run apply` a third time without `force`: it

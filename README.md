@@ -73,6 +73,13 @@ seconds, and the decoder, not LAME, is what you wait for. ffmpeg was rejected on
 `targetSdk 34` forbids executing a binary from the app's private directory, and
 shipping the 20 MB static build is not worth it. See `SPEC.md` §3.20.
 
+v0.7.1-pad12 fixes the reason the first MP3s were **silent**. They were valid
+files — right length, right bitrate, decodable — at 1/65536 of full scale,
+because `lame_encode_buffer_int` wants 16-bit samples shifted left by 16 bits and
+v0.7.0 handed it the raw values. `ffmpeg -af volumedetect` measured
+-91 dB before and -4.3 dB after. Byte counts and frame sync could never have
+caught it; a silent MP3 is a perfectly well-formed MP3.
+
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
 port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s

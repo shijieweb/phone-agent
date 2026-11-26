@@ -54,6 +54,34 @@ class LameMp3EncoderTest {
         assertTrue("整条流必须逐帧走通，见 " + firstBadFrame(mp3), firstBadFrame(mp3) == mp3.size)
     }
 
+    /**
+     * 量级换算的契约（v0.7.1-pad12 补的回归）。
+     *
+     * v0.7.0-pad12 的 writeInterleaved 把 ±32768 的 16-bit 值原样递给
+     * `lame_encode_buffer_int`，而那个入口内部还要 `/ 65536`（Lame.java:1935-1936），
+     * 于是进 LAME 的只剩 ±0.5 —— 编出来的文件结构完全合法、能播、**一点声音都没有**。
+     * 平板实测 mean_volume -91.0 dB / max_volume -90.3 dB，就是这么来的。
+     *
+     * 所以这里不验「能不能编出 mp3」（那几条老用例在 bug 期间全绿），只钉死
+     * 「16-bit 样本进 LAME 之前必须抬到 ±2^31」。谁把 `shl 16` 去掉，这条立刻红。
+     */
+    @Test
+    fun theSampleScaleMatchesWhatLameActuallyExpects() {
+        val encoder = LameMp3Encoder(channels = 2, inRate = 44100, out = ByteArrayOutputStream())
+        assertEquals("满量程正端：32767 << 16", 2147418112, encoder.toLameInt(32767))
+        assertEquals("满量程负端：-32768 << 16 正好是 Int.MIN_VALUE", Int.MIN_VALUE, encoder.toLameInt(-32768))
+        assertEquals("静音必须是 0，不是被移出符号位", 0, encoder.toLameInt(0))
+        assertEquals("最小可闻单位：1 << 16", 65536, encoder.toLameInt(1))
+        // 反过来读：右移 16 位必须还原成原来的 16-bit 值（LAME 内部就是这么归一的）
+        for (sample in intArrayOf(-32768, -12000, -1, 0, 1, 12000, 32767)) {
+            assertEquals(
+                "样本 " + sample + " 抬上去再归一必须还原",
+                sample,
+                encoder.toLameInt(sample) shr 16
+            )
+        }
+    }
+
     @Test
     fun aMonoSourceStaysMono() {
         val bytes = ByteArrayOutputStream()

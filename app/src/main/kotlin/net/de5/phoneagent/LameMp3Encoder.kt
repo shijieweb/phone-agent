@@ -119,6 +119,9 @@ internal class LameMp3Encoder(
      * 送一段交错的 PCM 进去。[samples] 的排布是 L,R,L,R…（单声道就 L,L,L…），
      * 量级是 ±32768（MediaCodec 解出来的 16-bit 就是这个量级）。
      *
+     * 注意这里收的是 **16-bit 量级**，而 [toLameInt] 会把它抬到
+     * `lame_encode_buffer_int` 真正期望的量级——两者差 16 位，见那个函数的注释。
+     *
      * [frames] 是采样帧数，不是 IntArray 的长度。
      */
     fun writeInterleaved(samples: IntArray, frames: Int) {
@@ -134,11 +137,11 @@ internal class LameMp3Encoder(
             val take = minOf(CHUNK, frames - done)
             for (i in 0 until take) {
                 if (gfp.num_channels == 1) {
-                    left[i] = samples[done + i]
-                    right[i] = samples[done + i]
+                    left[i] = toLameInt(samples[done + i])
+                    right[i] = toLameInt(samples[done + i])
                 } else {
-                    left[i] = samples[(done + i) * 2]
-                    right[i] = samples[(done + i) * 2 + 1]
+                    left[i] = toLameInt(samples[(done + i) * 2])
+                    right[i] = toLameInt(samples[(done + i) * 2 + 1])
                 }
             }
             val got = lame.lame_encode_buffer_int(gfp, left, right, take, buffer, 0, buffer.size)
@@ -151,6 +154,24 @@ internal class LameMp3Encoder(
             done += take
         }
     }
+
+    /**
+     * 16-bit 样本 → `lame_encode_buffer_int` 期望的 ±2^31 量级。
+     *
+     * 为什么必须抬 16 位：那个入口的注释写着「internal code expects +/- 32768.0」，
+     * 而它自己在这一步做的是 `buffer_l[i] * (1.0f / (1L << 16))`
+     * （`de/sciss/jump3r/mp3/Lame.java:1935-1936`）。也就是说**它收 ±2^31，
+     * 除以 65536 之后才落到 LAME 内部的 ±32768**。把 16-bit 值原样递进去，
+     * 进 LAME 的只剩 ±0.5，编出来是 -90 dB 的静音——文件能播、没声音。
+     *
+     * v0.7.0-pad12 就是漏了这一步（真机报障：mean_volume -91.0 dB /
+     * max_volume -90.3 dB）。改这里之前先看 [LameMp3EncoderTest] 里
+     * `theSampleScaleMatchesWhatLameActuallyExpects`，那条用例会把量级钉死。
+     *
+     * 边界：`-32768 shl 16` 正好是 `Int.MIN_VALUE`，LAME 乘 1/65536 得
+     * `-32768.0f`，落在满量程负端，不需要特判。
+     */
+    internal fun toLameInt(sample16: Int): Int = sample16 shl 16
 
     /**
      * 冲掉编码器里剩下的帧并关掉。返回总字节数。

@@ -1396,6 +1396,21 @@ run:    scan → Mp3Plan.dryRunLine(rows, force)          // no apply
                     rename .part → .mp3 only on success
 ```
 
+**Sample scale, and the bug it caused.** `lame_encode_buffer_int` does *not*
+take 16-bit samples. It multiplies every value by `1.0f / (1L << 16)` before the
+encoder sees it (`app/src/main/java/de/sciss/jump3r/mp3/Lame.java:1935-1936`,
+comment: "internal code expects +/- 32768.0"), so the value it wants is a 16-bit
+sample **shifted left by 16** — full scale is ±2^31, not ±32768.
+`LameMp3Encoder.toLameInt` does that shift, once, on every sample it is handed.
+v0.7.0-pad12 shipped without it: the MP3s were structurally perfect (right
+duration, right bitrate, valid frame headers) and measured
+`mean_volume -91.0 dB / max_volume -90.3 dB` — silence, at 1/65536 of full
+scale. The owner read that as "it won't play". The scale is now pinned by
+`LameMp3EncoderTest.theSampleScaleMatchesWhatLameActuallyExpects`, and the
+whole path was verified end to end with `ffmpeg -af volumedetect`: the same
+full-scale sine gives `mean_volume -4.3 dB / max_volume 0.0 dB` after the fix
+and `-91.0 / -90.3 dB` when the shift is removed.
+
 The batch loop lives in `Mp3Runner` rather than in `CommandExecutor` because it
 has **two doors**: `mp3 run apply` over the relay and the 开始转换 button on
 `ConvertActivity` (§6.2). Two copies of "who gets skipped, what `force` means, how a
@@ -2034,7 +2049,13 @@ framework** — do not mock `AccessibilityService`. Required cases:
       is idempotent, and 10 s of audio encodes in well under a second — measured
       at **221 ms, 45× realtime** (232 ms / 43× on an earlier run), asserted at
       better than 1/5 realtime so a 10× regression fails the build instead of
-      quietly shipping.
+      quietly shipping. And the one test that exists because a whole release
+      shipped silent: `theSampleScaleMatchesWhatLameActuallyExpects` pins
+      `toLameInt` to `sample16 shl 16` (32767 → 2147418112, -32768 →
+      `Int.MIN_VALUE`, 1 → 65536) and round-trips a range of 16-bit values
+      through `shr 16`. Byte counts and frame sync cannot catch that bug — a
+      silent MP3 is a perfectly valid MP3 — so the scale has to be asserted
+      arithmetically.
   23. `UiText.clickable` is now seven labels and still has no duplicates
       (`PermPlanTest`), and no label is a substring of any lamp label
       (`HealthPlanTest`) — 视频转音乐 must not be clickable by accident when the
