@@ -40,6 +40,9 @@
 | v0.7.1 | 修 v0.7.0 转出来是静音：`lame_encode_buffer_int` 要 ±2^31 量级，之前递 ±32768 小 65536 倍（-91 dB → -10.6 dB） |
 | v0.7.2 | LAME 编码器改成拿到 `outputFormat` 再惰性建（HE-AAC 轨道头 22050/输出 44100 不再被误判失败）；PCM float/short 口径以解码器为准；环绕声明确拒绝；单文件超时 10→30 分钟 |
 | v0.7.3 | 「视频转音乐」页回到前台自动重扫（妈妈先开页面再放文件就看不到新视频）+ 手动「刷新」兜底 |
+| v0.8.0 | 模块化地基（`FeatureModule` + `FeatureRegistry`，加功能只新增一个 `Feat*.kt` + 注册表一行）+ 首批 7 个功能：`where` / `status` 加 `shell` 键 / `autowake` / `media` / `battery` / `notify` / `wm`（带自动过期保险丝） |
+| v0.8.1 | 修 v0.8.0 真机三坑：`wm` 漏了 "wm " 前缀（所有 apply 全 127）、`notify` 只认开头 apply、`battery` 文案不说实话 |
+| v0.8.2 | `wm` 读命令报当前生效值（Override 优先）而不是面板出厂值，保险丝基准仍取 Physical；有 Override 时输出 `(override; physical WxH/D)` |
 
 ### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）

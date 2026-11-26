@@ -1499,6 +1499,289 @@ Measured on this laptop's JVM (`LameMp3EncoderTest`): encoding alone runs at
 **45× realtime** (10 s of audio in 221 ms; repeated runs land between 43× and
 45×), so the encoder is not the bottleneck — `MediaCodec` is.
 
+### 3.21 `where`: which screen am I on, in one round trip
+
+```
+where
+```
+
+One line of JSON, nothing else:
+
+```
+{"ok":true,"pkg":"com.tencent.mm","act":"com.tencent.mm.ui.chatting.variants.ChattingMainUI","scr":"on","kg":"none"}
+```
+
+`pkg` is read from the accessibility service (`rootInActiveWindow`), so it needs
+no shell and no extra permission — but it does need the service: without it the
+command is `exit=3`, the same code every other UI command uses. `act` is
+best-effort and may be an empty string: it comes from
+`dumpsys window | grep mCurrentFocus` as uid 2000, so self-ADB being down costs
+the activity name, not the command. The real dump line is usually followed by
+`Failed to write while dumping service window: Broken pipe` (exit is still 0),
+so the parser takes the class after the last `/` up to the closing brace or the
+first space and ignores everything else. `scr` is `on`/`off`, `kg` is
+`none`/`locked`/`secure` — the same three words `wake` reports.
+
+Why it exists: the loop used to be `tree` → read a screenful → guess → `tree`
+again. Asking "which page is in front?" first is one short line and usually
+removes one of the two trees.
+
+Exit codes: 0 answered, 2 usage, 3 accessibility service not connected.
+
+### 3.22 `media`: five transport keys, two channels
+
+```
+media play|pause|next|prev|stop
+```
+
+No `apply`: a transport key is not a sticky setting, and the owner pressing
+next once cannot break anything. Keycodes are the platform ones — play 126,
+pause 127, next 87, prev 88, stop 86 — sent as `input keyevent <code>` over
+self-ADB (`next` is the one verified on the phone: it advanced the player).
+Without self-ADB the command falls back to
+`AudioManager.dispatchMediaKeyEvent` from our own process, which works for some
+players and is silently ignored by others, so the receipt says
+`media next via=audiomanager（未连自连 ADB，这条通道不保证生效；要稳就用 shconnect）`
+rather than claiming success. A remote failure is `exit=6` and names the code
+and the device's own text.
+
+`media` is deliberately **not** part of `key` (`Commands.KEY_NAMES` still holds
+exactly back / home / recents / notifications / quicksettings): `key play`
+stays a usage error, so nobody can change what `key` means by accident.
+
+Exit codes: 0 sent, 2 usage, 6 permission (self-ADB answered non-zero), 4 timeout.
+
+### 3.23 `status` grows a twelfth key: `shell`
+
+`shell` is the **twelfth** key (v0.8.0 added it, appended last). The eleven keys
+that were already there — v0.5.5's ten plus `guard` — keep their names and their
+order, one for one. It is `ok`/`down` from `SelfAdb.isConnected()`:
+
+```
+{"ok":true,"ver":"0.8.1-pad12","acc":true,"svc":true,"scr":true,"bat":88,"loc":true,"loop":60,"opt":"on","queue":0,"guard":"idle","shell":"ok"}
+```
+
+Nothing is renamed: the controller reads this object by field name, and the
+answer to "why did `wm` say shconnect?" belongs in the one line a controller
+already polls every few minutes.
+
+### 3.24 `battery`: the optimisation whitelist, read and written
+
+```
+battery                       # read: battery whitelisted | battery not-whitelisted
+battery allow [apply]         # cmd deviceidle whitelist +net.de5.phoneagent
+battery deny  [apply]         # cmd deviceidle whitelist -net.de5.phoneagent
+```
+
+The read half uses `PowerManager.isIgnoringBatteryOptimizations`, i.e. the same
+fact the config page's lamp shows, and needs no shell at all. The write half is
+`cmd deviceidle whitelist` as uid 2000 — the app cannot whitelist itself through
+the public API without a system dialog — so without self-ADB it is `exit=6`
+with a sentence that says `shconnect` instead of just failing.
+
+`apply` is required to change anything; without it the receipt is
+`dry-run: would run sh: cmd deviceidle whitelist +net.de5.phoneagent`.
+
+**The receipt distinguishes three outcomes** (v0.8.1). The state is read before the
+command runs, so the answer says whether anything actually changed:
+
+| before | `battery allow apply` | `battery deny apply` |
+|---|---|---|
+| not whitelisted | `battery 已加入电池优化白名单` | `battery 本来就不在白名单里（未改动）` |
+| whitelisted | `battery 本来就在白名单里（未改动）` | `battery 已移出电池优化白名单` |
+| unreadable | the two "已…" sentences (the v0.8.0 wording) | same |
+
+Before v0.8.1 a phone that was already whitelisted still answered "已加入", which
+told the operator nothing about whether the command had done any work. If the
+state cannot be read the command does **not** refuse to run — it falls back to the
+old wording rather than blocking a real change on a failed read.
+
+Exit codes: 0 read or written (and 0 for the dry run), 2 usage, 6 permission,
+4 timeout.
+
+### 3.25 `notify post`: put a sentence on the phone's screen
+
+```
+notify post apply TITLE BODY     # apply in front
+notify post TITLE BODY apply     # apply at the end — same thing (v0.8.1)
+```
+
+`apply` is accepted on **either side**, and the two forms produce one identical
+command. v0.8.0 only took the front position while `wm size 900x1600 apply` puts
+it at the end; the same app with two rules got exactly the accident it invited —
+`notify post 测试标题 测试正文 apply` treated `apply` as part of the body and
+dry-ran a notification reading "测试正文 apply". The rules now:
+
+- front `apply` is stripped first; anything after it, including a trailing
+  `apply`, stays in the body (`post apply T A apply` → body `A apply`);
+- a trailing `apply` is stripped only when a title **and** a body remain, so
+  `post T apply` keeps `apply` as its body and `post T 请 apply 一下` keeps the
+  sentence intact;
+- the one body the trailing form cannot express is one whose **last word** is
+  `apply`: `post T 请 apply` is read as the switch (body `请`), because a stray
+  switch is far more common than a body ending in that English word. Write the
+  switch in front instead and the word is left alone —
+  `post apply T 请 apply` posts the body `请 apply`;
+- the dry run names the command it would really send, so a body that still
+  carries `apply` is visible before anything is posted.
+
+`cmd notification post -S bigtext -t "TITLE" phoneagent "BODY"`, as uid 2000.
+Default is a dry run; `apply` posts it. The title is one token, the body is
+everything after it, **spacing preserved** (it is text a human will read), capped
+at 80 and 200 characters — over the cap is a usage error rather than a silent
+truncation. Quotes, `$` and backticks in either field are escaped for the shell.
+
+The first word is `notify`, not `notif`: `notif` is the existing "list the
+active notifications" command and the two must not be confused.
+
+Android 12's `cmd notification` does not always accept `-S bigtext`. When the
+first attempt fails the command drops that flag and tries once more; if the retry
+works the receipt says so (`notify 已发送（这条 ROM 不认 -S bigtext，已去掉后重试成功）`)
+instead of pretending the first form was fine.
+
+Exit codes: 0 posted (or dry run), 2 usage, 6 permission, 4 timeout.
+
+### 3.26 `wm`: display size and density, with a fuse
+
+```
+wm                                                  # read
+wm size 900x1600 [SECONDS] apply                    # wm size 900x1600
+wm size reset apply                                 # wm size reset
+wm density 400 [SECONDS] apply                      # wm density 400
+wm density reset apply                              # wm density reset
+```
+
+Read is one line, fixed order: `wm size 1200x2670 density 520`. Everything goes
+through uid 2000; without self-ADB it is `exit=6` naming `shconnect`.
+
+**Read reports what is in force, not what the panel was built as** (v0.8.2). Once a
+size or density is overridden, `wm size` prints two lines — `Physical size:
+1200x2670` and `Override size: 900x1600` — and the device is really using the
+override. v0.8.1 read the physical line for both purposes, so a phone that had
+just been set to 900x1600 answered `wm size 1200x2670 density 520` and looked like
+the change had failed. Two different questions now have two different answers:
+
+| question | helper | prefers |
+|---|---|---|
+| what is in force right now? (the read command) | `currentSize` / `currentDensity` | `Override`, then `Physical` |
+| what will `reset` return to? (the fuse baseline) | `originalSize` / `originalDensity` | `Physical`, then `Override` |
+
+With nothing overridden the line is **byte for byte** the old
+`wm size 1200x2670 density 520`, so existing parsers keep working. With an
+override in force it carries the physical values as an annotation:
+`wm size 900x1600 density 520 (override; physical 1200x2670/520)` — the current
+value leads, the baseline is still on the line, and a value that could not be read
+is `?` rather than an invention.
+
+**Every command sent to the phone starts with `wm `** (v0.8.1). v0.8.0 built the
+apply command as `kind + " " + value` and dropped the prefix, so on a real
+MEIZU_22 / Android 16 `wm size 900x1600 apply` executed `size 900x1600` and
+answered `exit=6 错误: wm 执行失败（size 900x1600 返回 127）：/system/bin/sh: size:
+inaccessible or not found`. Read and both resets were correct because their
+constants carry the prefix — which is why the unit tests passed. `WmPlanTest`
+now asserts that the read constants, the reset constants **and** every parsed
+apply command all start with `wm `, so a fragment can never ship again.
+
+**The fuse is the point.** A resolution the phone cannot drive leaves the UI
+unusable — no status bar, buttons off-screen — and the usual way out is a factory
+reset. So before a real change the app stores the original values and a deadline
+in `Prefs` (`wm_deadline`, `wm_original`), default 300 s, settable from 30 to
+3600 s with a third token. `CommandExecutor.execute` calls `WmExpiry.check`
+before **every** command: past the deadline it runs `wm size reset` and
+`wm density reset`, and the next receipt carries `已自动恢复显示设置（超时）`.
+If the reset cannot be delivered (self-ADB dropped) the fuse is deliberately
+**not** disarmed — the next command tries again. Better a few extra attempts than
+a phone stuck in a broken resolution that nobody is watching.
+
+The "original" value is read from the `Physical` line, never the `Override`
+one: after a change `wm size` prints both, and the override is the temporary
+value we just set — recording that as the baseline would make the note lie. This
+is `originalSize` / `originalDensity`, and it stays on `Physical` even while the
+read command reports the override: the two helpers are deliberately separate so
+that fixing one cannot quietly break the other.
+
+`wm size reset apply` and `wm density reset apply` clear the fuse (there is
+nothing left to restore). `reset` takes no SECONDS: it is immediate.
+
+Exit codes: 0 read or written (and 0 for the dry run), 2 usage, 6 permission,
+4 timeout.
+
+### 3.27 `autowake`: wake before touching the screen, or refuse
+
+```
+autowake            # report: autowake on | autowake off
+autowake on|off     # persist (Prefs.KEY_AUTO_WAKE, default off)
+```
+
+When it is on, `tap` / `long` / `swipe` / `click` / `longclick` / `tree` /
+`shot` / `where` run `Autowake.preflight` first:
+
+| autowake | screen | keyguard | what happens |
+|---|---|---|---|
+| off | any | any | nothing at all — the old behaviour, byte for byte |
+| on | on | any non-secure | nothing to do |
+| on | off | none / locked | `Wake.wake`, then the command runs; the receipt gains `wake=via=wakelock` |
+| on | any | secure | `exit=6` `锁屏有密码，界面操作不可用；请先手动解锁` — the command does **not** run |
+
+The refusal is the whole point. Running anyway on a password-locked phone produces
+`no node found` — which reads as "your selector is wrong" and sends the operator
+hunting for a bug that is not there.
+
+**On a password-locked phone `autowake` will never light the screen, and that is
+correct** (recorded v0.8.2 after a real-device question). `AutowakePlan.decide`
+tests `keyguard == secure` **before** `screenOn`, and a locked phone reports
+`secure` from `KeyguardManager` whether the screen is on or off — real device:
+`wake ok via=wakelock scr=on kg=secure`. So on such a device the only thing
+`autowake` buys is turning a misleading failure into a stated one: `tap 600 1300`
+on a dark password-locked phone answers `exit=6 锁屏有密码，界面操作不可用；请先手动
+解锁` instead of the old `没有出现含…的节点`. Do not read "the screen stayed dark"
+as a broken feature — the refusal is the feature. On a phone with **no** lock
+password the wakelock path does run and the receipt gains `wake=via=wakelock`.
+
+The note is appended, never glued onto JSON: a JSON receipt (`where`, `status`,
+`shot`) gets the note on **stderr** (`FeatureNotes.attach`), because one trailing
+sentence turns a parseable object into garbage.
+
+Exit codes: 0 reported or set; 2 usage; 6 for a refusal and for a wake that the
+ROM refused (`wake failed via=none scr=off kg=…`).
+
+### 3.28 The module foundation: feature 13 costs one file and one line
+
+The first seven features are also the proof that the eighth is cheap. Every
+feature lives in its own `Feat<Name>.kt` holding the verb, the parser, the
+executor and all of its user-visible text, and implements:
+
+```kotlin
+internal interface FeatureModule {
+    val verb: String                                  // claims the first word, lowercase
+    fun parse(rest: String): Parsed?                  // null = "not mine"
+    fun execute(ctx: FeatureContext, args: String): ExecutionResult
+}
+
+internal sealed class Parsed {
+    class Ok(val rest: String)                        // normalised arguments
+    class Bad(val detail: String)                     // a "usage: …" line
+}
+
+internal interface FeatureContext {
+    val context: Context
+    val applyAllowed: Boolean
+    fun <T> onMain(timeoutMs: Long, block: () -> T): T?
+    fun runShell(command: String, timeoutMs: Long): ShellOut?   // null = no self-ADB
+}
+```
+
+`FeatureRegistry.modules` is one module per line; `Commands.parse`'s final
+`else` branch is `FeatureRegistry.parse(head, rest) ?: Command.Unknown(head)`, and
+`CommandExecutor.dispatch` has one `is Command.Module -> FeatureRegistry.execute(...)`
+branch. Adding feature 13 is therefore: **one new file + one line in the
+registry**. `Commands.kt` and `Executor.kt` are not touched at all, and a test
+asserts the verbs are unique and lowercase so a collision fails the build rather
+than silently shadowing a command.
+
+A parse failure is always `exit=2` with a `usage: …` line in `stderr`, the same
+shape as every hand-written command in this file.
+
 ### Exit codes
 | Code | Meaning |
 |---|---|
@@ -2152,6 +2435,85 @@ framework** — do not mock `AccessibilityService`. Required cases:
       刷新 appears exactly once and is contained in nothing else, and the list has
       exactly eight entries so a change in count is deliberate rather than
       incidental.
+
+  26. The v0.8.0-pad12 module foundation (`FeatureRegistryTest`): six verbs,
+      all unique and lowercase; the exact list `where media battery notify wm
+      autowake`; an unclaimed word still falling through to `Command.Unknown`;
+      `Commands.parse("media NEXT")` producing `Command.Module("media","next")`;
+      every module's bad arguments coming back as `Command.BadUsage` whose detail
+      starts with `usage: `; an unregistered module answering `exit=2`
+      `unknown command: …` instead of crashing; and `ping`/`wake`/`status`/`stop`
+      still parsing to their own classes. `FeatureNotesTest` pins the note rule —
+      a JSON receipt keeps its stdout and gets the note on stderr, a plain receipt
+      gets one space and the note, an empty stdout sends it to stderr.
+  27. The seven features, split the same way as everything else (pure plan object
+      + a grammar test through `Commands.parse`):
+      `WherePlanTest` — the five keys in order, an unknown activity as `""` rather
+      than the word null, quote/backslash escaping, the real `mCurrentFocus` line
+      (including its Broken-pipe tail), and null / no-slash / garbage all yielding
+      `""`. `MediaPlanTest` — the five keycodes, case-insensitivity, an unknown
+      action with no keycode, the shell line, the fallback line saying it is not
+      guaranteed, and `key play` staying a usage error.
+      `BatteryPlanTest` — the read request from no arguments, allow/deny dry by
+      default, `apply` in any case, the exact `cmd deviceidle whitelist ±` line
+      for our own package, normalise→parse round trip, and the dry-run/need-shell
+      sentences. `NotifyPlanTest` — the body keeping its internal spacing, the
+      optional `apply` before the title, `post` as the only head, both length
+      limits accepted at the boundary and refused one over, the `-S bigtext` and
+      tag in the command, and quote/`$`/backtick escaping. `WmPlanTest` — the
+      default 300 s and the explicit one, the 30–3600 bounds refused rather than
+      clamped, `reset` refusing a SECONDS token, out-of-range size/density,
+      **the fuse baseline preferring Physical while the read prefers Override**,
+      the deadline arithmetic, an unarmed deadline never expiring, and the expiry
+      sentence. `AutowakePlanTest` — the whole
+      decision table (eight combinations, including secure refusing even with the
+      screen on), both wake receipt shapes for `wake=via=`, and the guard types.
+      `StatusPlanTest` — twelve keys, the first eleven unchanged in name and
+      position, `shell` last, and `ok`/`down` from the connection flag.
+  28. `FeaturesDryRunTest` — the three new dry runs, driven through the real
+      module executors with a context that has no phone behind it: `battery
+      allow`/`deny`, `notify post` and `wm size …`/`wm density …` (without
+      `apply`) each print a line starting `dry-run: ` naming the exact shell
+      command they would run, and none of them reaches the shell to do it; the
+      same three with `apply` answer `exit=6` naming `shconnect` rather than
+      pretending; `wm` read without self-ADB is `exit=6` too; and a refused
+      grammar is `exit=2` in all four modules.
+  29. The v0.8.1-pad12 regression pins — one per real-device defect, so each can
+      only ever come back as a red test:
+      **the missing `wm ` prefix** (`WmPlanTest.everyShellCommandStartsWithWm`)
+      walks the two read constants, the two reset constants and every parsed
+      apply command and asserts each starts with `wm `;
+      `theDryRunLineIsTheRealCommandNotAFragment` asserts the whole line
+      `dry-run: would run sh: wm size 900x1600`, which is what the phone showed
+      was wrong. **`apply` on either side of `notify post`**
+      (`NotifyPlanTest.applyIsAlsoAcceptedAtTheEndAndMeansTheSameThing`) asserts
+      the two positions yield one identical command, and
+      `aTrailingApplyIsOnlyStrippedWhenATitleAndBodyRemain` pins the three
+      boundaries that make stripping safe (`post T apply` keeps `apply` as the
+      body, a front `apply` does not strip a trailing one, a body containing
+      `apply` is untouched). **The three `battery` outcomes**
+      (`BatteryPlanTest.anAlreadySatisfiedStateIsReportedAsUnchanged`) assert an
+      already-satisfied state says 本来就在/未改动 and never 已加入, and
+      `anUnknownBeforeStateKeepsTheOldWording` pins the fallback when the state
+      cannot be read. `FeaturesDryRunTest` also drives both `apply` positions
+      through the real executor and asserts they answer identically. **The one
+      body the trailing form cannot express**
+      (`NotifyPlanTest.aBodyWhoseLastWordIsApplyNeedsTheFrontSwitch`) pins the
+      deliberate trade: `post 测试 请 apply` is read as the switch (body `请`),
+      and `post apply 测试 请 apply` posts the literal body `请 apply`.
+  30. The v0.8.2-pad12 regression pins — the read/baseline split, in both directions:
+      `WmPlanTest.theCurrentSizePrefersTheOverrideLine` and
+      `theCurrentDensityPrefersTheOverrideLine` assert the read command's helpers
+      take `Override` first (the P3 defect: a phone set to 900x1600 answered
+      1200x2670); `theOriginalSizePrefersThePhysicalLine` and
+      `theOriginalDensityPrefersThePhysicalLine` assert the fuse baseline still
+      takes `Physical` first; and
+      `theFuseBaselineStaysPhysicalWhileTheReadShowsTheOverride` feeds **one** input
+      to both, so a future "cleanup" that merges the two helpers back into one turns
+      red. `theReadLineKeepsTheOldShapeWhenNothingIsOverridden` pins the legacy
+      byte-for-byte line, and `theReadLineSaysSoWhenTheOverrideIsInCharge` pins
+      `wm size 900x1600 density 520 (override; physical 1200x2670/520)` including
+      the `?` placeholder when the physical value cannot be read.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

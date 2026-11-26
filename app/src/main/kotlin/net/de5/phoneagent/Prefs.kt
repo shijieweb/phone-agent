@@ -106,6 +106,37 @@ class Prefs(context: Context) {
             sp.edit().putBoolean(KEY_STAY_ON, value).apply()
         }
 
+    /**
+     * `autowake on|off` (v0.8.0-pad12).
+     *
+     * Default false: the screen is only ever woken when the operator asked for
+     * it, so every existing gesture behaves exactly as it did before.
+     */
+    var autoWake: Boolean
+        get() = sp.getBoolean(KEY_AUTO_WAKE, false)
+        set(value) {
+            sp.edit().putBoolean(KEY_AUTO_WAKE, value).apply()
+        }
+
+    /**
+     * Deadline (epoch millis) of a temporary `wm size`/`wm density` change.
+     *
+     * 0 means "nothing armed". Kept in prefs so the restore survives the process
+     * being killed — the screen must not stay broken because we died.
+     */
+    var wmDeadline: Long
+        get() = sp.getLong(KEY_WM_DEADLINE, 0L)
+        set(value) {
+            sp.edit().putLong(KEY_WM_DEADLINE, value).apply()
+        }
+
+    /** Original `wm size`/`wm density` before the temporary change, for the log. */
+    var wmOriginal: String
+        get() = sp.getString(KEY_WM_ORIGINAL, "").orEmpty()
+        set(value) {
+            sp.edit().putString(KEY_WM_ORIGINAL, value).apply()
+        }
+
     /** The agent cannot dial out without both of these. */
     fun isConfigured(): Boolean = relayBase.isNotBlank() && secret.isNotBlank()
 
@@ -120,6 +151,9 @@ class Prefs(context: Context) {
         const val KEY_ANIM_TRANSITION = "anim_transition"
         const val KEY_ANIM_ANIMATOR = "anim_animator"
         const val KEY_STAY_ON = "stay_on"
+        const val KEY_AUTO_WAKE = "auto_wake"
+        const val KEY_WM_DEADLINE = "wm_deadline"
+        const val KEY_WM_ORIGINAL = "wm_original"
 
         /**
          * The direct route on the operator's *own paid* domain, no Cloudflare in

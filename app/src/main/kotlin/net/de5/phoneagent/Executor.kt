@@ -106,7 +106,17 @@ class CommandExecutor(
         SelfAdb.init(context)
     }
 
-    fun execute(command: Command): ExecutionResult = clip(
+    fun execute(command: Command): ExecutionResult {
+        // 临时改过的显示设置到期就先恢复（v0.8.0-pad12）。没武装时只读一个
+        // long，零成本；恢复不了就留着武装下次再试，绝不把界面留在改坏的分辨率上。
+        val expiryNote = WmExpiry.check(context) { line -> runShell(line, WM_TIMEOUT_MS) }
+        val result = clip(dispatch(command))
+        if (expiryNote == null) return result
+        val (stdout, stderr) = FeatureNotes.attach(result.stdout, result.stderr, listOf(expiryNote))
+        return ExecutionResult(result.exit, stdout, stderr)
+    }
+
+    private fun dispatch(command: Command): ExecutionResult =
         when (command) {
             is Command.Ping ->
                 ExecutionResult(EXIT_OK, "pong", "")
@@ -115,7 +125,7 @@ class CommandExecutor(
                 status()
 
             is Command.Shot ->
-                shot(command)
+                withAutowake { shot(command) }
 
             is Command.RcShot ->
                 rcShot(command)
@@ -127,25 +137,25 @@ class CommandExecutor(
                 ExecutionResult(EXIT_USAGE, ShotBlob.error("bad #rc payload: " + command.detail), "")
 
             is Command.Tree ->
-                tree(command)
+                withAutowake { tree(command) }
 
             is Command.Tap ->
-                tap(command)
+                withAutowake { tap(command) }
 
             is Command.LongPress ->
-                longPress(command)
+                withAutowake { longPress(command) }
 
             is Command.Swipe ->
-                swipe(command)
+                withAutowake { swipe(command) }
 
             is Command.Key ->
                 key(command)
 
             is Command.Click ->
-                elementClick(command)
+                withAutowake { elementClick(command) }
 
             is Command.LongClick ->
-                elementLongClick(command)
+                withAutowake { elementLongClick(command) }
 
             is Command.Scroll ->
                 elementScroll(command)
@@ -339,30 +349,77 @@ class CommandExecutor(
             is Command.Stop ->
                 stopAgent()
 
+            is Command.Module ->
+                FeatureRegistry.execute(command, features)
+
             is Command.Unknown ->
                 ExecutionResult(EXIT_USAGE, "", "unknown command: ${command.name}")
 
             is Command.BadUsage ->
                 ExecutionResult(EXIT_USAGE, "", command.detail)
         }
-    )
 
     private fun status(): ExecutionResult {
+        // 字段名与顺序锁在 StatusPlan 里，纯 JVM 单测钉死：控制器按名字取值，
+        // 改一个就是断一次。既有 11 个键一个都没动，v0.8.0 只在末尾加了 shell。
         val json = JSONObject()
-        json.put("ok", true)
-        json.put("ver", BuildConfig.VERSION_NAME)
-        json.put("acc", PhoneAccessibilityService.instance != null)
-        json.put("svc", RcAgentService.running)
-        json.put("scr", isScreenOn(context))
-        json.put("bat", batteryPercent(context))
-        json.put("loc", locations.hasPermission())
-        json.put("loop", locations.loopInterval)
-        json.put("opt", Battery.flag(context))
-        json.put("queue", 0)
-        // 新增字段（v0.5.5）：守护进程的缓存状态。既有字段一个都没改名 ——
-        // 控制器那侧按名字取值，改一个就是断一次。真值用 `watchdog status`。
-        json.put("guard", Watchdog.state())
+        for ((name, value) in StatusPlan.fields(
+            ver = BuildConfig.VERSION_NAME,
+            acc = PhoneAccessibilityService.instance != null,
+            svc = RcAgentService.running,
+            scr = isScreenOn(context),
+            bat = batteryPercent(context),
+            loc = locations.hasPermission(),
+            loop = locations.loopInterval,
+            opt = Battery.flag(context),
+            queue = 0,
+            guard = Watchdog.state(),
+            shellConnected = SelfAdb.isConnected()
+        )) {
+            json.put(name, value)
+        }
         return ExecutionResult(EXIT_OK, json.toString(), "")
+    }
+
+    /**
+     * autowake 闸门（v0.8.0-pad12）：屏幕黑着就先亮，锁屏带密码就拒。
+     *
+     * autowake 关着时 [Autowake.preflight] 立刻返回空闸门，这条包装等于没包，
+     * 既有六条界面命令的行为一个字都没变。亮屏成功时在回执末尾追加
+     * `wake=via=...`（JSON 回执改走 stderr，见 [FeatureNotes]）。
+     */
+    private fun withAutowake(block: () -> ExecutionResult): ExecutionResult {
+        val guard = Autowake.preflight(context)
+        guard.refusal?.let { return it }
+        val result = block()
+        val note = guard.note ?: return result
+        val (stdout, stderr) = FeatureNotes.attach(result.stdout, result.stderr, listOf(note))
+        return ExecutionResult(result.exit, stdout, stderr)
+    }
+
+    /** 给功能模块用的 [FeatureContext]（v0.8.0-pad12）。 */
+    private val features: FeatureContext = object : FeatureContext {
+        override val context: Context
+            get() = this@CommandExecutor.context
+
+        override val applyAllowed: Boolean = true
+
+        override fun <T> onMain(timeoutMs: Long, block: () -> T): T? =
+            this@CommandExecutor.onMain(timeoutMs, block)
+
+        override fun runShell(command: String, timeoutMs: Long): ShellOut? =
+            this@CommandExecutor.runShell(command, timeoutMs)
+    }
+
+    /**
+     * 以 uid 2000 跑一条 shell，供功能模块用。
+     *
+     * 与 `sh` 命令的四段式一致，但**不在这里映射 exit**：模块自己决定
+     * precondition 是回 6 还是干脆不需要 shell。没连上返回 null。
+     */
+    private fun runShell(command: String, timeoutMs: Long): ShellOut? {
+        val result = offMain(timeoutMs + SH_SLACK_MS) { SelfAdb.shell(command, timeoutMs) } ?: return null
+        return ShellOut(result.code, result.text, result.precondition)
     }
 
     /**
@@ -1470,6 +1527,9 @@ class CommandExecutor(
 
         /** `sh` 的看门狗余量：哨兵要等命令自己结束，边界上不能误判超时。 */
         private const val SH_SLACK_MS = 5_000L
+
+        /** 功能模块的 shell 超时（v0.8.0-pad12）：wm / dumpsys / notification 都是秒级。 */
+        private const val WM_TIMEOUT_MS = 10_000L
 
     /**
      * 自连 ADB 读日志的预算。logcat -d 是 dump 完就退出，30 秒足够；

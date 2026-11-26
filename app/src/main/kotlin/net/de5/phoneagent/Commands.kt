@@ -385,6 +385,15 @@ sealed class Command {
     data class Unknown(val name: String) : Command()
     /** The verb is known but the arguments cannot be used. */
     data class BadUsage(val detail: String) : Command()
+
+    /**
+     * A pluggable feature module's command (v0.8.0-pad12).
+     *
+     * The grammar lives in the module's own `Feat<name>.kt`; this class is just
+     * the carrier so [FeatureRegistry] can execute it. Adding feature number 13
+     * never touches this file.
+     */
+    data class Module(val verb: String, val rest: String) : Command()
 }
 
 /** Scroll direction for `scroll up|down`. */
@@ -736,7 +745,9 @@ object Commands {
 
             "stop" -> Command.Stop
 
-            else -> Command.Unknown(head)
+            // 功能模块先认领（v0.8.0-pad12）：认领不到才回落 unknown。
+            // 加第 13 个功能不用改这里 —— 只加一个 Feat<名字>.kt + 注册表一行。
+            else -> FeatureRegistry.parse(head, rest) ?: Command.Unknown(head)
         }
     }
 

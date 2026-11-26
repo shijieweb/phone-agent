@@ -590,6 +590,123 @@ Do this on the tablet — it is the machine the owner actually keeps films on.
     batch is running. Finally leave and re-enter the page once more: that path must
     still work, so the new one did not break the old one.
 
+### 第一批新命令 (v0.8.0-pad12；v0.8.1 修 P0/P1/P2、v0.8.2 修 P3 后按这里验收)
+
+Seven commands, all of them in their own `Feat<Name>.kt`. Run each one from the
+relay and compare against the expectation; the phone-side action is what proves
+it, not the exit code.
+
+1. **`status` has twelve keys and the old ones are untouched.**
+   `status` → exit 0, one JSON object whose keys are, in this order,
+   `ok ver acc svc scr bat loc loop opt queue guard shell`. The last one is
+   `"shell":"ok"` when `shinfo` says connected and `"shell":"down"` otherwise —
+   check both by running `shinfo`, then `status`, and confirm the word matches.
+   Nothing else about the line changed.
+2. **`where` names the page in front.** Open WeChat, go into any chat, run
+   `where` → exit 0 and exactly one line:
+   `{"ok":true,"pkg":"com.tencent.mm","act":"…ChattingMainUI","scr":"on","kg":"none"}`.
+   Press home and run it again: `pkg` must be the launcher's package. Turn the
+   screen off (do not unlock) and run it: `"scr":"off"` and `"kg"` is `locked` or
+   `secure`. With self-ADB **down** (`shinfo` says not connected) the command must
+   still exit 0 — only `act` becomes `""`. With accessibility switched off it is
+   exit 3 and the sentence names the service.
+3. **`media` really drives the player.** Start a video in the phone's player, then
+   from the relay `media pause` → exit 0, stdout `media pause keyevent=127`, and
+   the video pauses. `media play` resumes it (126), `media next` goes to the next
+   track (87), `media prev` back (88), `media stop` stops (86). Now disconnect
+   self-ADB and repeat `media next`: the stdout becomes
+   `media next via=audiomanager（未连自连 ADB，这条通道不保证生效；要稳就用 shconnect）`
+   — **the receipt must not claim success**. Whether the player actually reacts on
+   that path depends on the ROM; what is being checked is that the line says so.
+   `media rewind` and bare `media` are exit 2 with a `usage: ` line, and
+   `key play` must still be a usage error (media keys are not global actions).
+4. **`battery` reads, then changes only with `apply`, and says whether
+   anything changed.** `battery` → `battery whitelisted` or
+   `battery not-whitelisted`, matching the lamp on the config page.
+   `battery deny` → exit 0,
+   `dry-run: would run sh: cmd deviceidle whitelist -net.de5.phoneagent`, and the
+   lamp does **not** change.
+   **Three outcomes, and you must see the right one** (v0.8.1):
+   - already whitelisted, `battery allow apply` → `battery 本来就在白名单里（未改动）`
+     — **not** "已加入";
+   - whitelisted, `battery deny apply` → `battery 已移出电池优化白名单`, lamp red
+     within 3 s;
+   - not whitelisted, `battery deny apply` → `battery 本来就不在白名单里（未改动）`.
+   Flip it and check the third: `battery allow apply` from red →
+   `battery 已加入电池优化白名单`, lamp green within 3 s. With self-ADB down the
+   `apply` form is exit 6 and the text contains `shconnect`.
+5. **`notify post` appears in the shade, and `apply` works on either side.**
+   `notify post 测试 这是一条测试通知` → exit 0 and a `dry-run: ` line naming the
+   whole `cmd notification post` command; **nothing appears on the phone**.
+   Now the two `apply` positions, both of which must post the same notification:
+   - `notify post apply 测试 这是一条测试通知` → exit 0, `notify 已发送`;
+   - `notify post 测试 这是一条测试通知 apply` → exit 0, `notify 已发送`, and the
+     body in the shade is 这是一条测试通知 — **without the word apply**.
+   This second form is the v0.8.1 fix: v0.8.0 posted a notification reading
+   "这是一条测试通知 apply". If this ROM answers
+   `notify 已发送（这条 ROM 不认 -S bigtext，已去掉后重试成功）` that is the
+   Android 12 fallback working — the notification must still be there.
+   **A body whose last word really is `apply` is the one case the trailing form
+   cannot express** — `notify post 测试 请 apply` is read as the switch and dry-runs
+   a body of `请`, not `请 apply`. That is the intended trade: a stray switch is
+   far more common than a body ending in that English word. When you mean the
+   literal word, put the switch in front and it is left alone:
+   `notify post apply 测试 请 apply` → exit 0, the shade shows 请 apply.
+   A body that merely contains the word is untouched either way:
+   `notify post 测试 请 apply 一下` dry-runs `请 apply 一下`.
+   `notify post 只有标题` is exit 2 (no body), and `notify` alone is exit 2.
+6. **`wm` reads, changes, and heals itself — and every command really reaches
+   the phone.** `wm` → exit 0, one line `wm size 1200x2670 density 520` (your own
+   numbers) — with **nothing overridden** that line must be byte-for-byte the old
+   format. After an override is in force it changes shape on purpose:
+   `wm size 900x1600 density 520 (override; physical 1200x2670/520)` — the value in
+   force leads, the physical values follow as an annotation. **This is the v0.8.2
+   fix:** v0.8.1 answered `wm size 1200x2670 density 520` while the phone was
+   really at 900x1600, so a successful change looked like a failed one. Check it
+   directly: `wm size 900x1600 120 apply`, then `sh apply wm size` (must show both
+   `Physical size` and `Override size: 900x1600`), then `wm` — the first number
+   must be `900x1600`, **not** `1200x2670`. Same for density:
+   `wm density 400 120 apply` then `wm` shows `density 400` as the main value.
+   `wm size 900x1600` → `dry-run: would run sh: wm size 900x1600` and
+   the screen does **not** change. **Read that dry-run line closely: it must start
+   with `wm size`, not `size`.** v0.8.0 printed `dry-run: would run sh: size
+   900x1600` and the real run answered
+   `/system/bin/sh: size: inaccessible or not found`; that is the P0 this round
+   fixes. Then:
+   - `wm size 900x1600 60 apply` → exit 0, the UI becomes visibly cramped, the
+     receipt says `60s 后自动恢复`;
+   - `wm density 400 60 apply` → exit 0, text visibly larger, same promise;
+   - **do nothing for a minute**, then `ping`: the receipt ends with
+     `已自动恢复显示设置（超时）` and the screen is back to its real size;
+   - `wm size reset apply` clears the fuse at once (stdout
+     `wm 已恢复 size 到系统默认`) and a later `ping` must **not** carry the expiry
+     sentence;
+   - `wm size reset 60 apply` is exit 2 (reset takes no seconds) and
+     `wm brightness 50` is exit 2.
+7. **`autowake` wakes, and refuses a password lock.**
+   `autowake` → `autowake off` on a fresh install. Lock the phone (screen off, no
+   password), run `tap 540 1200`: with autowake **off** nothing wakes the screen —
+   that is the old behaviour and it must still be exactly that. Then
+   `autowake on`, lock it again, `tap 540 1200` → exit 0, stdout
+   `tap 540 1200 wake=via=wakelock`, and the screen is on. Now set a **password**
+   (or PIN) on the lock screen, lock the phone, and run `tap 540 1200` → **exit 6**,
+   stderr `锁屏有密码，界面操作不可用；请先手动解锁`, and the tap must **not** happen.
+   **On a phone that has a lock password, autowake will never light the screen —
+   that is correct, not a bug** (v0.8.2). A locked phone reports `secure` from
+   `KeyguardManager` whether it is dark or lit, and `secure` is checked before
+   "screen already on", so the only thing autowake buys there is the honest refusal
+   above instead of the old `没有出现含…的节点`. To see the wake path itself you must
+   test on a phone with **no** lock password (or with the lock removed): only then
+   does `tap` on a dark screen answer `wake=via=wakelock`.
+   The same refusal applies to `tree`, `shot`, `click`, `longclick`, `long`,
+   `swipe` and `where`. `autowake sometimes` is exit 2. `autowake off` returns
+   everything to the old behaviour.
+8. **The module foundation holds.** `media NEXT` and `media next` are the same
+   command (the verb and the argument are lowercased). A word nobody claims still
+   answers `unknown command: <word>` with exit 2, unchanged from every earlier
+   version. And the existing commands are untouched: `ping`, `wake`, `tree`,
+   `click`, `sh`, `mp3 scan` all behave exactly as they did in 0.7.3.
+
 ### Log size and trimming (v0.5.8-pad12)
 
 1. On the debug page the summary carries a fourth line: `日志: N 行/丢弃 M · 守护日志 X KB · APK 残留 K 个`.

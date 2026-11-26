@@ -104,6 +104,85 @@ It now hangs off `onResume`, so returning to the page re-counts by itself, and a
 guarded `refresh()`: one scan at a time, and none at all while a batch is running,
 when the numbers on disk are still moving. See `SPEC.md` §6.2.
 
+v0.8.2-pad12 is one real-device defect and one sentence of documentation. Both
+came from the same habit: a helper that answers two questions gets trusted for
+the one it was not written for.
+
+**`wm` reported the wrong number once an override was in force.** `wm size`
+prints `Physical size:` always and `Override size:` only after a change, and the
+device really uses the override. v0.8.1 read the physical line for *both* the
+read command and the fuse baseline, so a phone just set to 900x1600 answered
+`wm size 1200x2670 density 520` — a successful change that looked like a failed
+one. There are now two helpers per field, because there are two questions:
+`currentSize`/`currentDensity` (override first) answer "what is in force" for
+the read, `originalSize`/`originalDensity` (physical first) answer "what will
+reset return to" for the fuse. With nothing overridden the read line is byte
+for byte the old format, so existing parsers keep working; with an override it
+leads with the value in force and keeps the baseline as an annotation:
+`wm size 900x1600 density 520 (override; physical 1200x2670/520)`.
+
+**Documented, not changed: `autowake` cannot light a password-locked screen.**
+`AutowakePlan.decide` checks `secure` before `screenOn`, and a locked phone
+reports `secure` whether it is dark or lit — so on such a device the only thing
+autowake buys is an honest `exit=6 锁屏有密码` instead of the old misleading
+`没有出现含…的节点`. That is the intended behaviour; the note is in `SPEC.md`
+§3.27 and `manualcheck.md` so nobody later reads a dark screen as a broken
+feature.
+v0.8.1-pad12 fixes what the first real-device run of v0.8.0 found. Three things,
+all of them the kind a unit test passes while the phone disagrees.
+
+**`wm` never reached the phone.** `WmPlan.command` built the apply command as
+`kind + " " + value`, dropping the `wm ` prefix, so `wm size 900x1600 apply`
+executed `size 900x1600` and answered `/system/bin/sh: size: inaccessible or not
+found` with exit 6. Read and both resets were fine because their constants carry
+the prefix — which is exactly why nothing caught it. The prefix is now built in
+one place, and `WmPlanTest` asserts that the read constants, the reset constants
+**and** every parsed apply command all start with `wm `, plus the whole dry-run
+line `dry-run: would run sh: wm size 900x1600`.
+
+**`notify post` took `apply` on one side only.** `wm size 900x1600 apply` puts it
+at the end, `notify post apply T B` at the front; the same app with two rules got
+the accident it invited — a real run posted a notification whose body read
+「测试正文 apply」. `apply` is now accepted on either side and the two forms build
+one identical command. Stripping is deliberately conservative: a trailing `apply`
+is removed only when a title *and* a body remain, a front `apply` never strips a
+second one, and a body that merely contains the word is untouched.
+
+**`battery` could not tell "already done" from "just did it".** On a phone that
+was already whitelisted, `battery allow apply` still said 已加入 — so the receipt
+carried no information about whether anything happened. The state is now read
+before the command runs and the answer is one of three: 本来就在白名单里（未改动）,
+已加入电池优化白名单, or 已移出电池优化白名单. If the read fails the command still
+runs and falls back to the old wording rather than blocking a real change.
+
+Also corrected: `SPEC.md` §3.23 called `shell` the eleventh `status` key. It is
+the twelfth — v0.5.5 shipped ten and v0.5.5's `guard` was the eleventh.
+v0.8.0-pad12 is the round that made the next ten rounds cheap. Every feature now
+lives in its own `Feat<Name>.kt` holding its verb, its parser, its executor and all
+of its user-visible text, and `FeatureRegistry` lists them one per line; the only
+edits `Commands.kt` and `Executor.kt` needed were a single fall-through branch
+each. Feature number thirteen is therefore **one new file plus one line**, and a
+test asserts the verbs stay unique and lowercase so a collision fails the build
+rather than quietly shadowing an old command. See `SPEC.md` §3.28.
+
+Seven features arrived with the foundation. `where` answers "which page is in
+front?" in one line of JSON, which usually removes one `tree` round trip.
+`status` grows a twelfth key, `shell`, so a controller can tell a permission
+problem from a disconnected self-ADB without running anything else. `media`
+sends the five transport keys (play/pause/next/prev/stop) through
+`input keyevent`, falling back to `AudioManager` and saying so when self-ADB is
+down, because that fallback is not guaranteed. `battery` reads and writes the
+optimisation whitelist. `notify post` puts a sentence in the shade — spelled
+`notify`, not `notif`, which already lists notifications. `wm` reads and
+changes display size and density **with a fuse**: the original values and a
+deadline go into `Prefs`, and `CommandExecutor` checks that deadline before every
+command, so a resolution the phone cannot drive heals itself within five minutes
+instead of needing a factory reset. And `autowake` wakes the screen before the
+seven screen-touching commands — and refuses outright, with exit 6, when the lock
+screen has a password, because running anyway produces `no node found` and sends
+the operator hunting for a selector bug that is not there. See `SPEC.md`
+§3.21–§3.27.
+
 Since v0.6.4-pad12 discovery only trusts **our own** advertisement. mDNS is shared:
 with the phone and the tablet on the same Wi-Fi, the tablet's wireless-debugging
 port was reported as `40157` — the *phone's* port — so `shconnect` spent 30 s
@@ -159,6 +238,12 @@ left at `/data/local/tmp/phoneagent-tree.xml` as evidence. See `SPEC.md` §5.1.
 | Self-ADB | `shinfo`, `sh [t=N] [apply] <cmd>` (**dry run** until `apply`), `shpair <6 digits>`, `shconnect`, `shkey [show]` / `shkey regen [apply]` / `shkey import <url>` — the app talks to **its own** adbd over `127.0.0.1` and runs commands as uid 2000; no PC, no root, no third-party binary (see below) |
 | Self-start | only two doors, and neither is the boot: opening the app starts the agent again (unless you pressed 停止), and a `uid 2000` guard script in `/data/local/tmp` revives it after `am force-stop`. A reboot never starts it — press 启动. `watchdog [status\|arm\|disarm]` drives the guard by hand |
 | Video → MP3 | `mp3 scan`, `mp3 run [apply] [force]` — decodes each video's audio track on the phone and writes `<name>.mp3` next to it (128 kbps / 44100 Hz, default folder `/sdcard/视频转音乐专用`); `run` is a dry run until `apply`; no ffmpeg, no PC |
+| Where | `where` — one line of JSON naming the page in front: `{"ok":true,"pkg":…,"act":…,"scr":"on","kg":"none"}`. The package comes from accessibility; the activity name needs self-ADB and is `""` without it. Ask this before `tree` and you usually need one tree instead of two |
+| Media | `media play\|pause\|next\|prev\|stop` — transport keys as `input keyevent` (126/127/87/88/86) over self-ADB; without it the command falls back to `AudioManager` and says so, because that path is not guaranteed to work |
+| Battery | `battery` (whitelisted or not), `battery allow [apply]`, `battery deny [apply]` — the optimisation whitelist through `cmd deviceidle whitelist`; a dry run until `apply`, and the receipt separates 本来就在（未改动） from 已加入/已移出 |
+| Notify | `notify post [apply] TITLE BODY` — puts a sentence in the phone's notification shade (`cmd notification post`); dry run until `apply`, and `apply` is accepted at either end. Not `notif`, which lists existing notifications |
+| Display | `wm` (read), `wm size WxH [SECONDS] apply`, `wm size reset apply`, `wm density N [SECONDS] apply`, `wm density reset apply` — every command really starts with `wm `, the read reports the value **in force** (an override shows as `(override; physical …)`), and **with a fuse**: a changed resolution is restored automatically when the deadline passes (default 5 min), and the next receipt says so |
+| Wake gate | `autowake [on\|off]` — when on, the seven screen-touching commands wake the phone first, and a password-locked screen is refused with exit 6 instead of being reported as `no node found` |
 | Lifecycle | `ping`, `stop` |
 
 `stop` is authoritative, and it is the same rule from both doors: pressing 停止 in
