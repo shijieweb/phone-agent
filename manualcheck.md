@@ -117,7 +117,7 @@ and compare against the expectation below.
 | `shot` | exit 0, stdout is **one line of JSON** `{"name":"shot-<millis>-<6 chars>","bytes":<n>,"w":<w>,"h":<h>,"q":<q>,"method":"screen"}`; stderr `w=… h=… bytes=… blob=shot-…`. Fetch the bytes with `GET <relay>/ctl/blob/<name>` and confirm the picture is the current screen. If the upload fails the command must still work: stdout becomes base64 and stderr gains `blob upload failed: <reason>，已回退 base64` |
 | `shot 320 30` | exit 0, stderr shows a smaller `w=`/`h=` |
 | `shot b64` | exit 0, stdout is one long base64 line (no newlines, no `data:` prefix); stderr `w=… h=… bytes=… b64=…` — this is the only path that still puts the image on stdout |
-| `tree` | exit 0, one line per node, each `<depth>\|<class>\|<text>\|<desc>\|<resId>\|<bounds>\|<flags>`. Open the app drawer and re-run — the lines must change. |
+| `tree` | exit 0, one line per node, each `<depth>\|<class>\|<text>\|<desc>\|<resId>\|<bounds>\|<flags>`. Open the app drawer and re-run — the lines must change. Since v0.8.3 a trailing `z` in `flags` means that node's rect is inverted or zero-area and `click` will refuse it (see the `z` check below). |
 | `tap X Y` | exit 0 with stdout `tap X Y`; the thing at those coordinates reacts (verify with `shot` before/after). If the gesture never completes you get exit 4 `gesture did not complete`. |
 | `long X Y 800` | exit 0 with stdout `long X Y 800`; a long-press menu opens |
 | `swipe 540 1600 540 600 300` | exit 0 with stdout echoing all five numbers; the screen scrolls up one page |
@@ -432,6 +432,32 @@ the check with 高级设置 collapsed at the start.
    `tree uia` that still answers is a slow dump, not a hang.
 6. `tree uia 5` → exactly five lines and the closing `... truncated at 5 nodes`,
    same wording as `tree 5`.
+
+### `tree` says which nodes cannot be clicked (v0.8.3-pad12)
+
+The defect this version exists for: `click` answered `node has no usable bounds` for
+nodes the operator could see and could not tell apart from the ones that work. Run it
+on an information-feed app (知乎 / 快手 / any 网页), because that is where the bad
+rects live:
+
+1. `tree 200` → most lines carry no `z`, and the ones that do end with it:
+   `2|android.widget.TextView|…|||52,254,1148,86|z`. A line with a **printed** rect
+   whose `b` is smaller than its `t` (or `r` smaller than `l`) **must** carry `z`;
+   one with `0,0,100,50`-style bounds must not. A line with an **empty** bounds column
+   is *not* marked — that is a different, already-visible case.
+2. On the same screen count the `z` lines: on 糖豆's web page it was 58 of 72 text
+   nodes and on 百度 on the tablet 97 of 163. **None of them may be missing from the
+   output** — this version marks, it does not filter. If the tree suddenly looks
+   shorter, someone turned the mark into a filter.
+3. `click SEL` on a `z` node → exit **5**, stderr
+   `node has no usable bounds: <sel> matches=…` — unless the node is itself clickable
+   and `ACTION_CLICK` lands, in which case the answer is `clicked via=action` and no
+   coordinates were ever needed. That is the only way a `z` node can be clicked; the
+   gesture fallback has nothing to aim at. The `z` letter changes nothing about
+   `click`; it only lets you see the answer before asking.
+4. The flag order is append-only: a node that is both clickable and unclickable prints
+   `cz`, never `zc`, and every pre-v0.8.3 letter keeps its old position (`clfesxdk`
+   is still the full order before the `z`).
 
 ### The status lamps tell the truth (v0.6.2-pad12)
 

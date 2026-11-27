@@ -102,7 +102,12 @@ object UiTree {
         val desc = field(node.desc)
         val resId = field(node.resId)
         val flagText = flags(node)
-        if (text.isEmpty() && desc.isEmpty() && resId.isEmpty() && flagText.isEmpty()) return null
+        // `z` on its own is not a reason to print a line: an empty container with a
+        // zero-area rect is still an empty container, and letting those in would grow
+        // every tree on a busy page without telling the caller anything. `z` only
+        // annotates lines that were already worth printing.
+        val informativeFlags = flagText.isNotEmpty() && flagText != "z"
+        if (text.isEmpty() && desc.isEmpty() && resId.isEmpty() && !informativeFlags) return null
 
         val className = sanitize(node.className)
         val bounds = node.bounds
@@ -115,12 +120,29 @@ object UiTree {
     }
 
     /**
-     * Flag letters, only the ones that are true:
+     * Flag letters, only the ones that are true, in this fixed order:
      * `c`=clickable `l`=long-clickable `f`=focusable `e`=editable `s`=scrollable
-     * `x`=checked `d`=disabled `k`=selected.
+     * `x`=checked `d`=disabled `k`=selected, and finally `z`=no usable bounds (点不了).
+     *
+     * `z` is appended **last** on purpose: every older letter keeps the position it
+     * has always had, so a parser written against the previous format keeps working.
+     *
+     * "No usable bounds" is the rect `click` refuses. [ElementActions.centreOf] answers
+     * null when `right <= left` or `bottom <= top`, so a node whose rect is inverted
+     * (`52,254,1148,86`, measured in 知乎 on the real phone) or zero-area (58 of 72
+     * text nodes on one 糖豆 page, 97 of 163 on a 百度 page on the tablet) cannot be
+     * clicked at all. A node with no rect whatsoever prints an empty bounds column,
+     * which already reads as "no rect"; `z` marks the misleading case — a rect is
+     * printed, it just cannot be tapped.
+     *
+     * These nodes are **marked, never filtered**. Their text is still evidence of what
+     * is on this screen, and dropping those lines would throw most of it away (the
+     * majority of text nodes on a busy page are exactly the zero-area ones). What the
+     * caller needs is not a shorter tree but the ability to see at a glance which nodes
+     * `click` can reach at all — and to still be able to read the ones it cannot.
      */
     private fun flags(node: NodeView): String {
-        val sb = StringBuilder(9)
+        val sb = StringBuilder(10)
         if (node.clickable) sb.append('c')
         if (node.longClickable) sb.append('l')
         if (node.focusable) sb.append('f')
@@ -129,7 +151,14 @@ object UiTree {
         if (node.checked) sb.append('x')
         if (!node.enabled) sb.append('d')
         if (node.selected) sb.append('k')
+        if (hasUnusableBounds(node.bounds)) sb.append('z')
         return sb.toString()
+    }
+
+    /** True when a rect is printed but `click` cannot use it: empty or inverted. */
+    private fun hasUnusableBounds(bounds: NodeBounds?): Boolean {
+        if (bounds == null) return false
+        return bounds.right <= bounds.left || bounds.bottom <= bounds.top
     }
 
     private fun field(value: String?): String {

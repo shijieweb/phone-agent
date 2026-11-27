@@ -143,4 +143,55 @@ class UiTreeTest {
         val node = FakeNode(className = "x", text = "t", bounds = NodeBounds(1, 2, 3, 4))
         assertEquals("0|x|t|||1,2,3,4|", UiTree.format(listOf(node), 400))
     }
+
+    /**
+     * SPEC.md section 10 case 31. The rect below is the one 知乎 handed us on the
+     * real phone: bottom (86) is above top (254), so the height is negative and
+     * `click` answers `node has no usable bounds`. The line must still be emitted —
+     * marked `z`, not dropped.
+     */
+    @Test
+    fun anInvertedRectIsMarkedWithZ() {
+        val node = FakeNode(
+            className = "android.widget.TextView",
+            text = "2分钟学会AI漫剧创作，全流程教程，新手也能当导演！",
+            bounds = NodeBounds(52, 254, 1148, 86)
+        )
+        assertEquals(
+            "0|android.widget.TextView|2分钟学会AI漫剧创作，全流程教程，新手也能当导演！|||52,254,1148,86|z",
+            UiTree.format(listOf(node), 400)
+        )
+    }
+
+    @Test
+    fun aNormalRectIsNotMarkedWithZ() {
+        val node = FakeNode(className = "x", text = "t", bounds = NodeBounds(0, 0, 100, 50))
+        assertEquals("0|x|t|||0,0,100,50|", UiTree.format(listOf(node), 400))
+    }
+
+    /**
+     * `z` alone does not make an otherwise empty node worth printing. An empty
+     * container with a zero-area rect stays skipped, exactly as before this flag
+     * existed — otherwise every busy screen would gain a pile of blank lines.
+     */
+    @Test
+    fun anEmptyNodeWithAnInvertedRectIsStillSkipped() {
+        val node = FakeNode(className = "android.widget.FrameLayout", bounds = NodeBounds(0, 0, 0, 0))
+        assertEquals("", UiTree.format(listOf(node), 400))
+    }
+
+    /**
+     * A clickable node whose rect is unusable carries both letters, and `z` stays
+     * last so every older flag keeps its position.
+     */
+    @Test
+    fun aClickableNodeWithAnInvertedRectCarriesCThenZ() {
+        val node = FakeNode(
+            className = "x",
+            text = "t",
+            bounds = NodeBounds(52, 254, 1148, 86),
+            clickable = true
+        )
+        assertEquals("0|x|t|||52,254,1148,86|cz", UiTree.format(listOf(node), 400))
+    }
 }

@@ -104,6 +104,22 @@ It now hangs off `onResume`, so returning to the page re-counts by itself, and a
 guarded `refresh()`: one scan at a time, and none at all while a batch is running,
 when the numbers on disk are still moving. See `SPEC.md` §6.2.
 
+v0.8.3-pad12 makes the node tree say which nodes **cannot be tapped**. On the real
+phone a large share of the accessibility rects come back inverted or zero-area —
+`52,254,1148,86` (bottom above top) in 知乎, 58 of 72 text nodes on one 糖豆 page,
+97 of 163 on a 百度 page on the tablet — and `click` on one of them has no
+coordinates to fall back on, so it answers `node has no usable bounds` unless the
+node's own `ACTION_CLICK` lands — and nothing in the `tree` output said which was
+which in advance.
+
+`flags` now ends with `z` for exactly those nodes, appended **last** so every older
+letter keeps its position and existing parsers keep working. They are marked, not
+filtered: their text is still evidence of what is on the screen, and on a busy page
+they are the majority of the text nodes, so dropping the lines would throw most of
+the content away. `z` is not a flag that can summon a line of its own — an empty
+container with a bad rect is still skipped — and `click` is unchanged. See
+`SPEC.md` §5 and §10 case 31.
+
 v0.8.2-pad12 is one real-device defect and one sentence of documentation. Both
 came from the same habit: a helper that answers two questions gets trusted for
 the one it was not written for.
@@ -128,6 +144,7 @@ autowake buys is an honest `exit=6 锁屏有密码` instead of the old misleadin
 `没有出现含…的节点`. That is the intended behaviour; the note is in `SPEC.md`
 §3.27 and `manualcheck.md` so nobody later reads a dark screen as a broken
 feature.
+
 v0.8.1-pad12 fixes what the first real-device run of v0.8.0 found. Three things,
 all of them the kind a unit test passes while the phone disagrees.
 

@@ -1870,11 +1870,32 @@ One node per line:
 - `depth` = nesting level, 0 for each window root.
 - `text`, `desc`, `resId` truncated to 60 chars each, `\n`/`|` replaced by `/`.
 - `bounds` = `l,t,r,b`.
-- `flags` = concatenated letters, only those true:
+- `flags` = concatenated letters, only those true, always in this order:
   `c`=clickable `l`=long-clickable `f`=focusable `e`=editable `s`=scrollable
-  `x`=checked `d`=disabled `k`=selected.
+  `x`=checked `d`=disabled `k`=selected, then `z`=no usable bounds (点不了).
+- `z` is appended **last** so that every older letter keeps the position it has
+  always had and a parser written against the previous format keeps working.
+- `z` means the printed rect is one `click` refuses: `right <= left` or
+  `bottom <= top`, which is what `ElementActions.centreOf` returns null for. Real
+  samples: `52,254,1148,86` (bottom above top, height negative) in 知乎 on the
+  phone; 58 of 72 text nodes on one 糖豆 page and 97 of 163 on a 百度 page on the
+  tablet were zero-area. A node with **no** rect at all prints an empty bounds
+  column and is *not* marked — there is nothing misleading to flag, and the column
+  already says it.
+- Those nodes are **marked, never filtered** (v0.8.3-pad12). Their text is still
+  evidence of what is on this screen, and on a busy page they are the majority of
+  the text nodes — dropping the lines would throw most of the content away. What
+  the caller needs is not a shorter tree but to see at a glance which nodes `click`
+  can reach, while still being able to read the ones it cannot. `z` does not change
+  `click`: a `z` node is still clickable only through its own `ACTION_CLICK`
+  (`clicked via=action`); once that fails there is no centre to tap, so `click`
+  answers exit 5 `node has no usable bounds`.
 - Skip nodes that have no text, no contentDescription, no resource id **and** no
   flags — unless they have children (walk through them without emitting a line).
+  `z` alone does **not** count as a flag here: an empty container with a zero-area
+  rect is still an empty container, and printing those would add blank lines to every
+  busy screen without telling anyone anything. `z` only annotates lines that were
+  already worth printing.
 - Enumerate **all** windows (needs `flagRetrieveInteractiveWindows`), each
   starting at depth 0. The **active** window is read through `rootInActiveWindow`,
   not through `AccessibilityWindowInfo.getRoot()`: on Flyme / Android 16 the
@@ -2514,6 +2535,18 @@ framework** — do not mock `AccessibilityService`. Required cases:
       byte-for-byte line, and `theReadLineSaysSoWhenTheOverrideIsInCharge` pins
       `wm size 900x1600 density 520 (override; physical 1200x2670/520)` including
       the `?` placeholder when the physical value cannot be read.
+  31. The v0.8.3-pad12 `z` flag, one case per direction so neither can drift:
+      `UiTreeTest.anInvertedRectIsMarkedWithZ` feeds the real 知乎 rect
+      `52,254,1148,86` and asserts the line is still emitted with `z` at the end
+      (marking, not filtering); `aNormalRectIsNotMarkedWithZ` asserts `0,0,100,50`
+      carries no `z`; `aClickableNodeWithAnInvertedRectCarriesCThenZ` asserts a
+      clickable node with the same bad rect answers `cz` — `c` first, `z` last —
+      which is the pin on the append-only letter order. Every pre-existing
+      `UiTreeTest` case is untouched: a node with no rect prints an empty bounds
+      column and stays unmarked, so the old byte-for-byte expectations still hold.
+      `anEmptyNodeWithAnInvertedRectIsStillSkipped` pins the other half of "mark, do
+      not filter": `z` is not a flag that can summon a line for a node with no text,
+      no description and no resource id — such a node is skipped exactly as before.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

@@ -43,6 +43,7 @@
 | v0.8.0 | 模块化地基（`FeatureModule` + `FeatureRegistry`，加功能只新增一个 `Feat*.kt` + 注册表一行）+ 首批 7 个功能：`where` / `status` 加 `shell` 键 / `autowake` / `media` / `battery` / `notify` / `wm`（带自动过期保险丝） |
 | v0.8.1 | 修 v0.8.0 真机三坑：`wm` 漏了 "wm " 前缀（所有 apply 全 127）、`notify` 只认开头 apply、`battery` 文案不说实话 |
 | v0.8.2 | `wm` 读命令报当前生效值（Override 优先）而不是面板出厂值，保险丝基准仍取 Physical；有 Override 时输出 `(override; physical WxH/D)` |
+| v0.8.3 | `tree` 的 `flags` 末尾加 `z`＝这条 rect 点不了（`right<=left` 或 `bottom<=top`，即 `click` 拒绝的那种）。只标不滤：文字仍是「屏上有什么」的证据，忙页面里它们占文本节点多数（糖豆 76%、知乎 12%）。`z` 排最后，老字母位置不动 |
 
 ### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）
