@@ -660,7 +660,8 @@ class CommandExecutor(
             service,
             command.selector,
             mainDispatch(ELEMENT_TIMEOUT_MS),
-            command.apply
+            command.apply,
+            command.up
         )
     }
 

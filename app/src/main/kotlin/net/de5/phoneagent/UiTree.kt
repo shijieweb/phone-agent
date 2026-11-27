@@ -155,11 +155,14 @@ object UiTree {
         return sb.toString()
     }
 
-    /** True when a rect is printed but `click` cannot use it: empty or inverted. */
-    private fun hasUnusableBounds(bounds: NodeBounds?): Boolean {
-        if (bounds == null) return false
-        return bounds.right <= bounds.left || bounds.bottom <= bounds.top
-    }
+    /**
+     * True when a rect is printed but `click` cannot use it: inverted or zero-area.
+     *
+     * Delegates to [ClickPlan.isUsable] on purpose: the letter `z` and the click
+     * path must answer the same question, and two copies of the comparison would
+     * eventually disagree about which nodes are reachable.
+     */
+    private fun hasUnusableBounds(bounds: NodeBounds?): Boolean = !ClickPlan.isUsable(bounds)
 
     private fun field(value: String?): String {
         val clean = sanitize(value)

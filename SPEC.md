@@ -160,7 +160,7 @@ reach the `unknown command` branch.
 | `long X Y [ms]` | long press, default 600 ms, cap 5000 |
 | `swipe X1 Y1 X2 Y2 [ms]` | swipe, default 300 ms, cap 3000 |
 | `key NAME` | global action: `back`, `home`, `recents`, `notifications`, `quicksettings` |
-| `click [apply] SEL` | **dry run** by default: reports the node it would press; `apply` really clicks (see §3.1) |
+| `click [apply] [up] SEL` | **dry run** by default: reports the node it would press; `apply` really clicks; `up` also allows pressing a clickable ancestor when the node has no usable rect (see §3.1) |
 | `longclick [apply] SEL` | same, long press |
 | `scroll up\|down [n] [SEL]` | element-level scroll, `n` times (default 1, cap 20) |
 | `ime enter` | send `ACTION_IME_ENTER` to the focused editable node |
@@ -1227,14 +1227,54 @@ kind := text | desc | id | cls        (optional; default = any of text/desc/id)
 - `apply` is recognised only as a leading token, before the selector/label:
   `click apply 登录`, `confirm apply t=30 安装`. `tap`/`long`/`swipe` take explicit
   coordinates and are unaffected — they always act.
+- `up` is `click`'s second switch, also leading only, and it takes any order with
+  `apply`: `click up 删除`, `click apply up 删除`, `click up apply 删除`. It is the
+  opt-in for pressing a clickable **ancestor** when the matched node has no rect a
+  gesture can use (§5 `z`). Without it that case stays `exit=5`; with it the tap
+  happens and the reply names the ancestor. It is deliberately **not** automatic:
+  walking up crosses a semantic boundary. A list row is one clickable container and
+  the 「删除」 label inside it belongs to a different control than the row — tapping
+  the row opens the detail page, it does not delete. The container is the only thing
+  with a rect, so reaching it is a guess about intent, and a wrong guess on a phone
+  nobody is holding is destructive. `up` is consumed only when a selector follows
+  it, so `click up` keeps meaning "the node labelled up"; a selector that *begins*
+  with the word stays reachable through a kind prefix (`click text:up arrow`),
+  exactly like `apply`. `longclick` has no `up`: a long press has no ancestor
+  fallback to opt into, and `longclick up SEL` keeps meaning "the node labelled up".
 - Attempt order for `click apply`: `ACTION_CLICK` on the node (or its clickable
   ancestor) → if that returns false, fall back to a gesture tap at the **centre of
-  the node's bounds**. Report which path was used.
+  the node's bounds**. Report which path was used. When there is no usable centre
+  (the `z` case) the answer is `exit=5` `node has no usable bounds: <SEL>
+  matches=<n>`; when a clickable ancestor with a usable rect exists **and that
+  ancestor overlaps the node's rect**, the same line continues `; nearest clickable
+  ancestor is <class> "<text-or-desc>" at <l,t,r,b> — add \`up\` to tap it`, and with
+  `up` that ancestor's centre is tapped instead. No ancestor at all keeps the line
+  exactly as it was.
+- The ancestor must **overlap** the node on both axes (v0.8.5-pad12). The two rects
+  are normalised to proper boxes first (an inverted `z` rect still says *where* the
+  node is), and they count as overlapping when `aLeft <= bRight && bLeft <= aRight &&
+  aTop <= bBottom && bTop <= aBottom` — inclusive, so a zero-width or zero-height node
+  that only touches its container's edge still belongs to it. A missing rect on either
+  side is not an overlap.
+- Why the walk needs geometry at all: walking up alone is not enough on a real page.
+  Measured on a 糖豆 page (1200x2670), **all 113** text nodes with a `z` rect reached
+  the same off-screen 注册 `Button` at `1060,402,1153,451` — the WebView had pushed it
+  onto the same line — and 25 of them would have been tapped there, on the wrong
+  control entirely. A parent normally contains its child, so the ancestor that really
+  owns the label always shares pixels with it; the cross-semantic one does not. With
+  the rule the count is 27 of 113, and every one of the 27 lands on the full-width
+  player bar `0,2536,1201,2590` that really does hold the label. The rule is
+  deliberately looser than "fully contains": a label that spills a few pixels outside
+  its container is still that container's label, and the stricter test would lose real
+  taps for no safety gain (measured: the same 27 either way on that page).
 - Attempt order for `longclick apply`: `ACTION_LONG_CLICK` → gesture long press at
   the centre (default 600 ms).
 - `stdout` on success: `clicked via=action|ancestor|gesture node=<resId|text> at=<x>,<y>`
   (the label is `resId` if present, otherwise the first 40 chars of `text`, then
-  `desc`). `longclick` prints `longclicked …` with the same shape.
+  `desc`). `longclick` prints `longclicked …` with the same shape. The `up` path
+  keeps `node=`/`at=` — `at=` is where the tap landed, which is the ancestor's
+  centre — and appends `ancestor=<class> <l,t,r,b>`. `up` with no ancestor is
+  `exit=5`, `no clickable ancestor for: <class> "<text-or-desc>" at <l,t,r,b>`.
 - `stderr` always carries `matches=<n>` so the operator can see ambiguity.
 - `apply` and no match → `exit=5`, stderr `no node matched: <SEL>`; a dry run and
   no match → `exit=5`, stderr `没有出现含「SEL」的节点`.
@@ -1886,10 +1926,17 @@ One node per line:
   evidence of what is on this screen, and on a busy page they are the majority of
   the text nodes — dropping the lines would throw most of the content away. What
   the caller needs is not a shorter tree but to see at a glance which nodes `click`
-  can reach, while still being able to read the ones it cannot. `z` does not change
-  `click`: a `z` node is still clickable only through its own `ACTION_CLICK`
-  (`clicked via=action`); once that fails there is no centre to tap, so `click`
-  answers exit 5 `node has no usable bounds`.
+  can reach, while still being able to read the ones it cannot. A `z` node is still
+  clicked through its own `ACTION_CLICK` first (`clicked via=action`); once that
+  fails there is no centre to tap, and `click` answers exit 5 — either the plain
+  `node has no usable bounds` (no clickable ancestor with a usable rect that also
+  overlaps the node), or that line extended with `; nearest clickable ancestor is
+  <class> "<text-or-desc>" at <l,t,r,b> — add \`up\` to tap it`. The ancestor is
+  **named, not pressed**: the opt-in switch is `click up SEL` (§3.1), because tapping a
+  container is a guess about which control the label belonged to. The geometry rule
+  (v0.8.5-pad12, §3.1) is what keeps that guess on a container that really holds the
+  label: a page a WebView drew can put a node nowhere near its parent chain, and the
+  nearest clickable ancestor can then be a control on the other side of the screen.
 - Skip nodes that have no text, no contentDescription, no resource id **and** no
   flags — unless they have children (walk through them without emitting a line).
   `z` alone does **not** count as a flag here: an empty container with a zero-area
@@ -2547,6 +2594,50 @@ framework** — do not mock `AccessibilityService`. Required cases:
       `anEmptyNodeWithAnInvertedRectIsStillSkipped` pins the other half of "mark, do
       not filter": `z` is not a flag that can summon a line for a node with no text,
       no description and no resource id — such a node is skipped exactly as before.
+   32. The v0.8.4-pad12 ancestor fallback for a `z` node, one case per branch, all on
+       the pure `ClickPlan` (no device, no framework call):
+       `theNearestClickableAncestorWinsOverAGrandparent` pins "nearest, not outermost";
+       `aClickableAncestorWithoutAUsableRectIsSkipped` feeds a clickable wrapper whose
+       own rect is dead and asserts the walk keeps going up (pressing it would only
+       move the failure one level); `noClickableAncestorAnywhereKeepsTheOldLine`
+       asserts the byte-for-byte v0.8.3 line `node has no usable bounds: 删除 matches=1`
+       so the no-ancestor answer cannot drift; `theHintNamesTheAncestorAndTheSwitchThatWouldPressIt`
+       pins the hint wording including the `add \`up\` to tap it` tail;
+       `upWithNoAncestorNamesTheHitInsteadOfTapping` pins `no clickable ancestor for: …`;
+       `upTapsTheAncestorCentre` pins the tap point (the ancestor's centre, not the
+       hit's); `aHitWithAUsableRectNeverEntersTheAncestorLogic` is the guard on the
+       default path — a normal node inside a clickable row still takes the gesture
+       branch even with `up` given, so the new wording can only ever appear for a
+       `z` node; and `upIsALeadingSwitchInAnyOrderWithApply` /
+       `aSelectorThatStartsWithUpStaysReachableThroughAKindPrefix` /
+       `upIsClickOnlyAndDoesNotLeakIntoLongclick` pin the grammar: `click up apply 删除`,
+       `click apply up 删除`, `click up` and `click text:up arrow` and
+       `longclick up 登录` (still a selector). `aMissingRectIsNotUnusable` keeps `z`'s
+       definition — no rect prints an empty column and is not marked — and
+       `theSuccessLineKeepsTheDocumentedTailAndAddsTheAncestor` pins
+       `clicked via=ancestor node=删除 at=100,150 ancestor=android.widget.LinearLayout 0,100,200,200`.
+   33. The v0.8.5-pad12 geometry rule, again on the pure `ClickPlan` and again with the
+       **real rects** from the 糖豆 page that forced it:
+       `overlapsNeedsBothAxesAndAMissingRectAnswersNo` pins the predicate itself — a
+       missing rect on either side answers false, sharing a column is not enough, the
+       `z` rect `52,254,1148,86` is normalised before comparing, and
+       `120,2590,529,2590` against the 注册 button `1060,402,1153,451` does not overlap;
+       `overlapsCountsAnEdgeThatOnlyTouches` pins the inclusive `<=` on the 静音 rect
+       `10,2590,36,2590`, which only touches the bottom edge of the bar that holds it;
+       `aCrossSemanticAncestorIsNoLongerAHomeForTheTap` is the regression the rule
+       exists for — the nearest clickable ancestor is the 注册 button, and the answer
+       goes back to the byte-for-byte old line instead of naming it;
+       `aZeroWidthNodeStillBelongsToTheWideBarThatHoldsIt` pins both answers for a
+       genuine match (the hint wording, and the tap at `600,2563`, the bar's centre);
+       `anAncestorWithNoRectOfItsOwnIsNotACandidate` covers the `isUsable(null) == true`
+       corner — a clickable wrapper with no rect is still not named;
+       `upWithOnlyCrossSemanticAncestorsNamesTheHitInsteadOfTapping` pins `up` with
+       nothing overlapping (`no clickable ancestor for: …`, exit 5);
+       `theWalkSkipsAnAncestorDrawnElsewhereAndTakesTheOneAbove` pins that the walk
+       keeps going past a non-overlapping ancestor and takes the one above it; and
+       `aWalkWithoutAHitKeepsTheOldNearestAnswer` pins the `hit == null` form as the
+       pre-v0.8.5 nearest answer. The 17 v0.8.4 cases above are untouched and still
+       green — every ancestor rect they use already overlaps the hit.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

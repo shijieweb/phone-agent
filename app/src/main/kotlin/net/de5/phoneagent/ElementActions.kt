@@ -60,36 +60,83 @@ internal object ElementActions {
         ExecutionResult(EXIT_NOT_FOUND, "", "no node matched: ${selector.raw} matches=$matches")
 
     /**
-     * `click SEL`.
+     * `click [apply] [up] SEL`.
      *
      * Attempt order (SPEC.md section 3.1):
      *  1. `ACTION_CLICK` on the hit, or on its nearest clickable ancestor;
      *  2. if that returns false, a gesture tap at the centre of the hit's bounds.
+     *
+     * ## A hit with no tap point (v0.8.4-pad12)
+     *
+     * A `z` node (SPEC.md section 5) prints a rect that cannot be tapped, so step 2
+     * has no point to use. Its clickable container is usually right above it and
+     * [ClickPlan] finds it — but the tap does **not** happen on its own: walking up
+     * crosses a semantic boundary (the "删除" label inside a whole-row container —
+     * tapping the row opens the detail page, it does not delete), so pressing the
+     * ancestor unasked is a guess about intent. Without `up` the answer stays
+     * `exit=5` and only *names* that ancestor; with `up` the tap happens and the
+     * reply says which ancestor was pressed.
+     *
+     * Nothing else changes: a hit with a centre of its own — including the
+     * zero-area text nodes that make up most of a busy page — still takes exactly
+     * the gesture path it always took.
      */
     fun click(
         service: AccessibilityService,
         selector: Selector,
         onMain: MainDispatch,
-        apply: Boolean = false
+        apply: Boolean = false,
+        up: Boolean = false
     ): ExecutionResult {
-        val read = onMain.run { inspectNow(selector, service) }
+        // One main-thread read. The roots are kept because the ancestor walk has to
+        // see the very same NodeView instances the selector matched: a second read
+        // hands back fresh adapters and the identity search would miss.
+        val snap = onMain.run { snapshotNow(selector, service) }
             ?: return ExecutionResult(EXIT_TIMEOUT, "", "click timed out")
+        val read = snap.read
         if (!apply) return dryRun("click", selector.raw, read)
-        if (read.hit == null) return noMatch(selector, 0)
+        val hit = read.hit ?: return noMatch(selector, 0)
 
         // Attempt 1: the accessibility action, on the resolved target.
         val actionWon = onMain.run { performClickOnTarget(read.target) } ?: false
         if (actionWon) return success("clicked", read, "action")
 
         // Attempt 2: a gesture tap at the centre of the matched node's bounds.
-        val centre = read.centre
-            ?: return ExecutionResult(
-                EXIT_NOT_FOUND, "", "node has no usable bounds: ${selector.raw} ${read.matchesText}"
-            )
+        val centre = read.centre ?: return noTapPoint(service, selector, read, hit, snap.roots, up)
         return if (Gestures.tap(service, centre[0], centre[1])) {
             success("clicked", read, "gesture")
         } else {
             ExecutionResult(EXIT_TIMEOUT, "", "gesture did not complete ${read.matchesText}")
+        }
+    }
+
+    /**
+     * The old `node has no usable bounds` answer, now routed through [ClickPlan]:
+     * byte-identical when there is no ancestor to name, a hint naming one when
+     * there is, and the ancestor tap when the caller asked for it with `up`.
+     */
+    private fun noTapPoint(
+        service: AccessibilityService,
+        selector: Selector,
+        read: Inspection,
+        hit: SelectorHit,
+        roots: List<NodeView>,
+        up: Boolean
+    ): ExecutionResult {
+        val plan = ClickPlan.fallback(roots, hit.node, selector.raw, read.matchesText, up)
+        return when (plan) {
+            is ClickPlan.Fallback.Unchanged -> ExecutionResult(EXIT_NOT_FOUND, "", plan.line)
+            is ClickPlan.Fallback.Hint -> ExecutionResult(EXIT_NOT_FOUND, "", plan.line)
+            is ClickPlan.Fallback.NoAncestor -> ExecutionResult(EXIT_NOT_FOUND, "", plan.line)
+            is ClickPlan.Fallback.Tap -> if (Gestures.tap(service, plan.x, plan.y)) {
+                ExecutionResult(
+                    EXIT_OK,
+                    ClickPlan.ancestorSuccessLine(hit.label, plan.x, plan.y, plan.ancestor),
+                    read.matchesText
+                )
+            } else {
+                ExecutionResult(EXIT_TIMEOUT, "", "gesture did not complete ${read.matchesText}")
+            }
         }
     }
 
@@ -445,10 +492,25 @@ internal object ElementActions {
      * Convenience for callers that just need "the whole tree as it is now".
      * Must run on the main thread — it reads the accessibility service.
      */
-    fun inspectNow(selector: Selector, service: AccessibilityService): Inspection {
-        val roots = (service as? PhoneAccessibilityService)?.roots().orEmpty()
-        return inspect(selector, roots)
+    fun inspectNow(selector: Selector, service: AccessibilityService): Inspection =
+        inspect(selector, rootsOf(service))
+
+    /**
+     * The same read, but keeping the roots it was made from. `click` needs them:
+     * [ClickPlan.ancestorsOf] looks the matched node up by identity, which only
+     * works inside the one tree snapshot that produced it.
+     */
+    internal fun snapshotNow(selector: Selector, service: AccessibilityService): Snapshot {
+        val roots = rootsOf(service)
+        return Snapshot(roots, inspect(selector, roots))
     }
+
+    /** One tree read: the roots as they were, plus what the selector found in them. */
+    internal class Snapshot(val roots: List<NodeView>, val read: Inspection)
+
+    /** Every window root, or an empty list when the service is not ours. */
+    internal fun rootsOf(service: AccessibilityService): List<NodeView> =
+        (service as? PhoneAccessibilityService)?.roots().orEmpty()
 
     /**
      * `ACTION_CLICK` on the target. Returns false when there is no target or the

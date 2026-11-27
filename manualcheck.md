@@ -459,6 +459,70 @@ rects live:
    `cz`, never `zc`, and every pre-v0.8.3 letter keeps its old position (`clfesxdk`
    is still the full order before the `z`).
 
+### `click` can reach a `z` node through its ancestor (v0.8.4-pad12)
+
+Same feed screen as above — you need a line that ends in `z`. The whole point of
+this version is that "the text is on screen but cannot be pressed" now has an answer
+that does not involve guessing.
+
+1. Pick a `z` line with text and run `click <that text>` (no `apply`, no `up`). It is
+   a dry run, so nothing moves; note the `via=` it prints.
+2. `click apply <same text>` → exit **5**. The stderr is now one of two shapes, and
+   which one is the check: no clickable ancestor with a usable rect → the old
+   `node has no usable bounds: <sel> matches=…`, byte-identical to v0.8.3; there is
+   one → the same line **plus** `; nearest clickable ancestor is <class> "<text>" at
+   <l,t,r,b> — add \`up\` to tap it`. Watch the screen: it must **not** have changed.
+   If the ancestor it names is obviously wrong (the whole list, a full-screen
+   container), that is the semantic-boundary problem this switch exists for — do not
+   use `up` there.
+3. `click apply up <same text>` → exit **0**, stdout
+   `clicked via=ancestor node=<label> at=<x>,<y> ancestor=<class> <l,t,r,b>`, and the
+   thing that reacts is the **ancestor**, not the label: on a list row the detail page
+   opens. Check `at=` sits inside the printed ancestor rect.
+4. `click apply up <a z node with no clickable ancestor>` → exit **5**, stderr
+   `no clickable ancestor for: <class> "<text-or-desc>" at <l,t,r,b>` and nothing
+   tapped. A plain text view on a page with no clickable wrapper is the easy sample.
+5. Grammar: a bare `click up` still means the node labelled "up" (the switch is
+   consumed only when a selector follows it), `click up arrow` is the switch plus the
+   selector `arrow`, `click text:up arrow` reaches a node whose label starts with the
+   word, and `longclick up 登录` is still a long press on "up 登录" — `longclick` has
+   no `up` switch.
+6. A node that is *not* `z` must be untouched: `click apply` on an ordinary button
+   still answers `clicked via=action` or `via=gesture`, and adding `up` to it changes
+   nothing at all (the switch only applies when there is no centre).
+
+### The ancestor the walk picks is one that really holds the label (v0.8.5-pad12)
+
+The v0.8.4 check above passes on a screen where walking up happens to be right. This
+one is the screen where it was wrong — a WebView page whose labels all share one
+off-screen clickable button. Use the same 糖豆 feed page (or any page with a bottom
+player bar), and do it on the tablet: 1200x2670.
+
+1. `tree` and find a line whose `flags` ends in `z` **and** whose `<bounds>` is
+   zero-height (`top == bottom`, e.g. `120,2590,529,2590`). Note its text — call it
+   `T`. The video-control labels (静音 / 进入全屏模式 / 播放) live in the `<desc>`
+   column, not `<text>`, so read both columns before picking one.
+2. `click T` (dry run). If it prints `via=action`, pick another `z` line — this check
+   needs the node's own `ACTION_CLICK` to fail.
+3. `click apply T` → exit **5**, and the important half is what it does **not** say:
+   if the nearest clickable ancestor on the raw tree is the 注册 button at
+   `1060,402,1153,451`, the answer must be the plain v0.8.3 line
+   `node has no usable bounds: T matches=1` — **no** `nearest clickable ancestor`
+   hint. A hint naming `1060,402,1153,451` for a label at the bottom of the screen
+   is the regression this version fixes.
+4. Now find a label that *is* held by a container: a zero-width one such as
+   `10,2590,36,2590` whose container is the full-width bar `0,2536,1201,2590`.
+   `click apply <that label>` → exit 5 with the hint, naming
+   `android.view.View at 0,2536,1201,2590` — the bar, not the button.
+5. `click apply up <same label>` → exit **0**, `clicked via=ancestor … ancestor=`
+   that same bar, and `at=` is its centre (`600,2563`). Watch the screen: the
+   player bar reacts, which is the whole point — the label belonged to it.
+6. `click apply up T` (the cross-semantic label from step 1) → exit **5**,
+   `no clickable ancestor for: <class> "<text-or-desc>" at <l,t,r,b>`, nothing tapped.
+   v0.8.4 would have tapped the 注册 button here.
+7. Regression on a normal node: an ordinary button still answers `clicked via=action`
+   or `via=gesture`, and adding `up` changes nothing.
+
 ### The status lamps tell the truth (v0.6.2-pad12)
 
 The page has one job for the phone's owner: answer 现在到底好不好 without her
@@ -823,7 +887,7 @@ it, not the exit code.
 | --- | --- |
 | `bogus` | exit 2, stderr `unknown command: bogus` |
 | `tap` / `tap 1` | exit 2 (usage) |
-| `click` / `click   ` / `click apply` | exit 2, usage `click [apply] SEL` (a selector is mandatory) |
+| `click` / `click   ` / `click apply` / `click up apply` | exit 2, usage `click [apply] [up] SEL` (a selector is mandatory — `up` alone never counts as one, but a bare `click up` is still the selector "up") |
 | `longclick` / `longclick apply` | exit 2, usage `longclick [apply] SEL` |
 | `click no-such-label` | exit 5, stderr `没有出现含「no-such-label」的节点` (dry run) |
 | `click apply no-such-label` | exit 5, stderr `no node matched: no-such-label matches=0` |

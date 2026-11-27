@@ -44,6 +44,8 @@
 | v0.8.1 | 修 v0.8.0 真机三坑：`wm` 漏了 "wm " 前缀（所有 apply 全 127）、`notify` 只认开头 apply、`battery` 文案不说实话 |
 | v0.8.2 | `wm` 读命令报当前生效值（Override 优先）而不是面板出厂值，保险丝基准仍取 Physical；有 Override 时输出 `(override; physical WxH/D)` |
 | v0.8.3 | `tree` 的 `flags` 末尾加 `z`＝这条 rect 点不了（`right<=left` 或 `bottom<=top`，即 `click` 拒绝的那种）。只标不滤：文字仍是「屏上有什么」的证据，忙页面里它们占文本节点多数（糖豆 76%、知乎 12%）。`z` 排最后，老字母位置不动 |
+| v0.8.4 | `click` 对 `z` 节点不再只会说「没坐标」：`ACTION_CLICK` 失败且自身 rect 不可用时向上找最近「可点 + rect 可用」的祖先，找到就把祖先**点名**（`nearest clickable ancestor is <class> "<text>" at <l,t,r,b> — add \`up\` to tap it`）但仍 exit 5；加 `up` 开关（`click up SEL`，与 `apply` 同为首位开关、顺序任意）才真点祖先中心，输出 `clicked via=ancestor … ancestor=<class> <l,t,r,b>`。不自动点：向上跨语义边界（行里的「删除」点了是开详情不是删除），猜错在无人看管的手机上代价不可逆 |
+| v0.8.5 | 给 v0.8.4 的「向上找可点祖先」加几何约束：候选祖先必须与命中节点**横向且纵向都相交**（rect 先归一化，`aLeft <= bRight && bLeft <= aRight && aTop <= bBottom && bTop <= aBottom`，缺 rect 永不算相交）。原因：糖豆网页 113 个带文本 `z` 节点全挑到同一个屏外「注册」按钮 `1060,402,1153,451`（WebView 把它挤到同一行），25 个会点错。父子天然几何包含，真持有标签的祖先必然与之共享像素；加约束后 27/113，全部落到真持有标签的整宽播放条 `0,2536,1201,2590`。找不到相交祖先 → 回到 v0.8.3 原文案不给 hint；`up` 且无相交祖先 → 仍 `no clickable ancestor for: …` exit 5 |
 
 ### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）

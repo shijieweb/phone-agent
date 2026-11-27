@@ -51,13 +51,23 @@ sealed class Command {
     data class Swipe(val x1: Int, val y1: Int, val x2: Int, val y2: Int, val ms: Int) : Command()
     data class Key(val name: String) : Command()
     /**
-     * `click [apply] SEL` — element-level click (SPEC.md section 3.1).
+     * `click [apply] [up] SEL` — element-level click (SPEC.md section 3.1).
      *
      * [apply] is false by default and the action is then a **dry run**: we report
      * which node would be hit and where, and touch nothing. A phone nobody is
      * holding makes a wrong tap expensive, so the destructive half is opt-in.
+     *
+     * [up] is the second opt-in (v0.8.4-pad12): tap a clickable ancestor when the
+     * matched node has no rect of its own. It defaults to `false` for the same
+     * reason — pressing a container instead of the control the label names is a
+     * guess about intent, and a wrong guess on a phone nobody is holding is
+     * destructive.
      */
-    data class Click(val selector: Selector, val apply: Boolean = false) : Command()
+    data class Click(
+        val selector: Selector,
+        val apply: Boolean = false,
+        val up: Boolean = false
+    ) : Command()
     /** `longclick [apply] SEL` — element-level long click (SPEC.md section 3.1). */
     data class LongClick(val selector: Selector, val apply: Boolean = false) : Command()
     /** `scroll up|down [n] [SEL]` (SPEC.md section 3.1). */
@@ -469,7 +479,7 @@ object Commands {
     private val SHOT_USAGE = "usage: shot [b64] [maxPx] [quality]"
 
     private val TREE_USAGE = "usage: tree [uia] [maxNodes]"
-    private val CLICK_USAGE = "usage: click [apply] SEL"
+    private val CLICK_USAGE = "usage: click [apply] [up] SEL"
     private val LONGCLICK_USAGE = "usage: longclick [apply] SEL"
     private val CONFIRM_USAGE = "usage: confirm [apply] [t=SECONDS] TEXT"
 
@@ -574,10 +584,10 @@ object Commands {
             "click" -> {
                 // SPEC.md section 3.1: the selector is the whole rest of the line,
                 // verbatim, with only the separating whitespace dropped.
-                val parsed = parseElementVerb(rest)
+                val parsed = parseElementVerb(rest, allowUp = true)
                 when (parsed) {
                     null -> Command.BadUsage(CLICK_USAGE)
-                    else -> Command.Click(parsed.selector, parsed.apply)
+                    else -> Command.Click(parsed.selector, parsed.apply, parsed.up)
                 }
             }
 
@@ -882,29 +892,56 @@ object Commands {
         return Command.Confirm(text, timeout, apply)
     }
 
-    /** One element verb's arguments: the selector plus whether the tap is real. */
-    private class ParsedElement(val selector: Selector, val apply: Boolean)
+    /**
+     * One element verb's arguments: the selector, whether the tap is real, and
+     * whether a node without usable bounds may be pressed through its ancestor.
+     */
+    private class ParsedElement(
+        val selector: Selector,
+        val apply: Boolean,
+        val up: Boolean = false
+    )
 
     /**
-     * `click [apply] SEL` / `longclick [apply] SEL`.
+     * `click [apply] [up] SEL` / `longclick [apply] SEL`.
      *
-     * `apply` is recognised only as the *first* token, and the selector is the
-     * rest of the line verbatim (inner spaces included), exactly like before. A
-     * selector that itself begins with the word stays reachable through a kind
-     * prefix: `click text:apply button`.
+     * The switches are recognised only as *leading* tokens, and the selector is
+     * the rest of the line verbatim (inner spaces included), exactly like before.
+     * That position is not a shortcut: SPEC.md section 3.1 makes the whole rest of
+     * the line the selector, so a switch accepted at the end would silently eat
+     * selectors that genuinely end in the word (`click 删除 up`, `click up` — a node
+     * actually labelled "up"). A selector that *begins* with a switch word stays
+     * reachable through a kind prefix: `click text:apply button`, `click text:up`.
+     *
+     * `up` is click-only ([allowUp]); `longclick up SEL` keeps meaning "the node
+     * labelled up", because a long press has no ancestor fallback to opt into.
      */
-    private fun parseElementVerb(rest: String): ParsedElement? {
+    private fun parseElementVerb(rest: String, allowUp: Boolean = false): ParsedElement? {
         var body = dropLeadingWhitespace(rest)
         if (body.isBlank()) return null
         var apply = false
-        val cut = firstWhitespace(body)
-        val head = if (cut < 0) body else body.substring(0, cut)
-        if (head.equals("apply", ignoreCase = true)) {
-            apply = true
-            body = if (cut < 0) "" else dropLeadingWhitespace(body.substring(cut))
-            if (body.isBlank()) return null
+        var up = false
+        while (true) {
+            val cut = firstWhitespace(body)
+            val head = if (cut < 0) body else body.substring(0, cut)
+            val tail = if (cut < 0) "" else dropLeadingWhitespace(body.substring(cut))
+            if (!apply && head.equals("apply", ignoreCase = true)) {
+                // `click apply` alone has always been a usage error.
+                apply = true
+                if (tail.isBlank()) return null
+                body = tail
+                continue
+            }
+            // `up` is consumed only when a selector follows it: `click up` has always
+            // meant "the node labelled up", and that meaning is worth keeping.
+            if (allowUp && !up && head.equals("up", ignoreCase = true) && tail.isNotBlank()) {
+                up = true
+                body = tail
+                continue
+            }
+            break
         }
-        return ParsedElement(Selector.parse(body), apply)
+        return ParsedElement(Selector.parse(body), apply, up)
     }
 
     /**

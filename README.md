@@ -117,8 +117,42 @@ letter keeps its position and existing parsers keep working. They are marked, no
 filtered: their text is still evidence of what is on the screen, and on a busy page
 they are the majority of the text nodes, so dropping the lines would throw most of
 the content away. `z` is not a flag that can summon a line of its own — an empty
-container with a bad rect is still skipped — and `click` is unchanged. See
-`SPEC.md` §5 and §10 case 31.
+container with a bad rect is still skipped. See `SPEC.md` §5 and §10 case 31.
+
+v0.8.4-pad12 is what that `z` letter was for. A node with a dead rect has no
+coordinates, so `click` on it could only ever answer `node has no usable bounds` —
+while the clickable row it sits in was right there, one line up in the tree, and the
+operator had no way to say "press that instead". `click` now walks up: when the
+matched node's own rect is unusable and `ACTION_CLICK` already failed, it looks for
+the nearest ancestor that is both clickable and has a usable rect. Finding one, the
+answer still fails — but it now *names* it: `node has no usable bounds: <node>;
+nearest clickable ancestor is <class> "<text>" at <l,t,r,b> — add \`up\` to tap it`.
+Adding the switch (`click up 删除`) taps that ancestor's centre and prints
+`clicked via=ancestor … ancestor=<class> <l,t,r,b>`.
+
+The tap is opt-in because walking up crosses a semantic boundary. The 「删除」 label
+inside a row belongs to a different control than the row: tapping the row opens the
+detail page, it does not delete. The row is the only thing with a rect, so pressing
+it is a guess about which control the label meant, and a wrong guess on a phone
+nobody is holding is destructive. Nothing else about `click` moved: a node with a
+centre of its own — including the zero-area text nodes that are most of a busy page
+— takes exactly the gesture path it always took. See `SPEC.md` §3.1 and §10 case 32.
+
+v0.8.5-pad12 makes that walk up **land somewhere it belongs**. Walking up alone
+turned out to be a trap on a real page: measured on a 糖豆 page (1200x2670), all
+113 text nodes with a `z` rect reached the *same* off-screen 注册 `Button` at
+`1060,402,1153,451` — the WebView had pushed it onto the same line — so v0.8.4 would
+have named that button as "the nearest clickable ancestor" for 113 different labels,
+and 25 of them would have tapped it. A candidate ancestor must now **overlap the
+node's rect on both axes** (`aLeft <= bRight && bLeft <= aRight && aTop <= bBottom &&
+bTop <= aBottom`, rects normalised first, missing rect is never an overlap). A
+parent normally contains its child, so the ancestor that really owns a label always
+shares pixels with it; the cross-semantic one does not. The count drops to 27 of 113
+and every one of the 27 lands on the full-width player bar `0,2536,1201,2590` that
+really does hold the label. Nothing else moved: no overlapping ancestor → the
+byte-for-byte old line (no hint), `up` with nothing overlapping → the same
+`no clickable ancestor for: …` exit 5, and a node with a centre of its own never
+enters this code at all. See `SPEC.md` §3.1, §5 and §10 case 33.
 
 v0.8.2-pad12 is one real-device defect and one sentence of documentation. Both
 came from the same habit: a helper that answers two questions gets trusted for
@@ -240,7 +274,7 @@ left at `/data/local/tmp/phoneagent-tree.xml` as evidence. See `SPEC.md` §5.1.
 | Text | `text <string>` |
 | Apps | `apps`, `app <package>` |
 | Location | `loc`, `locloop <seconds>`, `locstop` |
-| Elements | `click [apply] SEL`, `longclick [apply] SEL`, `scroll`, `ime enter`, `confirm [apply] [t=N] <text>` — **dry run by default**: they report the node they *would* press; add `apply` to really press it |
+| Elements | `click [apply] [up] SEL`, `longclick [apply] SEL`, `scroll`, `ime enter`, `confirm [apply] [t=N] <text>` — **dry run by default**: they report the node they *would* press; add `apply` to really press it, and `up` to let a node with no usable rect be pressed through its clickable ancestor |
 | Apps | `install <url>` (opens the system installer), `uninstall <pkg>` |
 | Privileged | `settings`, `logs`, `a11y status\|heal\|rescue`, `admin status\|release`, `lock` (works), `reboot` (always exit 6 — see below) |
 | Wireless ADB | `adbinfo` (IP + mDNS port + `adb connect` string), `adbheal [t=N]` (bounce wireless debugging off/on, then rediscover — this drops a live adb session). The port is also rediscovered on its own ~20 s after boot, and when the cache is 30 min stale, so `adb connect` keeps working without a command |
