@@ -16,11 +16,12 @@ nothing needs to be exposed on the phone's network.
 
 ## What it can do
 
-The app has three screens: the config page, a 视频转音乐 page one button below
-it (v0.7.0-pad12), and — hidden behind five presses on the version line at the
-bottom — an operator's debug page that runs one command line through the live
-agent and shows the answer, same `Commands.parse` path as the relay, no round
-trip. See `SPEC.md` §6.1 and §6.2.
+The app has four screens: the config page, a 视频转音乐 page one button below
+it (v0.7.0-pad12), a 摄像头看图 page next to that one (v0.9.0-pad12), and — hidden
+behind five presses on the version line at the bottom — an operator's debug page
+that runs one command line through the live agent and shows the answer, same
+`Commands.parse` path as the relay, no round trip. See `SPEC.md` §6.1, §6.2 and
+§3.29.
 
 Since v0.5.8-pad12 the config page is written for the phone's owner, not for me:
 one big 运行中 / 已停止 word, one 启动 button, one 屏幕常亮 switch, and a single
@@ -153,6 +154,22 @@ really does hold the label. Nothing else moved: no overlapping ancestor → the
 byte-for-byte old line (no hint), `up` with nothing overlapping → the same
 `no clickable ancestor for: …` exit 5, and a node with a centre of its own never
 enters this code at all. See `SPEC.md` §3.1, §5 and §10 case 33.
+
+v0.9.0-pad12 is the one thing the whole screenshot pipeline cannot do: show a
+camera. Every other way this app sees the screen goes through the accessibility
+tree or `screencap`, and a camera preview is composited by the HAL into a
+hardware overlay that may or may not reach the framebuffer — on this phone a
+screenshot does contain the preview, at half resolution with the buttons and the
+keyboard in it; on the next one it may be a black rectangle. Either way it is a
+picture of a screen, not of the thing being pointed at. So 摄像头看图 opens the
+camera itself: a live preview, a box to type 哪里不对 in, and one 发送 button that
+captures a still, shrinks it to 1280 px at quality 80, uploads it as
+`cam-<millis>-<hex>.jpg` and posts one note (`kind=look`) so the far end knows a
+person is asking to be looked at. The preview and the JPEG share one
+`CaptureSession` — a still is a request on the session that adds the JPEG target,
+so the frame handed back is the frame that was on screen — and the page builds
+its own `RcClient` call by call, so it works with the agent stopped. See
+`SPEC.md` §3.29, §6.3 and §10 case 34.
 
 v0.8.2-pad12 is one real-device defect and one sentence of documentation. Both
 came from the same habit: a helper that answers two questions gets trusted for

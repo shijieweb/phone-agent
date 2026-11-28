@@ -31,6 +31,15 @@ data class BlobUpload(val bytes: Int, val error: String?) {
 }
 
 /**
+ * Outcome of one `POST /agent/note` (SPEC.md section 3.29).
+ *
+ * [seq] is the relay's running counter for this agent, kept because a note that
+ * was stored but whose ack was lost looks exactly like a note that was never
+ * sent — the counter is the only thing that tells the two apart afterwards.
+ */
+data class NoteResult(val ok: Boolean, val seq: Long, val error: String?)
+
+/**
  * The three relay calls of SPEC.md section 2, on `java.net.HttpURLConnection`.
  *
  * Every call opens a fresh connection, so this class is safe to use from the
@@ -101,6 +110,32 @@ class RcClient(
         body.put("stderr", stderr)
         val response = post("/agent/result", body, HELLO_READ_TIMEOUT_MS) ?: return false
         return response.optBoolean("ok", false)
+    }
+
+    /**
+     * `POST /agent/note` (SPEC.md section 3.29): the one-line report that goes
+     * with a blob, saying what the picture is and who asked for it.
+     *
+     * The body is built by [CamPlan.noteBody] and handed in as text, so the six
+     * field names are pinned by a unit test instead of by a JSONObject call that
+     * only the relay would notice going wrong.
+     *
+     * Unlike [post] this never throws: the caller is a background thread in
+     * [CameraActivity] whose only job left is to put one sentence on screen.
+     */
+    fun postNote(json: String): NoteResult {
+        return try {
+            val response = post("/agent/note", JSONObject(json), HELLO_READ_TIMEOUT_MS)
+            if (response == null) {
+                NoteResult(false, -1L, "empty answer")
+            } else if (response.optBoolean("ok", false)) {
+                NoteResult(true, response.optLong("seq", -1L), null)
+            } else {
+                NoteResult(false, -1L, response.optString("error", "relay said no"))
+            }
+        } catch (t: Throwable) {
+            NoteResult(false, -1L, describe(t))
+        }
     }
 
     /**

@@ -54,9 +54,9 @@ class UiTextTest {
         }
     }
 
-    /** 一共八个，改动数量必须是有意的（这条数字变了就该顺手想想是不是漏了文档）。 */
+    /** 一共九个，改动数量必须是有意的（这条数字变了就该顺手想想是不是漏了文档）。 */
     @Test
     fun thereAreEightClickableLabels() {
-        assertEquals(8, UiText.clickable.size)
+        assertEquals(9, UiText.clickable.size)
     }
 }

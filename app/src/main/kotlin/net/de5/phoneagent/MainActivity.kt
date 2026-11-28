@@ -159,6 +159,14 @@ class MainActivity : Activity() {
             startActivity(Intent(this, ConvertActivity::class.java))
         }
 
+        // ---- 4c. the camera page (v0.9.0-pad12) ----
+        // Next to 视频转音乐 because it is the same kind of thing: the phone owner's
+        // own screen, opened by one button, doing one job. It needs the whole display
+        // for the preview, so it cannot be a switch here either.
+        addButton(root, UiText.CAMERA) {
+            startActivity(Intent(this, CameraActivity::class.java))
+        }
+
         // ---- 5. the advanced section, collapsed by default ----
         // Deliberately not persisted: every visit starts collapsed, so a stray
         // tap on the phone cannot leave the secret field on screen.

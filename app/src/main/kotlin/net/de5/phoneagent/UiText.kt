@@ -38,8 +38,27 @@ internal object UiText {
      */
     const val REFRESH = "刷新"
 
+    /**
+     * 打开「摄像头看图」页（v0.9.0-pad12）。
+     *
+     * 手机主人举着手机看一样东西、打一句话，操作员在那边就能看到这一帧——
+     * 见 [CameraActivity]。和 [CONVERT] 一样是单独一页：它要占满整屏放预览，
+     * 塞不进配置页。
+     */
+    const val CAMERA = "摄像头看图"
+
     /** 启动/停止是同一个按钮的两个状态，永远只出现一个，但两个字符串仍互不相同。 */
-    val clickable = listOf(START, STOP, SAVE, STAY_ON, PERMISSION, ADVANCED, CONVERT, REFRESH)
+    val clickable = listOf(
+        START,
+        STOP,
+        SAVE,
+        STAY_ON,
+        PERMISSION,
+        ADVANCED,
+        CONVERT,
+        REFRESH,
+        CAMERA
+    )
 
     /** 高级区里三个输入框的标题（不可点，但也不能重名，否则看图对不上）。 */
     const val RELAY_LABEL = "Relay base URL"

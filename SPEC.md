@@ -54,14 +54,16 @@ Ship these files (all under `app/src/main/kotlin/net/de5/phoneagent/`):
 | `Mp3Runner.kt` | The batch loop shared by `mp3 run apply` and the 视频转音乐 page: who is skipped, per-file timeout, progress lines, summary |
 | `LameMp3Encoder.kt` | Thin Kotlin driver over the vendored jump3r LAME port — module wiring, `lame_init_params`, chunked encode, flush |
 | `ConvertActivity.kt` | The owner's third screen: folder, counts, 开始转换, one progress line, the result list |
+| `CamPlan.kt` | Camera pure logic: blob name, the scale ladder, the size picker over `SCALER_STREAM_CONFIGURATION_MAP`, the note JSON, every user-facing string (no Android imports) |
+| `CameraActivity.kt` | The owner's fourth screen (v0.9.0-pad12): Camera2 preview, one box of text, one 发送 button — capture, shrink, upload, note |
 
 Deliver `AndroidManifest.xml`, `res/values/strings.xml` and
 `res/xml/accessibility_service_config.xml` **exactly as already written** — they
 exist in this repo; do not rewrite them.
 
 **Out of scope (do not build):** MCP server, HTTP server, WebSocket, OAuth,
-camera, file manager, notifications, sharing, app install/uninstall, offline
-geocoding, IP database, any AndroidX/Compose/Ktor/Hilt usage, root, and any
+file manager, notifications, sharing, app install/uninstall, offline geocoding,
+IP database, any AndroidX/Compose/Ktor/Hilt usage, root, and any
 **third-party runtime dependency** — the two vendored exceptions are the self-ADB
 stack in §3.16 and the jump3r LAME port in §3.20, both source-merged into this
 repo and listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
@@ -108,6 +110,14 @@ PUT /agent/blob/<name>                # binary, not JSON; see §4
   -> {"ok":true,"name":"shot-...","bytes":123456}
 
 GET /ctl/blob/<name>                  # the controller fetches it back
+
+POST /agent/note                      # device-initiated, see §3.29
+  header X-RC-Secret, Content-Type: application/json
+  {"id":"PHONE-MEIZU","kind":"look","text":"...","blob":"cam-....jpg","w":1280,"h":720}
+  -> {"ok":true,"seq":42}
+
+GET /ctl/notes?since=<seq>&id=<id>&wait=<s>   # controller side, long poll
+  -> {"notes":[{seq,kind,text,blob,w,h,ts}],"since":..,"seq":..}
 ```
 
 Rules the client MUST honour:
@@ -1822,6 +1832,133 @@ than silently shadowing a command.
 A parse failure is always `exit=2` with a `usage: …` line in `stderr`, the same
 shape as every hand-written command in this file.
 
+### 3.29 `look`: the camera, not a screenshot
+
+Every other way of seeing the screen in this app goes through the accessibility
+tree or `screencap`, and neither returns a photograph. A camera preview is
+composited by the camera HAL into a hardware overlay, and whether that overlay
+reaches the framebuffer is up to the device: on the 魅族 (1200x2670, Android 16) it
+does — a `screencap` of a camera page comes back as a valid 647x1440 PNG with the
+preview in it — while on other phones and ROMs the same call returns the black
+rectangle where the overlay would be. So a screenshot-based 看图 would work on
+this phone and silently fail on the next one, and even when it works the answer
+is wrong for the job: a screenshot is the whole page (preview, status line, two
+buttons, and the keyboard while it is up) at half the screen's resolution,
+letterboxed to the preview's aspect — a picture of a screen, not of the thing the
+person pointed at. The only way to get the sensor's own image, at a size we
+choose, the right way up, is to open the camera yourself.
+
+`CameraActivity` does exactly that, in one page with three things on it: the live
+preview (a `TextureView`, layout weight 1), a multi-line `EditText` (`maxLength`
+= `CamPlan.MAX_TEXT` = 500 code points, hint 说一句：哪里不对 / 要我看什么) and two
+buttons 发送 / 返回. No command opens this page — the relay cannot summon it and
+nothing here is reachable through `Commands.parse`; it is a page the person
+holding the phone opens, because the question — 哪里不对 — is theirs to ask.
+
+**Capture.** Camera2, back camera, `TEMPLATE_PREVIEW` repeating request, and the
+JPEG target in the *same* `CaptureSession` as the preview surface:
+
+```kotlin
+device.createCaptureSession(listOf(previewSurface, jpegReader.surface), cb, camHandler)
+```
+
+Two targets in one session is the whole point: a still capture is a request on
+that session which adds the JPEG target, and the frame it delivers is the frame
+that was being composed at that instant. A second session for stills would have
+to reconfigure the pipeline and would hand back a frame from *after* the preview
+stopped — not what the person was looking at.
+
+Sizes come from `SCALER_STREAM_CONFIGURATION_MAP`, never from the largest entry.
+`CamPlan.pickSize` scores every offered size as
+`|aspect difference| * 4 + |long-side difference| / target long side` and takes
+the smallest, so the preview lands near 1280x720 and the JPEG near 1280x720
+instead of the sensor's full resolution (several thousand pixels a side on every
+phone this app has run on). The two are asked for separately —
+`getOutputSizes(SurfaceTexture::class.java)` for the preview,
+`getOutputSizes(ImageFormat.JPEG)` for the still — and the reader is
+`ImageReader.newInstance(w, h, ImageFormat.JPEG, 2)`. `maxImages = 2` because one
+frame can still be in the encoder when the next arrives, and `1` drops frames
+under exactly the load this page creates. The reader hands back JPEG bytes
+directly (`image.planes[0].buffer`), so nothing in this path ever sees a
+`YUV_420_888` plane or a colour conversion.
+
+**Send.** 发送 does, in order:
+
+1. `CamPlan.clampText` — trim, then cut at 500 code points on a code-point
+   boundary. Empty → 先打一句话, and nothing is captured at all.
+2. Wait `CamPlan.SETTLE_MS` = **300 ms**. The keyboard is on screen while the
+   person types; tapping 发送 dismisses it and the window resizes. Capturing
+   immediately gives a preview that is still re-laying-out — a black or stretched
+   frame at the old aspect — and that frame is what the far end would be asked to
+   judge. 300 ms is one layout pass plus a frame or two on this device, short
+   enough that a hand holding the phone still does not drift out of frame.
+3. `TEMPLATE_STILL_CAPTURE` with the JPEG target and autofocus triggered. The
+   bytes are read on the camera thread and handed to a plain `Thread`: decode,
+   re-encode and two HTTP calls take seconds, and the preview has to keep running
+   while they do.
+4. **Re-compress at 1280 px / quality 80.** A full-sensor JPEG is several
+   megabytes — a slow upload on mobile data, and far more resolution than "where
+   is the problem" needs. `CamPlan.fitScale` never enlarges and returns `1.0f` for
+   illegal sizes, so a device that already offers 1280 is left untouched. The
+   re-encode also **uprights the pixels** (`Matrix.postRotate` by
+   `(sensorOrientation - displayRotation + 360) % 360`): `BitmapFactory` does not
+   read EXIF, so the orientation tag is gone the moment the image is decoded, and
+   a portrait phone would otherwise send a landscape photo.
+5. `RcClient.uploadBlob(name, bytes)` → `PUT {relay}/agent/blob/<name>`,
+   `X-RC-Secret`, raw bytes, exactly as §4 describes.
+6. `RcClient.postNote(json)` → `POST {relay}/agent/note`.
+
+`name` is `cam-<millis>-<4 hex>.jpg` (`CamPlan.blobName`); a suffix that is not
+four `[0-9a-z]` falls back to `0000` rather than producing a name the relay would
+reject.
+
+**The note.** One line of JSON, hand-written by `CamPlan.noteBody` so the field
+order is fixed and the escaping is testable on a plain JVM:
+
+```
+POST /agent/note
+  header X-RC-Secret, Content-Type: application/json
+  {"id":"PHONE-MEIZU","kind":"look","text":"屏幕中间有一块红的",
+   "blob":"cam-1733456789012-a1b2.jpg","w":1280,"h":720}
+  -> {"ok":true,"seq":42}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | the agent id, same regex as §2 |
+| `kind` | `look` — a person asking to be looked at, never a `shot` or a `#rc:` action |
+| `text` | what the person typed, already trimmed and clamped to 500 code points |
+| `blob` | the name uploaded in step 5, fetched back with `GET /ctl/blob/<name>` |
+| `w`, `h` | the JPEG's real pixel size **after** the re-compress, not the size requested, so the reader never has to guess whether the image was scaled |
+| `seq` | the relay's running counter (in the answer, unused for now) |
+
+`/agent/note` lives on the relay next to `/agent/blob/` and `/agent/result`
+(`scripts/rc-relay.py`, added the same day as this page). It validates `id`
+against the §2 regex and `blob` against the same name rule as `PUT /agent/blob/`
+(400 on either, so a bad name fails at the caller instead of at fetch time), caps
+`text` at 2000 characters and `kind` at 24, keeps the last 200 notes per device,
+assigns a global monotonic `seq`, and wakes the controller's long poll on
+`GET /ctl/notes?since=<seq>` — the counter is global and persisted, so a relay
+restart never re-issues a `seq` the controller has already passed. A send whose
+note is refused shows 发送失败: <reason> while the blob from step 5 is already
+on disk.
+
+**Independent of the service.** The page builds its own
+`RcClient(prefs.relayBase, prefs.secret, prefs.agentId, agentInfo())` and calls it
+directly. `RcClient` is stateless — one call, one connection, no `hello` first, no
+dependency on `RcAgentService` being alive — so 摄像头看图 works with the agent
+stopped. That is deliberate: the camera is a page for the human, and needing the
+service to be running before you can ask a question about the screen would make
+it useless in precisely the case where the service is what is broken.
+
+Status is one line above the buttons: 对准要我看的东西，打一句话，按发送, then
+正在拍…, then 已发送：图 148 KB（1280x720）+ 文字 12 字 — or 发送失败: <reason>. The
+input box is cleared only on success, so a failed send does not cost the
+sentence. Every camera object is opened, used and closed on one
+`HandlerThread`; `onPause` closes the session, the device and the reader, and
+`onResume` reopens them, because a return from the permission dialog or the home
+screen does not replay the `SurfaceTexture` callback.
+
 ### Exit codes
 | Code | Meaning |
 |---|---|
@@ -2213,6 +2350,53 @@ regardless of whether it read a newer folder. While `running` is true it does no
 scan at all: the numbers on disk are moving, so a count taken mid-batch is stale
 before it is drawn. 刷新 is disabled for the same two reasons, and re-enabled from
 the scan callback by reading `running` rather than assuming it.
+
+### 6.3 The fourth screen: 摄像头看图 (v0.9.0-pad12)
+
+One button on the config page (`UiText.CAMERA`, 摄像头看图, directly under
+视频转音乐 and styled the same way), `exported="false"`, `excludeFromRecents="true"`,
+built in code. The protocol and the capture decisions are §3.29; this is only what
+is on the screen.
+
+Top to bottom: the live preview (a `TextureView` at layout weight 1, so it takes
+everything the text and buttons do not), one status line, the text box, and the
+two buttons.
+
+1. **The preview.** Back camera, repeating `TEMPLATE_PREVIEW` request. It is the
+   reason the page exists — the person points the phone at the thing instead of
+   describing it.
+2. **The status line**, one line, never more: 对准要我看的东西，打一句话，按发送 on
+   arrival, 正在拍… while a send is in flight, then either
+   `已发送：图 148 KB（1280x720）+ 文字 12 字` or `发送失败: <reason>`. Failures are
+   named, never counted — there is no retry button, because pressing 发送 again is
+   the retry and the text is still in the box.
+3. **The text box** — multi-line, `maxLength = CamPlan.MAX_TEXT` (500 code points,
+   so the limit the input filter enforces is the same number the send clamps to),
+   hint 说一句：哪里不对 / 要我看什么. The phone's own IME voice input is the
+   expected way to fill it; the page does nothing about the keyboard except wait
+   for it to leave (300 ms, §3.29).
+4. **发送 / 返回**, equal weight. 发送 is disabled while a send is in flight — a
+   second press would capture a frame nobody asked for and upload it under a
+   second name. 返回 is `finish()` and stays enabled during a send: a page the
+   owner cannot leave is worse than an upload abandoned with the page.
+
+Both labels live in `CameraActivity`'s private companion (`SEND_TEXT` = 发送,
+`BACK_TEXT` = 返回), deliberately not `UiText` constants — `click apply 发送` on this
+page must have exactly one candidate, the same rule §6.2 states for 视频转音乐.
+
+`FLAG_KEEP_SCREEN_ON` is set for the life of the page: the owner is holding the
+phone up at something, and a screen that sleeps mid-sentence loses the sentence.
+This is the one place in the app where keeping the screen awake is what the person
+wants rather than a battery decision.
+
+Everything camera-shaped runs on one `HandlerThread` (`cam-look`), never the main
+thread: `openCamera`, the session callbacks, the still capture and the
+`ImageReader` callback are all posted there, and the main thread only ever touches
+the views. The one exception is `TextureView.getSurfaceTexture`, which is only
+legal on the UI thread — so the surface is taken there and handed to the camera
+thread. Decoding, re-encoding and the two HTTP calls happen on a plain
+`Thread("cam-send")`, because the preview has to keep running while they do.
+
 
 Two details that are not cosmetic:
 
@@ -2638,6 +2822,33 @@ framework** — do not mock `AccessibilityService`. Required cases:
        `aWalkWithoutAHitKeepsTheOldNearestAnswer` pins the `hit == null` form as the
        pre-v0.8.5 nearest answer. The 17 v0.8.4 cases above are untouched and still
        green — every ancestor rect they use already overlaps the hit.
+   34. The v0.9.0-pad12 camera page, all of it on the pure `CamPlan` (the Activity
+       itself is not unit-tested — Camera2 cannot run on a plain JVM):
+       `blobNameIsTheMillisAndTheSuffix` pins `cam-1733456789012-a1b2.jpg`;
+       `blobNameLowerCasesAnUpperCaseSuffix`, `blobNameFallsBackWhenTheSuffixIsNotFourHexCharacters`
+       (a 3-char and a 5-char suffix both become `0000` — a name the relay would
+       reject must never be produced) and `blobNameClampsANegativeClock` cover the
+       four ways the name can be built wrong, and `blobNameFitsTheRelayNameWindow`
+       keeps it under `ShotBlob.NAME_MAX_CHARS`.
+       `fitScaleBringsTheLongestSideToTheLimit` / `fitScaleNeverEnlarges` /
+       `fitScaleUsesWhicheverSideIsLonger` / `fitScaleRefusesIllegalNumbers` pin the
+       scale ladder — the "never enlarge" case is the one that matters, because a
+       device that already offers 1280 must be left byte-for-byte untouched.
+       `summaryLineUsesKilobytesAboveOneKiB` (the exact sentence
+       `已发送：图 148 KB（1280x720）+ 文字 12 字`), `summaryLineUsesBytesBelowOneKiB`
+       (`NNN B`) and `summaryLineSaysZeroCharsWhenNothingWasTyped` pin the one line the
+       person reads; `errorLineAlwaysNamesTheFailure` pins `发送失败: <reason>` and its
+       未知原因 fallback. `noteBodyCarriesExactlyTheSixFields`,
+       `noteBodyEscapesQuotesAndNewlines` and `noteBodyEscapesControlCharacters` pin the
+       hand-written JSON — field order, and the escaping the relay's parser needs.
+       `clampTextTrimsAndKeepsShortText`, `clampTextCutsAtFiveHundred` and
+       `clampTextDoesNotSplitASurrogatePair` pin the 500-code-point cut: the last one
+       feeds 500 emoji and asserts the tail is still a whole pair, because cutting on
+       a UTF-16 index would send half a character. `pickSizePrefersSixteenByNineNearTheTarget`,
+       `pickSizeTakesTheClosestLongSideWhenOnlyFourByThreeIsOffered` and
+       `pickSizeReturnsNullWhenNothingIsUsable` pin the `SCALER_STREAM_CONFIGURATION_MAP`
+       choice — aspect weighted over long side, and `null` rather than a crash when
+       the map offers nothing usable.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

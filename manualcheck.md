@@ -491,6 +491,41 @@ that does not involve guessing.
    still answers `clicked via=action` or `via=gesture`, and adding `up` to it changes
    nothing at all (the switch only applies when there is no centre).
 
+### 摄像头看图 (v0.9.0-pad12)
+
+The one check that matters is the one a screenshot cannot pass: the picture that
+comes back must be the camera's own frame — the full sensor image at 1280 px, the
+right way up, with no UI, no status line and no keyboard in it. Do this on the
+魅族; step 3 is what separates this from `screencap`.
+
+1. Config page → 摄像头看图 (one button below 视频转音乐). Grant the camera
+   permission when asked. The preview appears within a second or two and moves
+   when you move the phone. The status line reads 对准要我看的东西，打一句话，按发送.
+   If it reads 需要相机权限, the grant did not land — check Settings → Apps →
+   权限 → 相机 before going further.
+2. Point the camera at something you can name — a box, a remote, a mug — and
+   type 这是什么东西 in the box (the phone's own IME voice input is fine).
+   Press 发送 once. The status line goes 正在拍…, the buttons go dead for a
+   moment, and then it reads 已发送：图 NNN KB（WxH）+ 文字 8 字.
+3. On the controller, fetch the blob the note named and **open the image**. It
+   must be a real photograph of the thing you pointed at: not black, not a
+   screenshot of the UI, not a frame from before the keyboard closed. Its long
+   side is 1280 or less and it is the right way up in portrait.
+4. The note itself: `kind` is `look`, `text` is exactly what you typed, `w`/`h`
+   match the file you just opened, and `seq` increased by one versus the previous
+   note.
+5. Stop the agent (config page → 停止), then repeat steps 2–3. The send must
+   still succeed — this page owns its own `RcClient` and does not need the
+   service. Restart the agent afterwards.
+6. Press 发送 with an empty box: nothing is captured, the status line says
+   先打一句话, and no note appears on the controller.
+7. Break one on purpose: put the phone in airplane mode and press 发送. The
+   status line says 发送失败: <reason>, the buttons come back, and **the text you
+   typed is still in the box** — a failed send must not cost the sentence. Turn
+   airplane mode off and press 发送 again: it goes through.
+8. Turn the phone to landscape, send, and open the image: it must be landscape,
+   not a portrait photo with the content rotated 90°.
+
 ### The ancestor the walk picks is one that really holds the label (v0.8.5-pad12)
 
 The v0.8.4 check above passes on a screen where walking up happens to be right. This
