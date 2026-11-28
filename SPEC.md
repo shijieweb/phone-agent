@@ -2876,3 +2876,9 @@ that take plain data (no `Context`, no `AccessibilityNodeInfo`). Wrap
 - `manualcheck.md` documents, for each command, the exact phone-side action that
   proves it works (screenshot of the phone, tap landing on the right target,
   location matching Google Maps, …). CI cannot prove this; a human does.
+- `C:/Users/67972/.dsh/skills/phone-agent/SKILL.md` is updated in the same commit:
+  new/changed/removed verbs in its command table, changed formats or wire
+  protocol, new real-device pitfalls, and its `covers:` / `updated:`
+  frontmatter. That file is the **only** manual another agent can read — it
+  cannot see this repo. A release whose skill still describes the old version
+  is not done (owner rule, 2026-11-28).
