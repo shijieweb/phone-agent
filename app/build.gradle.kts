@@ -48,6 +48,12 @@ if (localPropsFile.exists()) {
 val bakedRelayBase: String = localProps.getProperty("phoneagent.relayBase") ?: ""
 val bakedRelaySecret: String = localProps.getProperty("phoneagent.relaySecret") ?: ""
 val bakedAgentId: String = localProps.getProperty("phoneagent.agentId") ?: ""
+// The VPS Fish TTS wrapper (v0.10.0-pad12): the same "git-ignored defaults" rule
+// as the relay keys above. Empty on any machine but the operator's, and an empty
+// value is what makes `speak` fall back to the system voice and say why.
+val bakedTtsBase: String = localProps.getProperty("phoneagent.ttsBase") ?: ""
+val bakedTtsSecret: String = localProps.getProperty("phoneagent.ttsSecret") ?: ""
+val bakedTtsVoice: String = localProps.getProperty("phoneagent.ttsVoice") ?: ""
 
 android {
     namespace = "net.de5.phoneagent"
@@ -66,6 +72,9 @@ android {
         buildConfigField("String", "DEFAULT_RELAY_BASE", "\"${bakedRelayBase}\"")
         buildConfigField("String", "DEFAULT_RELAY_SECRET", "\"${bakedRelaySecret}\"")
         buildConfigField("String", "DEFAULT_AGENT_ID", "\"${bakedAgentId}\"")
+        buildConfigField("String", "DEFAULT_TTS_BASE", "\"${bakedTtsBase}\"")
+        buildConfigField("String", "DEFAULT_TTS_SECRET", "\"${bakedTtsSecret}\"")
+        buildConfigField("String", "DEFAULT_TTS_VOICE", "\"${bakedTtsVoice}\"")
 
         // No native code, no ABI splits: the APK is pure DEX + resources.
     }

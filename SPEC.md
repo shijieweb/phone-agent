@@ -209,6 +209,7 @@ reach the `unknown command` branch.
 | `files pull PATH` | upload one file out through the blob channel, 16 MiB cap (see §3.7) |
 | `notif [list] [n] [q=TEXT]` | the active notifications, default 30, cap 200, optional case-insensitive filter (see §3.8) |
 | `say [-l zh\|en] [rate=PCT] [pitch=PCT] TEXT` | speak `TEXT` once through the system TTS engine; `zh` default (see §3.9) |
+| `speak [voice=ID] [speed=0.5-2.0] TEXT` | speak `TEXT` through the VPS Fish TTS service, chunk by chunk; falls back to the system voice (see §3.30) |
 | `screen stayon [on\|off]` | keep the panel awake across reboots; with no argument it only reports (see §3.14) |
 | `screen timeout MS` | one explicit panel timeout, clamped 15000..2147483647 (see §3.14) |
 | `screen on` / `screen off` | light or darken the panel now (see §3.14) |
@@ -1959,6 +1960,79 @@ sentence. Every camera object is opened, used and closed on one
 `onResume` reopens them, because a return from the permission dialog or the home
 screen does not replay the `SurfaceTexture` callback.
 
+### 3.30 `speak`: the server voice, with `say` as the net
+
+```
+speak [voice=ID] [speed=0.5-2.0] TEXT
+```
+
+`say` (§3.9) is the phone's own engine: always there, and it sounds like it.
+`speak` sends the sentence to the Fish TTS service on the VPS instead, plays the
+MP3 that comes back, and falls back to `say` when anything along that path
+fails. The point is not a new verb for its own sake — it is that a voice worth
+listening to is worth a network round trip, and a sentence that has already been
+asked for must not be lost because a server was busy.
+
+- `TEXT` is the rest of the line **verbatim** (inner spaces kept), the same
+  leading-only rule as `say`: `speak hi speed=2` says "hi speed=2".
+- `voice=ID` overrides the baked default (`phoneagent.ttsVoice` in
+  `local.properties`); `speed=` is clamped 0.5..2.0 (default 1.0) rather than
+  refused — the operator asked for faster, not for an error. Anything else that
+  starts with `voice=` or `speed=` and does not parse is a usage error, because a
+  flag that was meant as a flag and silently read as text is a sentence nobody
+  asked for.
+- `TEXT` is clipped by `SayPlan.clipText` to 2000 chars, then cut into chunks:
+  **the first at most 40 chars, the rest at most 120**, preferring a sentence end
+  (`。！？；…` or a newline), then a clause end (`，、：,:;`), then a hard cut that
+  never splits a surrogate pair. The first chunk is short because time-to-first-
+  sound is what the person holding the phone judges; the rest are long because
+  every extra request costs another round trip. 500 chars is the server's own
+  cap — a longer body is refused with 413, which is why the chunker never emits
+  one.
+
+**Wire.** `POST {ttsBase}/tts/` with `X-TTS-Secret: <secret>`,
+`Content-Type: application/json; charset=utf-8`, `Accept: audio/mpeg`, and the
+hand-written body `{"text":"…","voice":"…","speed":1.00}` (field order fixed,
+quotes and control characters escaped — `SpeakPlan.requestBody`). 200 is
+`audio/mpeg` bytes; anything else is JSON with `error` and `detail`, and both are
+put in the receipt (`服务端 502（upstream timeout）`) because the operator's next
+move depends on which of the two it was. Connect timeout 10 s, read timeout 90 s:
+a chunk is a short sentence, but a cold free-tier model can take most of a minute.
+
+**Pipeline.** A daemon thread (`speak-synth`) synthesizes into an
+`ArrayBlockingQueue` of capacity 2 while the poll thread plays what is ready, so
+a long paragraph is heard with one chunk of lookahead and never buffers a hundred
+MP3s in the cache dir. Each chunk is written to `cacheDir/tts-<index>.mp3`,
+played by a fresh `MediaPlayer` (`USAGE_ASSISTANT` + `CONTENT_TYPE_SPEECH`,
+`setDataSource(path)`, synchronous `prepare()`, `isPlaying` polled every 50 ms
+after a 300 ms settle), then deleted. Playback is capped at the file's own
+duration + 5 s, or 120 s when the duration is unknown: a player that never reports
+`false` is a hung poll loop, and this one is shared with every other command.
+
+**Fallback, and when it is refused.** Nothing configured (a clone of this repo
+builds with empty `BuildConfig` values), an empty chunk list, or a failure before
+any audio was heard ⇒ the whole text goes through `SayOps.speak` and the receipt
+says so: `speak 已朗读 24 字（回落系统 TTS：服务端 502）`, exit 0. A failure
+**after** some audio played is *not* retried — replaying the paragraph to cover
+the last sentence would say the first ones twice — so it answers
+`speak 已播 2/3 块，第 3 块失败：服务端 502，未回落（避免重复朗读）` with
+`exit=6`. A fallback that also fails answers `错误: speak 回落系统 TTS 也失败：…`
+with `exit=6`. Both use 6 because it is the closest of the seven existing codes to
+"the far end refused" — no eighth code is invented, since every caller switches on
+this table.
+
+Success is one line, and every number in it is one the server or the player
+actually produced: `speak 已朗读 240 字（fish voice=7f92 speed=1.00 3 块 首声
+2.40s 总 14.80s 712000B）` — bytes printed exactly, not rounded to KB, so the
+receipt can be compared with the server's own log.
+
+**The secret never enters the repository.** `phoneagent.ttsBase`,
+`phoneagent.ttsSecret` and `phoneagent.ttsVoice` live in `local.properties`
+(git-ignored) and are baked into `BuildConfig.DEFAULT_TTS_*` at build time, the
+same mechanism as the relay base and secret. What this costs is stated plainly:
+the text being spoken leaves the phone, and `network_security_config.xml` must
+already allow that host — `say` remains the offline answer.
+
 ### Exit codes
 | Code | Meaning |
 |---|---|
@@ -2859,6 +2933,56 @@ framework** — do not mock `AccessibilityService`. Required cases:
        `pickSizeReturnsNullWhenNothingIsUsable` pin the `SCALER_STREAM_CONFIGURATION_MAP`
        choice — aspect weighted over long side, and `null` rather than a crash when
        the map offers nothing usable.
+
+   35. The v0.10.0-pad12 `speak` verb, all of it on the pure `SpeakPlan` (the
+       network, the `MediaPlayer` and the pipeline thread cannot run on a plain
+       JVM). Grammar: `switchesAreOnlyConsumedWhileTheyLead` pins the leading-only
+       rule — `speak hi speed=2` keeps `speed=2` in the text —
+       `aSentenceThatMerelyContainsSpeedKeepsItVerbatim` the same for a sentence
+       that merely mentions a flag, and `innerSpacesOfThePayloadSurvive` verbatim
+       text. `unusableLinesAreRefusedRatherThanGuessed` pins the six refusals
+       (empty, blank, a bare `speed=1.5`, `voice=`, `voice= hi`, `speed=abc hi`): a
+       flag that was meant as a flag must not become a sentence nobody asked for.
+       `speedIsClampedToTheServersRange` pins the clamp instead of a refusal
+       (`0.1` → `0.50`, `9` → `2.00`) plus the four `speedText` forms
+       `1.00`/`0.50`/`2.00`/`1.25`, and
+       `theNormalisedArgumentStringKeepsOnlyTheSwitchesThatMatter` pins `normalize`
+       and the `usage:` line. `theBakedVoiceIsUsedOnlyWhenTheLineNamesNone` pins
+       `voiceOrDefault` in all four shapes, `endpoint` (trailing slash and
+       surrounding spaces gone, so `base + "/tts/"` never becomes `//tts/`) and
+       `chunkFileName` (`tts-0.mp3`, `tts-12.mp3`).
+       Chunking: `theLimitsAreTheMeasuredOnes` pins 40 / 120 / 500 **and their
+       order** — first < later < server, which is the point of the ladder;
+       `blankTextIsNoChunksAtAll` the empty answer;
+       `aShortLineIsOneChunkAndIsNotRewritten` that a line under the limit is
+       handed over untouched (including exactly 40);
+       `sixtyCharactersBecomeTwoChunksSoTheFirstSoundIsEarly` (40 + 20),
+       `aHundredAndTwentyCharactersStayWithinTheLaterLimit` (40 + 80) and
+       `twoHundredCharactersBecomeThreeChunks` (`[40, 120, 40]`) the packing
+       ladder. `aCutPrefersASentenceEndThenAClauseEndThenTheHardLimit` pins the
+       boundary preference, `aLongSentenceIsCutAtCommasRatherThanMidWord` that
+       every chunk of a comma text ends at a comma, and
+       `aTwoHundredAndFortyCharacterUtteranceStartsWithinFourtyCharacters` pins the
+       asymmetry — eight 30-character sentences, first chunk is one whole sentence
+       and the rest stay under 120. `aChunkNeverSplitsASurrogatePair` feeds 39 `a`
+       + one emoji + 20 `b` and asserts the first chunk stops at 39, because
+       cutting on a UTF-16 index would send half a character to the server, and
+       `everyChunkIsNonEmptyAndTheTextIsNeverLost` re-joins the chunks and compares
+       with the input — the one assertion that catches every off-by-one in the
+       cutter. Wire: `theBodyIsExactlyWhatTheServerExpects` pins field order,
+       `speed:1.00` and the escaping of a quote, a backslash and a newline in one
+       body. Receipts: `aFinishedRunReportsCharsChunksFirstSoundAndBytes` pins the
+       exact success sentence, `aFallbackSaysWhyTheFishPathWasAbandoned` the
+       fallback sentence plus `NOT_CONFIGURED` and `EMPTY_AUDIO`, and
+       `aPartialRunNeverClaimsToHaveReadEverything` the partial sentence that says
+       it did **not** fall back. `serverErrorsKeepTheServersOwnWords` pins
+       `服务端 502` with no detail, `服务端 401（invalid secret）` with one, the
+       `error: detail` join, a non-JSON body kept verbatim, and the 200-char hint
+       clipped to one line ending in `…` — a server that answers with a stack trace
+       must not become the receipt. `aStuckPlayerIsBoundedByTheDecodedDuration`
+       pins the cap (`0` and `-1` → the 120 s fallback, 3000 → 3000 + 5 s) and the
+       `8.00s` / `2.40s` / `0.00s` printing; `theTimeoutsAreTheAgreedOnes` pins
+       10 s / 90 s and the 2-chunk lookahead bound.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

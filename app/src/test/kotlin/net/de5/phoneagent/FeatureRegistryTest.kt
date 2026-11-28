@@ -18,7 +18,7 @@ class FeatureRegistryTest {
     @Test
     fun everyModuleClaimsExactlyOneUniqueLowercaseVerb() {
         val verbs = FeatureRegistry.verbs()
-        assertEquals(6, verbs.size)
+        assertEquals(7, verbs.size)
         assertEquals(verbs.size, verbs.toSet().size)
         for (verb in verbs) {
             assertEquals(verb.lowercase(), verb)
@@ -30,7 +30,7 @@ class FeatureRegistryTest {
     @Test
     fun theFirstBatchIsRegistered() {
         assertEquals(
-            listOf("where", "media", "battery", "notify", "wm", "autowake"),
+            listOf("where", "media", "battery", "notify", "wm", "autowake", "speak"),
             FeatureRegistry.verbs()
         )
     }

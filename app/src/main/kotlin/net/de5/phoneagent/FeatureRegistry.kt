@@ -23,7 +23,8 @@ internal object FeatureRegistry {
         FeatBattery,
         FeatNotify,
         FeatWm,
-        FeatAutowake
+        FeatAutowake,
+        FeatSpeak
     )
 
     /**

@@ -1,0 +1,284 @@
+package net.de5.phoneagent
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * `speak` (v0.10.0-pad12, SPEC.md §3.30).
+ *
+ * Three things here are load-bearing and none of them can be seen on a phone
+ * without a stopwatch:
+ *
+ *  - the chunk sizes. Synthesis costs about 0.10 s per character, so the first
+ *    chunk is capped at 40 characters (about 4 s of silence) and every later one
+ *    at 120 (about 12 s), even though the server would accept 500 (about 62 s).
+ *  - the receipt. A partial playback must NOT fall back to the system voice, or
+ *    the listener hears the opening twice.
+ *  - the wire format. The body is hand-written JSON, so its exact bytes are
+ *    pinned here -- a stray backslash is a 400 from the server.
+ */
+class SpeakPlanTest {
+
+    // ---------------------------------------------------------------- grammar
+
+    @Test
+    fun switchesAreOnlyConsumedWhileTheyLead() {
+        val request = SpeakPlan.parse("voice=7f92 speed=1.5 你好 世界")
+        assertTrue(request != null)
+        assertEquals("7f92", request?.voice)
+        assertEquals(1.5f, request?.speed ?: 0f, 0.0001f)
+        assertEquals("你好 世界", request?.text)
+    }
+
+    @Test
+    fun aSentenceThatMerelyContainsSpeedKeepsItVerbatim() {
+        val request = SpeakPlan.parse("把 speed=2 这个词读出来")
+        assertTrue(request != null)
+        assertEquals("", request?.voice)
+        assertEquals(SpeakPlan.SPEED_DEFAULT, request?.speed ?: 0f, 0.0001f)
+        assertEquals("把 speed=2 这个词读出来", request?.text)
+    }
+
+    @Test
+    fun innerSpacesOfThePayloadSurvive() {
+        val request = SpeakPlan.parse("voice=v1  一二三   四五六")
+        assertEquals("一二三   四五六", request?.text)
+    }
+
+    @Test
+    fun unusableLinesAreRefusedRatherThanGuessed() {
+        assertNull(SpeakPlan.parse(""))
+        assertNull(SpeakPlan.parse("   "))
+        assertNull(SpeakPlan.parse("speed=1.5"))
+        assertNull(SpeakPlan.parse("voice="))
+        assertNull(SpeakPlan.parse("voice= hi"))
+        assertNull(SpeakPlan.parse("speed=abc hi"))
+    }
+
+    @Test
+    fun speedIsClampedToTheServersRange() {
+        assertEquals(0.5f, SpeakPlan.parse("speed=0.1 hi")?.speed ?: 0f, 0.0001f)
+        assertEquals(2.0f, SpeakPlan.parse("speed=9 hi")?.speed ?: 0f, 0.0001f)
+        assertEquals("1.00", SpeakPlan.speedText(1.0f))
+        assertEquals("0.50", SpeakPlan.speedText(0.1f))
+        assertEquals("2.00", SpeakPlan.speedText(3.0f))
+        assertEquals("1.25", SpeakPlan.speedText(1.25f))
+    }
+
+    @Test
+    fun theNormalisedArgumentStringKeepsOnlyTheSwitchesThatMatter() {
+        assertEquals("voice=v1 你好", SpeakPlan.normalize(SpeakPlan.Request("v1", 1.0f, "你好")))
+        assertEquals("speed=1.50 你好", SpeakPlan.normalize(SpeakPlan.Request("", 1.5f, "你好")))
+        assertEquals("你好", SpeakPlan.normalize(SpeakPlan.Request("", 1.0f, "你好")))
+        assertEquals("usage: speak [voice=ID] [speed=0.5-2.0] TEXT", SpeakPlan.USAGE)
+    }
+
+    @Test
+    fun theBakedVoiceIsUsedOnlyWhenTheLineNamesNone() {
+        assertEquals("v1", SpeakPlan.voiceOrDefault("v1", "baked"))
+        assertEquals("baked", SpeakPlan.voiceOrDefault("", "baked"))
+        assertEquals("baked", SpeakPlan.voiceOrDefault("   ", "baked"))
+        assertEquals("", SpeakPlan.voiceOrDefault("", "  "))
+        assertEquals("http://43.166.6.110", SpeakPlan.endpoint(" http://43.166.6.110/ "))
+        assertEquals("http://43.166.6.110", SpeakPlan.endpoint("http://43.166.6.110"))
+        assertEquals("tts-0.mp3", SpeakPlan.chunkFileName(0))
+        assertEquals("tts-12.mp3", SpeakPlan.chunkFileName(12))
+    }
+
+    // --------------------------------------------------------------- chunking
+
+    @Test
+    fun theLimitsAreTheMeasuredOnes() {
+        assertEquals(40, SpeakPlan.FIRST_MAX)
+        assertEquals(120, SpeakPlan.CHUNK_MAX)
+        // The server refuses 501 with a 413; the client never asks for that.
+        assertEquals(500, SpeakPlan.SERVER_MAX)
+        assertTrue(SpeakPlan.CHUNK_MAX < SpeakPlan.SERVER_MAX)
+        assertTrue(SpeakPlan.FIRST_MAX < SpeakPlan.CHUNK_MAX)
+    }
+
+    @Test
+    fun blankTextIsNoChunksAtAll() {
+        assertEquals(emptyList<String>(), SpeakPlan.chunks(""))
+        assertEquals(emptyList<String>(), SpeakPlan.chunks("   "))
+    }
+
+    @Test
+    fun aShortLineIsOneChunkAndIsNotRewritten() {
+        val text = "现在就回家。"
+        assertEquals(listOf(text), SpeakPlan.chunks(text))
+        val exactly = "测".repeat(SpeakPlan.FIRST_MAX)
+        assertEquals(listOf(exactly), SpeakPlan.chunks(exactly))
+    }
+
+    @Test
+    fun sixtyCharactersBecomeTwoChunksSoTheFirstSoundIsEarly() {
+        // Packing everything under 120 into one chunk meant 6 s of silence for
+        // 60 characters; the first chunk is capped at 40.
+        val chunks = SpeakPlan.chunks("测".repeat(60))
+        assertEquals(2, chunks.size)
+        assertEquals(40, chunks[0].length)
+        assertEquals(20, chunks[1].length)
+        assertEquals("测".repeat(60), chunks.joinToString(""))
+    }
+
+    @Test
+    fun aHundredAndTwentyCharactersStayWithinTheLaterLimit() {
+        val chunks = SpeakPlan.chunks("测".repeat(120))
+        assertEquals(2, chunks.size)
+        assertEquals(40, chunks[0].length)
+        assertEquals(80, chunks[1].length)
+        assertTrue(chunks.all { it.length <= SpeakPlan.CHUNK_MAX })
+    }
+
+    @Test
+    fun twoHundredCharactersBecomeThreeChunks() {
+        val chunks = SpeakPlan.chunks("测".repeat(200))
+        assertEquals(3, chunks.size)
+        assertEquals(listOf(40, 120, 40), chunks.map { it.length })
+        assertEquals("测".repeat(200), chunks.joinToString(""))
+    }
+
+    @Test
+    fun aCutPrefersASentenceEndThenAClauseEndThenTheHardLimit() {
+        assertEquals("你好世界。", SpeakPlan.chunks("你好世界。" + "a".repeat(50))[0])
+        assertEquals(
+            "一二三四五六七八九十，",
+            SpeakPlan.chunks("一二三四五六七八九十，" + "b".repeat(50))[0]
+        )
+    }
+
+    @Test
+    fun aTwoHundredAndFortyCharacterUtteranceStartsWithinFourtyCharacters() {
+        // Eight 30-character sentences: 240 characters, all punctuated.
+        val sentence = "测".repeat(29) + "。"
+        val text = sentence.repeat(8)
+        assertEquals(240, text.length)
+        val chunks = SpeakPlan.chunks(text)
+        assertTrue(chunks.size >= 3)
+        assertTrue(chunks[0].length <= SpeakPlan.FIRST_MAX)
+        for (index in 1 until chunks.size) {
+            assertTrue(chunks[index].length <= SpeakPlan.CHUNK_MAX)
+        }
+        assertEquals(text, chunks.joinToString(""))
+        // The first chunk is one whole sentence, so the first sound is natural.
+        assertEquals(sentence, chunks[0])
+    }
+
+    @Test
+    fun aLongSentenceIsCutAtCommasRatherThanMidWord() {
+        val clause = "一二三四五六七八九十，"
+        val text = clause.repeat(12) + clause
+        val chunks = SpeakPlan.chunks(text)
+        assertEquals(text, chunks.joinToString(""))
+        for (index in 0 until chunks.size) {
+            assertTrue(chunks[index].length <= SpeakPlan.CHUNK_MAX)
+            assertTrue(chunks[index].endsWith("，"))
+        }
+    }
+
+    @Test
+    fun aChunkNeverSplitsASurrogatePair() {
+        // 39 ASCII characters then an emoji: the hard cut at 40 would land in
+        // the middle of the pair, so it backs off by one.
+        val text = "a".repeat(39) + "\uD83D\uDE00" + "b".repeat(20)
+        val chunks = SpeakPlan.chunks(text)
+        assertEquals(39, chunks[0].length)
+        assertEquals(text, chunks.joinToString(""))
+    }
+
+    @Test
+    fun everyChunkIsNonEmptyAndTheTextIsNeverLost() {
+        val text = "第一句。第二句，还有一点内容！第三句；第四句…" + "x".repeat(300) + "完。"
+        val chunks = SpeakPlan.chunks(text)
+        assertTrue(chunks.isNotEmpty())
+        assertTrue(chunks.none { it.isEmpty() })
+        assertTrue(chunks[0].length <= SpeakPlan.FIRST_MAX)
+        for (index in 1 until chunks.size) {
+            assertTrue(chunks[index].length <= SpeakPlan.CHUNK_MAX)
+        }
+        assertEquals(text, chunks.joinToString(""))
+    }
+
+    // ------------------------------------------------------------- wire format
+
+    @Test
+    fun theBodyIsExactlyWhatTheServerExpects() {
+        assertEquals(
+            "{\"text\":\"你好\",\"voice\":\"v1\",\"speed\":1.00}",
+            SpeakPlan.requestBody("你好", "v1", 1.0f)
+        )
+        assertEquals(
+            "{\"text\":\"a\\\"b\\\\c\\nd\",\"voice\":\"v1\",\"speed\":1.00}",
+            SpeakPlan.requestBody("a\"b\\c\nd", "v1", 1.0f)
+        )
+        assertEquals(
+            "{\"text\":\"x\",\"voice\":\"v\",\"speed\":1.50}",
+            SpeakPlan.requestBody("x", "v", 1.5f)
+        )
+    }
+
+    // --------------------------------------------------------------- receipts
+
+    @Test
+    fun aFinishedRunReportsCharsChunksFirstSoundAndBytes() {
+        assertEquals(
+            "speak 已朗读 240 字（fish voice=7f92f8af speed=1.00 4 块 首声 2.40s 总 14.80s 712000B）",
+            SpeakPlan.successLine(240, "7f92f8af", 1.0f, 4, 2400L, 14800L, 712000L)
+        )
+    }
+
+    @Test
+    fun aFallbackSaysWhyTheFishPathWasAbandoned() {
+        assertEquals(
+            "speak 已朗读 24 字（回落系统 TTS：服务端 502）",
+            SpeakPlan.fallbackLine(24, "服务端 502")
+        )
+        assertEquals("未配置 TTS 服务", SpeakPlan.NOT_CONFIGURED)
+        assertEquals("服务端返回空音频", SpeakPlan.EMPTY_AUDIO)
+    }
+
+    @Test
+    fun aPartialRunNeverClaimsToHaveReadEverything() {
+        assertEquals(
+            "speak 已播 2/3 块，第 3 块失败：服务端 502，未回落（避免重复朗读）",
+            SpeakPlan.partialLine(2, 3, 3, "服务端 502")
+        )
+    }
+
+    @Test
+    fun serverErrorsKeepTheServersOwnWords() {
+        assertEquals("服务端 502", SpeakPlan.httpFailure(502, ""))
+        assertEquals("服务端 401（invalid secret）", SpeakPlan.httpFailure(401, " invalid secret "))
+        assertEquals(
+            "invalid secret: bad key",
+            SpeakPlan.errorHint("{\"error\":\"invalid secret\",\"detail\":\"bad key\"}")
+        )
+        assertEquals("", SpeakPlan.errorHint("   "))
+        // Not JSON: the raw body is the hint, clipped so a receipt stays a line.
+        assertEquals("oops", SpeakPlan.errorHint("oops"))
+        val long = SpeakPlan.errorHint("z".repeat(200))
+        assertTrue(long.length <= 81)
+        assertTrue(long.endsWith("…"))
+    }
+
+    @Test
+    fun aStuckPlayerIsBoundedByTheDecodedDuration() {
+        assertEquals(SpeakPlan.PLAY_FALLBACK_MS, SpeakPlan.playbackCapMs(0L))
+        assertEquals(SpeakPlan.PLAY_FALLBACK_MS, SpeakPlan.playbackCapMs(-1L))
+        assertEquals(3000L + SpeakPlan.PLAY_SLACK_MS, SpeakPlan.playbackCapMs(3000L))
+        assertEquals("播放超时（8.00s）", SpeakPlan.playTimeout(8000L))
+        assertEquals("2.40s", SpeakPlan.seconds(2400L))
+        assertEquals("0.00s", SpeakPlan.seconds(0L))
+    }
+
+    @Test
+    fun theTimeoutsAreTheAgreedOnes() {
+        assertEquals(10_000, SpeakPlan.CONNECT_TIMEOUT_MS)
+        assertEquals(90_000, SpeakPlan.READ_TIMEOUT_MS)
+        // Two chunks of look-ahead, and the player never buffers more.
+        assertEquals(2, SpeakPlan.QUEUE_CAPACITY)
+    }
+}

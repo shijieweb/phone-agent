@@ -48,6 +48,7 @@
 | v0.8.5 | 给 v0.8.4 的「向上找可点祖先」加几何约束：候选祖先必须与命中节点**横向且纵向都相交**（rect 先归一化，`aLeft <= bRight && bLeft <= aRight && aTop <= bBottom && bTop <= aBottom`，缺 rect 永不算相交）。原因：糖豆网页 113 个带文本 `z` 节点全挑到同一个屏外「注册」按钮 `1060,402,1153,451`（WebView 把它挤到同一行），25 个会点错。父子天然几何包含，真持有标签的祖先必然与之共享像素；加约束后 27/113，全部落到真持有标签的整宽播放条 `0,2536,1201,2590`。找不到相交祖先 → 回到 v0.8.3 原文案不给 hint；`up` 且无相交祖先 → 仍 `no clickable ancestor for: …` exit 5 |
 | v0.9.0 | 「摄像头看图」页：Camera2 自开相机取帧（截屏拿到的是整页画面，半分辨率、带状态行和键盘、还随机型可能是全黑），预览与 JPEG 同 session 双 target，`CamPlan.pickSize` 从 SCAM 挑近 1280x720，按 300ms 等键盘收起后 still capture → 缩到 ≤1280 重压 quality 80 → 像素转正 → `PUT /agent/blob/` + `POST /agent/note`（`kind=look`，带 text/blob/w/h），页面自建 `RcClient` 不依赖服务；配置页加按钮，`UiText.clickable` 8→9 |
 | v0.9.1 | 「摄像头看图」锁竖屏（`android:screenOrientation="portrait"`）。这页是竖着拿手机对准货架用的：横过来输入框被压到一行、预览只剩 575 px 高；更实际的是旋转会重建 Activity，相机重开、在飞的 still 跟着旧实例一起死。全 App 只有这一页不跟系统旋转 |
+| v0.10.0 | `speak`：走 VPS Fish TTS 出声，`say` 当兜底。分块合成（首块 ≤40 字、其余 ≤120，优先句末 → 逗号 → 硬切且不劈开代理对），合成线程 + 2 槽队列边合成边播；`MediaPlayer` 同步 prepare、50 ms 轮询 `isPlaying`、时长 +5 s 封顶；服务端非 200 把 `error`/`detail` 写进回执；**一句没听到就整段回落 `say`**，已经听到就不重播（`已播 2/3 块…未回落（避免重复朗读）` exit 6）。凭据走 `local.properties` → `BuildConfig.DEFAULT_TTS_*` |
 
 ### v0.5.7 后半 —— 保活 + 本地 OCR（未做）
 - 静音音频循环保活（仅后台任务时开，可关）

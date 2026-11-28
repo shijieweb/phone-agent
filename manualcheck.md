@@ -199,6 +199,17 @@ and compare against the expectation below.
 | `say rate=200 pitch=90 测试` | faster and lower than the default, and the report echoes both numbers |
 | `say -l fr bonjour` | exit 2 (usage) — an unknown language is refused, never read with a Chinese voice |
 | `say` with no text | exit 2, usage `say [-l zh\|en] [rate=PERCENT] [pitch=PERCENT] TEXT` |
+| `speak 你好，我是你的手机` | exit 0, stdout `speak 已朗读 9 字（fish voice=<voice> speed=1.00 1 块 首声 X.XXs 总 X.XXs NNNNNB）` and the phone **says it in the Fish voice** — audibly a different voice from `say`, which is the whole point. `首声` under ~3 s for a short line is normal |
+| `speak <a 300-character paragraph>` | exit 0, the receipt says `N 块` with N >= 3, and the speech is **continuous** — no gap long enough to notice between chunks, because the next chunk is synthesized while the current one plays. `总` should be roughly 0.10 s per character plus a little |
+| `speak speed=1.5 测试一下速度` | faster than the default; the receipt echoes `speed=1.50` |
+| `speak speed=9 测试` | exit 0 and the receipt says `speed=2.00` — clamped, not refused |
+| `speak speed=abc 测试` | exit 2, `usage: speak [voice=ID] [speed=0.5-2.0] TEXT` — a flag that cannot parse is never read aloud as text |
+| `speak voice=<a wrong id> 测试` | exit 0 with a fallback receipt naming the server's own words, e.g. `speak 已朗读 2 字（回落系统 TTS：服务端 400（voice not found））`, and the phone speaks it in the **system** voice. Nothing was played before the failure, so falling back here is correct |
+| `speak` with no text | exit 2, `usage: speak [voice=ID] [speed=0.5-2.0] TEXT` |
+| `speak` in airplane mode | exit 0 within ~11 s (the 10 s connect timeout), receipt `speak 已朗读 N 字（回落系统 TTS：…）`, and the phone still says the sentence in the system voice. **This is the case the fallback exists for** |
+| `speak <a long paragraph>` then `stop` mid-playback | the agent stops, the poll loop is not stuck, and the next command after a restart works. `speak-synth` is a daemon thread and dies with the process; leftover `tts-*.mp3` files in `cacheDir` are the only trace |
+| **the fallback, proven by breaking the secret** | rebuild with a deliberately wrong `phoneagent.ttsSecret` in `local.properties` (`JAVA_HOME=D:/phonectl/tools/jdk17 ./gradlew.bat --no-daemon -q assembleRelease -PAPP_VERSION_CODE=46 -PAPP_VERSION_NAME=0.10.0-pad12`), install, run `speak 你好`: exit 0, receipt `speak 已朗读 2 字（回落系统 TTS：服务端 401（invalid secret））`, and the sentence is spoken by the **system** voice. Then restore the real secret and rebuild — this is the only way to prove the 401 path without waiting for the server to misbehave. If the receipt instead says `未配置 TTS 服务`, the value never reached `BuildConfig` (check that `local.properties` is being *read*, not merely present) |
+| **a build with no TTS keys at all** | `speak 你好` answers `speak 已朗读 2 字（回落系统 TTS：未配置 TTS 服务）` with exit 0 — a clone built by someone else must still speak, not dial a server nobody configured |
 | `screen stayon on` | exit 0, `已开启常亮（屏幕超时=永不）`; 设置 → 显示 → 休眠 shows 永不; the panel stays lit for 5 minutes untouched |
 | `screen stayon` | exit 0, `常亮: 开 当前超时=永不` — and nothing changes |
 | `screen stayon off` | exit 0, `已关闭常亮（屏幕超时=60s）`; 休眠 is back to 1 分钟 |

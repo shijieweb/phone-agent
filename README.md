@@ -155,6 +155,38 @@ byte-for-byte old line (no hint), `up` with nothing overlapping → the same
 `no clickable ancestor for: …` exit 5, and a node with a centre of its own never
 enters this code at all. See `SPEC.md` §3.1, §5 and §10 case 33.
 
+v0.10.0-pad12 is a second voice, and a decision about where it lives. `say` uses
+the phone's own engine: always there, no network, and it sounds like a phone
+reading a menu. `speak` sends the sentence to the Fish TTS service on the VPS
+instead — `POST {ttsBase}/tts/` with `X-TTS-Secret`, one MP3 back — and plays it
+with a `MediaPlayer`. It is a new verb rather than a change to `say` because the
+two failures are not the same failure: `say` fails when the engine has no voice
+pack, `speak` fails when a server is busy, and the operator needs to know which.
+So `speak` falls back to `say` when the server path cannot be used at all, and
+says so in the receipt — `speak 已朗读 24 字（回落系统 TTS：服务端 502）` —
+because a sentence already asked for must not be lost to a 502.
+
+Chunking is where the shape comes from. Synthesis costs roughly 0.10 s per
+character, so the server's own 500-char cap would be about a minute of silence
+before the first sound. Text is cut into chunks instead — first at most 40 chars,
+the rest at most 120, preferring a sentence end, then a clause end, then a hard
+cut that never splits a surrogate pair — and a daemon thread synthesizes the next
+one while the current one plays, through a two-slot queue, so a paragraph never
+buffers a hundred MP3s in `cacheDir`. The first chunk is short because
+time-to-first-sound is what the person holding the phone judges; the rest are long
+because every extra request is a round trip.
+
+A partial run is **not** retried. If audio was already heard, replaying the
+paragraph to cover the last sentence would say the opening twice, so it answers
+`speak 已播 2/3 块，第 3 块失败：…，未回落（避免重复朗读）` with exit 6. Playback
+is capped at the decoded duration + 5 s (120 s when unknown) and polled every
+50 ms on the poll thread — no `setOnCompletionListener`, because that needs a
+`Looper` this thread does not have, and a player that never reports `false` would
+hang the one loop every command shares. The secret is not in the repo:
+`phoneagent.ttsBase` / `ttsSecret` / `ttsVoice` live in `local.properties` and are
+baked into `BuildConfig.DEFAULT_TTS_*`, the same mechanism as the relay values.
+See `SPEC.md` §3.30 and §10 case 35.
+
 v0.9.0-pad12 is the one thing the whole screenshot pipeline cannot do: show a
 camera. Every other way this app sees the screen goes through the accessibility
 tree or `screencap`, and a camera preview is composited by the HAL into a
