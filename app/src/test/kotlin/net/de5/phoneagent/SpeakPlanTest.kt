@@ -1,9 +1,12 @@
 package net.de5.phoneagent
 
 import android.media.AudioAttributes
+import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 
 /**
@@ -290,11 +293,32 @@ class SpeakPlanTest {
         // USAGE_MEDIA, not USAGE_ASSISTANT (v0.11.1-pad12). Measured on the
         // MEIZU 22 / Android 16 with `dumpsys audio`: USAGE_ASSISTANT routes to
         // STREAM_ASSISTANT (max 15, sitting at 11 = 73%), USAGE_MEDIA routes to
-        // STREAM_MUSIC (max 60, speaker at 60) -- the stream VolumeGuard raises,
-        // and the one "STREAM_TTS (aliased to: STREAM_MUSIC)" puts the system
-        // voice on. Both halves are pinned: the value we want, and the one
-        // v0.11.0 shipped and must not come back.
+        // STREAM_MUSIC (max 60, speaker at 60) -- the stream the owner himself
+        // adjusts, and the one "STREAM_TTS (aliased to: STREAM_MUSIC)" puts the
+        // system voice on. Both halves are pinned: the value we want, and the
+        // one v0.11.0 shipped and must not come back.
         assertEquals(AudioAttributes.USAGE_MEDIA, FeatSpeak.SPEAK_USAGE)
         assertTrue(FeatSpeak.SPEAK_USAGE != AudioAttributes.USAGE_ASSISTANT)
+    }
+
+    @Test
+    fun speakNeverTouchesThePhonesVolume() {
+        // v0.11.2-pad12: the owner adjusts his own volume, so `speak` must not
+        // read or write it. There is no pure-logic way to say "this class does
+        // not call AudioManager" -- AudioManager only exists on a device -- so
+        // the shape of the source is what is pinned: no volume-guard class, no
+        // stream accessor, no setStreamVolume anywhere in FeatSpeak.kt.
+        //
+        // The file is read from the module directory Gradle runs unit tests in;
+        // if that ever moves, the test is skipped rather than failed, and the
+        // device check in manualcheck.md remains the real proof.
+        val source = File("src/main/kotlin/net/de5/phoneagent/FeatSpeak.kt")
+        Assume.assumeTrue("FeatSpeak.kt not found from " + File(".").absolutePath, source.isFile)
+        val text = source.readText()
+        assertFalse(text.contains("VolumeGuard"))
+        assertFalse(text.contains("AudioManager"))
+        assertFalse(text.contains("setStreamVolume"))
+        assertFalse(text.contains("getStreamVolume"))
+        assertTrue(text.contains("USAGE_MEDIA"))
     }
 }

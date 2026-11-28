@@ -155,31 +155,40 @@ byte-for-byte old line (no hint), `up` with nothing overlapping → the same
 `no clickable ancestor for: …` exit 5, and a node with a centre of its own never
 enters this code at all. See `SPEC.md` §3.1, §5 and §10 case 33.
 
-v0.11.1-pad12 is one line and the numbers behind it. v0.11.0 raised the media
+v0.11.2-pad12 is a deletion. The owner heard the voice at the right level and said
+he adjusts the volume himself, so `speak` no longer reads or writes the phone's
+volume **at all**: `VolumeGuard` — the class that pushed `STREAM_MUSIC` to its
+maximum on the first sound and restored the old value in a `finally` — is gone,
+along with both `AgentLog` lines it could write. What is left is one decision and
+no code: the audio plays on `STREAM_MUSIC` (`USAGE_MEDIA`, unchanged from
+v0.11.1), which is the stream his volume keys move and the stream the system voice
+already uses, so both voices are heard at whatever level he has set — including 0.
+The v0.11.1 route fix is untouched: that one was right. See `SPEC.md` §3.30 and
+§10 case 38.
+
+v0.11.1-pad12 is one line and the numbers behind it. v0.11.0 pushed the media
 stream around `speak` and the owner still said the voice was too quiet, because
-the raise and the playback were on different streams: `USAGE_ASSISTANT` routes to
-`STREAM_ASSISTANT` (max **15**, the phone was at **11**), while the guard pushed
-`STREAM_MUSIC` (max **60**, at **60**). `dumpsys audio` says
+the push and the playback were on different streams: `USAGE_ASSISTANT` routes to
+`STREAM_ASSISTANT` (max **15**, the phone was at **11**), while the old guard
+pushed `STREAM_MUSIC` (max **60**, at **60**). `dumpsys audio` says
 `STREAM_TTS (aliased to: STREAM_MUSIC)`, which is exactly why the system voice was
 loud and ours was not — and `ffmpeg -af ebur128` on a returned MP3 measures
 I: −9.8 LUFS, so the Fish audio was never the problem. `speak` now asks for
-`USAGE_MEDIA` (`CONTENT_TYPE_SPEECH` kept), so the stream the guard raises is the
-stream the audio plays on. `STREAM_ASSISTANT` is deliberately left alone: it
-belongs to the phone's own voice assistant. The usage is exposed as
-`FeatSpeak.SPEAK_USAGE` so a JVM test can pin it — see `SPEC.md` §3.30 and §10
-case 37.
+`USAGE_MEDIA` (`CONTENT_TYPE_SPEECH` kept), i.e. the stream the owner's volume
+keys move. `STREAM_ASSISTANT` is deliberately left alone: it belongs to the
+phone's own voice assistant. The usage is exposed as `FeatSpeak.SPEAK_USAGE` so a
+JVM test can pin it — see `SPEC.md` §3.30 and §10 case 37.
 
-v0.11.0-pad12 is two small things the phone was telling nobody. The first is
+v0.11.0-pad12 is two small things the phone was telling nobody. The first was
 volume: `speak` played through `USAGE_ASSISTANT`, which does **not** follow the
 media stream (v0.11.1 corrected that — see above), so
-a phone left at 20% read a paragraph nobody could hear from across a room. It now
-raises `STREAM_MUSIC` to its maximum for the duration of one utterance and puts it
-back — raised on the **first play**, not up front, so a run that never makes a sound
-(a 401, a dead network) leaves the phone's volume exactly as it was, and every step
-wrapped so a phone that refuses the change still gets its audio. The restore is in
-the same `finally` as the worker interrupt, which covers the success path, the
-partial-run return and an exception alike. Volume 0 is raised too: the operator
-asked to be heard. See `SPEC.md` §3.30.
+a phone left at 20% read a paragraph nobody could hear from across a room. v0.11.0
+answered by raising `STREAM_MUSIC` to its maximum for the duration of one
+utterance and putting it back — raised on the **first play**, not up front, so a run
+that never made a sound (a 401, a dead network) left the phone's volume exactly as
+it was, and every step wrapped so a phone that refused the change still got its
+audio. **v0.11.2 removed that whole behaviour**: once the route was right the voice
+was audible without it, and the owner adjusts his own volume. See `SPEC.md` §3.30.
 
 The second is that 摄像头看图 never said it was on. A `look` note is written when
 发送 is pressed, which is also true of a page that was closed ten seconds later, so

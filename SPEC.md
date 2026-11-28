@@ -2027,41 +2027,45 @@ actually produced: `speak 已朗读 240 字（fish voice=7f92 speed=1.00 3 块 �
 receipt can be compared with the server's own log.
 
 **Why `USAGE_MEDIA` and not `USAGE_ASSISTANT` (v0.11.1-pad12).** The usage
-attribute decides which stream the audio is played on, and the guard below only
-works when it is the *same* stream the sound comes out of. Measured on the
-operator's MEIZU 22 (Android 16) with `dumpsys audio`:
+attribute decides which stream the audio is played on, and that stream is the one
+the owner adjusts with the volume keys. Measured on the operator's MEIZU 22
+(Android 16) with `dumpsys audio`:
 
 | Attribute | Stream | Max | Speaker was at |
 |---|---|---|---|
 | `USAGE_ASSISTANT` | `STREAM_ASSISTANT` | **15** | **11** (73%) |
 | `USAGE_MEDIA` | `STREAM_MUSIC` | **60** | **60** (100%) |
 
-v0.11.0 shipped `USAGE_ASSISTANT` while the guard raised `STREAM_MUSIC`
-(`dumpsys`: oldIndex 28 → index 60), so the raise happened on a stream nothing
-played to and the owner still heard a voice far quieter than the system one. The
-system engine is not a louder source to blame: `dumpsys audio` prints
-`STREAM_TTS (aliased to: STREAM_MUSIC)`, so `say` plays at 60/60 while `speak`
+v0.11.0 shipped `USAGE_ASSISTANT` and separately pushed `STREAM_MUSIC` to its
+maximum (`dumpsys`: oldIndex 28 → index 60), so the push landed on a stream
+nothing played to and the owner still heard a voice far quieter than the system
+one. The system engine is not a louder source to blame: `dumpsys audio` prints
+`STREAM_TTS (aliased to: STREAM_MUSIC)`, so `say` played at 60/60 while `speak`
 was playing at 11/15. The Fish audio itself is fine — `ffmpeg -af ebur128` on a
 returned MP3 measures I: −9.8 LUFS, true peak −0.7 dBFS.
 
-`USAGE_ASSISTANT` is also the wrong stream to push: it belongs to the phone's own
-voice assistant, so raising it would make the owner's assistant louder instead of
-our playback. `CONTENT_TYPE_SPEECH` is kept — it is what tells the system this is
-speech and not music. No flags are set. The usage is exposed as
+`USAGE_ASSISTANT` is also the wrong stream to *drive*: it belongs to the phone's
+own voice assistant. `CONTENT_TYPE_SPEECH` is kept — it is what tells the system
+this is speech and not music. No flags are set. The usage is exposed as
 `FeatSpeak.SPEAK_USAGE` (an `Int`) so a plain JVM test can pin it; the
 `MediaPlayer` itself still cannot be built off-device.
 
-**Volume (v0.11.0-pad12).** The media stream is pushed to its maximum
-(`STREAM_MUSIC`, `setStreamVolume(..., max, 0)`) and restored to whatever it was
-when the run ends. Two decisions make this safe rather than rude: it is raised on
-the **first play**, not up front, so a run that never makes a sound — a 401, a dead
-network, an empty chunk list — never changes the phone's volume; and every step is
-wrapped in `catch (Throwable)`, so a phone that refuses the change still gets its
-audio, with the failure written to `AgentLog` as
-`调整媒体音量失败: <Class: message>` and nothing on screen. The restore runs in the
-same `finally` as `worker.interrupt()`, which covers the success path, the
-partial-run return and an exception alike. Volume 0 (the owner silenced the phone)
-is raised like any other value — the operator asked to be heard.
+**Volume: `speak` does not touch it (v0.11.2-pad12).** The owner said the level is
+right and that he adjusts it himself, so the app no longer reads or writes the
+phone's volume at all. What ships is one decision and no code: the audio goes out
+on `STREAM_MUSIC` (`USAGE_MEDIA`, §above), which is the stream his volume keys
+move and the stream the system voice already uses, so both voices are judged at
+whatever level he has set.
+
+This is a deliberate deletion, not a regression, and the history is worth keeping
+because v0.11.0 did the opposite: `VolumeGuard` raised `STREAM_MUSIC` to its
+maximum on the first sound and restored the old value in a `finally`, logging
+`调整媒体音量失败` / `恢复媒体音量失败` on failure. It was safe (a run that never
+made a sound never touched the sliders) but it was still the app moving the
+owner's sliders behind his back, and after the v0.11.1 route fix the voice was
+audible without it. So: no `AudioManager` in `FeatSpeak.kt`, no stream accessor,
+no volume in the receipt. What the owner hears is exactly what his own volume
+setting says, including 0.
 
 **The secret never enters the repository.** `phoneagent.ttsBase`,
 `phoneagent.ttsSecret` and `phoneagent.ttsVoice` live in `local.properties`
@@ -3074,12 +3078,11 @@ framework** — do not mock `AccessibilityService`. Required cases:
        Activity checks before it starts a thread, and
        `modeBodyMatchesTheWordsTheRelayStores` the literal strings — the relay stores
        `kind` verbatim, so those two words *are* the contract with the operator's
-       side. The volume half has no JVM test on purpose: `AudioManager` only exists
-       on a device, and a plan object that pretends to test a system service would
-       pin nothing but its own mock. What is provable without a phone is the shape
-       the code must have — raised on the first play, restored in `finally`, every
-       call wrapped — and that is asserted by reading, not by running; the device
-       check is manualcheck.md.
+       side. The volume half of v0.11.0 had no JVM test on purpose: `AudioManager`
+       only exists on a device, and a plan object that pretends to test a system
+       service would pin nothing but its own mock. That half is **gone** in
+       v0.11.2-pad12 (case 38); the device check that replaced it is
+       manualcheck.md.
 
    37. The v0.11.1-pad12 audio route, the one thing about `speak` a JVM test *can*
        pin. `speakAsksForTheMediaStream` asserts
@@ -3097,6 +3100,20 @@ framework** — do not mock `AccessibilityService`. Required cases:
        `FeatSpeak.speakAudioAttributes()` because it is device-only. This is the
        first `android.*` import in `app/src/test`, and it is a constant, not a
        service.
+
+   38. The v0.11.2-pad12 deletion — `speak` no longer touches the phone's volume.
+       `speakNeverTouchesThePhonesVolume` reads `FeatSpeak.kt` from the module
+       directory and asserts the file contains **no** `VolumeGuard`,
+       `AudioManager`, `setStreamVolume` or `getStreamVolume`, and still asks for
+       `USAGE_MEDIA`. This is the honest way to pin an absence: there is no
+       `AudioManager` on a JVM to observe, so what is checked is the source shape
+       the absence produces. It is a source read, not a behavioural test — if the
+       file ever moves, `Assume.assumeTrue` skips instead of failing, and
+       manualcheck.md §"speak 前后音量表读数必须一致" remains the real proof. The
+       test that pinned the old behaviour is the comment in
+       `speakAsksForTheMediaStream`, which no longer calls the guard "the stream
+       VolumeGuard raises" — nothing asserted the guard itself, so nothing had to
+       be deleted.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

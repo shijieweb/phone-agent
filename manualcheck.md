@@ -541,17 +541,17 @@ right way up, with no UI, no status line and no keyboard in it. Do this on the
    (Before v0.9.1 the page followed the system rotation, recreated the activity,
    reopened the camera and dropped any still that was in flight.)
 
-### speak 会先把媒体音量顶满 (v0.11.0-pad12)
+### speak 前后音量表读数必须一致 (v0.11.2-pad12)
 
-这一条只能在真机上验，因为 `AudioManager` 不在 JVM 里。**关键不是「声音变大了」，而是「音量被改过又还回去了」** —— 第 3、4 步是重点。
+v0.11.0/v0.11.1 那套「播放期间把媒体音量顶满、播完恢复」在 v0.11.2 **整个删掉了** —— 老板自己调音量，App 不许动他的滑块。所以这一节验的是**「没动过」**，而不是「变响又变回去」。关键证据是播放前后两次读数完全相同，不是听感。
 
-1. 先把手机媒体音量调到 20% 左右（按音量键，或设置 → 声音 → 媒体音量），记下这个位置。
-2. 投一条 `speak 这是一次音量测试`。声音必须明显比 20% 大 —— 大致等于把音量键按到顶的效果。
-3. 播完之后立刻按一次音量键：弹出的音量条必须**停在 20% 那个位置**，不是你播完时的满格。这一步不过，说明恢复没跑。
-4. 验「没出声就不许动音量」：把 `local.properties` 里的 `phoneagent.ttsSecret` 故意改错，重装，音量设成 30%，投 `speak 这次会失败`。回执应当是 `speak 已朗读 N 字（回落系统 TTS：服务端 401…）`（系统 TTS 出声，音量**不变**），按音量键看到的仍然是 30%。
-5. 连投两条 `speak`，中间不停：第一条播完到第二条开始之间，音量条可能瞬间回到原值再被顶上去（每次调用各管各的一次），这是预期，不是 bug。
-6. 把媒体音量设成 **0**（静音），投 `speak 静音也要能听见`。必须出声 —— 音量 0 也照样顶满；播完回到 0。
-7. 验异常路径：播放过程中直接杀进程（设置 → 应用 → 强制停止）。下次开 App 后按音量键看：停在满格说明 `finally` 没跑到。进程被 SIGKILL 时确实无法恢复，属于已知边界，但要写进报告。
+1. 手机媒体音量调到 **20%**（按音量键能看见音量条），记下这个位置；记下 `cmd media_session volume --stream 3 --get` 的读数（`STREAM_MUSIC` = 3）。
+2. 投一条 `speak 这是一次音量测试`。声音按 20% 的档位出声 —— 比你平时听的小是**对的**，说明它没有偷偷顶音量。
+3. 播完立刻再跑一次 `cmd media_session volume --stream 3 --get`：读数必须**和播放前一模一样**。按一次音量键，弹出的音量条也必须停在 20%。这两项任一变化就是回归。
+4. 把媒体音量设成 **0**（静音），投 `speak 静音也要能听见`。**必须听不见**，并且音量表仍然是 0 —— 静音时不出声是正确行为，不是 bug（v0.11.0 会顶到满格出声，那个行为已经去掉）。
+5. 验回落路径也不碰音量：把 `local.properties` 里的 `phoneagent.ttsSecret` 故意改错，重装，音量设成 30%，投 `speak 这次会失败`。回执应当是 `speak 已朗读 N 字（回落系统 TTS：服务端 401…）`，系统 TTS 按 30% 出声，音量表读数仍然是 30%。
+6. 连投两条 `speak`，中间不停：两条之间音量表读数不应出现任何跳变（v0.11.0 时这里会「回落再顶上」，现在不该有了）。
+7. 播放过程中直接杀进程（设置 → 应用 → 强制停止），重开 App 看音量表：必须还是你设的那个值 —— 因为压根没改过，所以也不存在「`finally` 没跑到、音量留在满格」这条旧边界了。
 
 ### 远程语音的音量和系统 TTS 一样大 (v0.11.1-pad12)
 
@@ -560,7 +560,7 @@ v0.11.0 顶的是 `STREAM_MUSIC`，但 `USAGE_ASSISTANT` 把声音送到了 `STR
 1. 手机媒体音量先设成 **20%**（按音量键能看见音量条的位置），别用满格验，满格验不出差别。
 2. 投 `say 这是系统语音`，再投 `speak 这是远程语音`。两句**听起来一样响** —— 系统 TTS 走 `STREAM_TTS`，而 `dumpsys audio` 里它写着 `aliased to: STREAM_MUSIC`，所以它和现在的 `speak` 是同一条流、同一个档位。v0.11.0 上这两句差得很明显。
 3. 出声期间在另一个窗口跑 `dumpsys audio`（或 `adb shell dumpsys audio`），找 `AudioPlaybackConfiguration` 里 `u/pid:<我们的 pid>` 那几行：`usage=USAGE_MEDIA`、`content=CONTENT_TYPE_SPEECH`。**看到 `USAGE_ASSISTANT` 就是没生效**（装错包或没重装）。
-4. 再用 `cmd media_session volume --stream 3 --get` 看媒体流（`STREAM_MUSIC` = 3）在播放期间是不是满档 —— 现在的 usage 和 VolumeGuard 顶的是同一条流，这两个数必须一起变。
+4. 再用 `cmd media_session volume --stream 3 --get` 看媒体流（`STREAM_MUSIC` = 3）：播放期间和播放后读数必须**一样**（v0.11.2 起没人动它了），你听到的就是这个档位。
 5. 反面验证：`cmd media_session volume --stream 11 --get`（`STREAM_ASSISTANT`）在 `speak` 播放期间**必须还是原值**（实测 11/15）。它要是被顶上去了，说明有人在顶助手那条流，这是明令禁止的改法，立即回退。
 
 ### 摄像头看图会说自己是开着的 (v0.11.0-pad12)
