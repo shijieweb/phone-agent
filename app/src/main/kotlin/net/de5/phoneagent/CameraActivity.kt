@@ -30,11 +30,13 @@ import android.view.Gravity
 import android.view.KeyEvent
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import java.io.ByteArrayOutputStream
@@ -72,9 +74,15 @@ class CameraActivity : Activity() {
 
     private lateinit var prefs: Prefs
     private lateinit var previewView: TextureView
+
+    /** Shown over the preview while the camera is released (v0.11.4-pad12). */
+    private lateinit var camOffView: TextView
     private lateinit var inputView: EditText
     private lateinit var statusView: TextView
     private lateinit var sendButton: Button
+
+    /** The top-right switch; its label follows [cameraOn]. */
+    private lateinit var cameraButton: Button
 
     private val uiHandler = Handler(Looper.getMainLooper())
 
@@ -95,6 +103,19 @@ class CameraActivity : Activity() {
     /** True between the tap on 发送 and the answer: blocks a second capture. */
     @Volatile
     private var busy = false
+
+    /**
+     * Whether the camera is capturing at all (v0.11.4-pad12).
+     *
+     * This is the switch the top-right button owns, and it is *not* the same fact as
+     * "this page is visible": the page can be open with the camera released, and
+     * that is the state the owner asked for -- 关闭摄像头 means "stop taking pictures
+     * so the next 发送 goes out without one", not "leave". While it is false the
+     * preview holds a grey sentence instead of a frame, and [send] takes the
+     * text-only path. Volatile because [send] reads it from a background thread.
+     */
+    @Volatile
+    private var cameraOn = true
 
     /** True once the surface listener is installed, so it is not installed twice. */
     private var started = false
@@ -136,19 +157,20 @@ class CameraActivity : Activity() {
         // the owner may want to send a sentence with no picture at all, and leaving
         // the page used to be the 返回 button at the bottom, which competed with 发送
         // for the same row. A small button at the edge keeps the frame unobstructed.
+        // Since v0.11.4 it is a switch, not a way out -- see [toggleCamera].
         val topBar = LinearLayout(this)
         topBar.orientation = LinearLayout.HORIZONTAL
         topBar.gravity = Gravity.END
-        val closeButton = Button(this)
-        closeButton.text = CamPlan.CLOSE_CAMERA_TEXT
-        closeButton.isAllCaps = false
-        closeButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        closeButton.setPadding(dp(12), dp(4), dp(12), dp(4))
-        closeButton.minHeight = 0
-        closeButton.minimumHeight = 0
-        closeButton.setOnClickListener { finish() }
+        cameraButton = Button(this)
+        cameraButton.text = CamPlan.CLOSE_CAMERA_TEXT
+        cameraButton.isAllCaps = false
+        cameraButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        cameraButton.setPadding(dp(12), dp(4), dp(12), dp(4))
+        cameraButton.minHeight = 0
+        cameraButton.minimumHeight = 0
+        cameraButton.setOnClickListener { toggleCamera() }
         topBar.addView(
-            closeButton,
+            cameraButton,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -158,9 +180,37 @@ class CameraActivity : Activity() {
 
         // weight 1: the preview takes every pixel the text box and the buttons do
         // not need. A smaller preview is what makes the owner guess what is in frame.
+        //
+        // The TextureView keeps the weight and the FrameLayout is only a host, so the
+        // proportions are exactly what they were before v0.11.4: one more layer that
+        // measures itself around its single child changes no pixel. The placeholder is
+        // a sibling *over* the preview (v0.11.4-pad12) because a released camera leaves
+        // the last frame on screen -- a frozen picture of a room reads as "still on",
+        // and this sentence is what says it is not.
         previewView = TextureView(this)
-        root.addView(
+        camOffView = TextView(this)
+        camOffView.text = CamPlan.CAM_OFF_TEXT
+        camOffView.setTextSize(TypedValue.COMPLEX_UNIT_SP, TEXT_SIZE_NORMAL)
+        camOffView.setTextColor(COLOR_IDLE)
+        camOffView.gravity = Gravity.CENTER
+        camOffView.visibility = View.GONE
+        val previewHost = FrameLayout(this)
+        previewHost.addView(
             previewView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        previewHost.addView(
+            camOffView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+        root.addView(
+            previewHost,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f)
         )
 
@@ -209,7 +259,8 @@ class CameraActivity : Activity() {
 
         val buttons = LinearLayout(this)
         buttons.orientation = LinearLayout.HORIZONTAL
-        // 发送 only: leaving the page is the 关闭摄像头 button at the top now.
+        // 发送 only: since v0.11.4 the top-right button is a camera switch, so leaving
+        // this page is the system back gesture and nothing else.
         sendButton = addButton(buttons, SEND_TEXT, 1.0f) { send() }
         root.addView(buttons, matchWidth())
 
@@ -252,7 +303,10 @@ class CameraActivity : Activity() {
         started = true
         previewView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-                openCamera(st)
+                // A surface can appear long after the owner switched the camera off
+                // (a config change, the page coming back to the front); opening it
+                // here would light the camera while the button says it is closed.
+                if (cameraOn) openCamera(st)
             }
 
             override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
@@ -279,14 +333,14 @@ class CameraActivity : Activity() {
             val manager = getSystemService(CameraManager::class.java)
             if (manager == null) {
                 opening = false
-                reportError(OPEN_FAILED_TEXT)
+                cameraFailed(OPEN_FAILED_TEXT)
                 return@post
             }
             try {
                 val id = backCameraId(manager)
                 if (id == null) {
                     opening = false
-                    reportError(NO_BACK_CAMERA_TEXT)
+                    cameraFailed(NO_BACK_CAMERA_TEXT)
                     return@post
                 }
                 val characteristics = manager.getCameraCharacteristics(id)
@@ -294,7 +348,7 @@ class CameraActivity : Activity() {
                 val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                 if (map == null) {
                     opening = false
-                    reportError(OPEN_FAILED_TEXT)
+                    cameraFailed(OPEN_FAILED_TEXT)
                     return@post
                 }
 
@@ -312,7 +366,7 @@ class CameraActivity : Activity() {
                 )
                 if (previewPicked == null || jpegPicked == null) {
                     opening = false
-                    reportError(OPEN_FAILED_TEXT)
+                    cameraFailed(OPEN_FAILED_TEXT)
                     return@post
                 }
                 val pv = Size(previewPicked[0], previewPicked[1])
@@ -339,20 +393,87 @@ class CameraActivity : Activity() {
                         device.close()
                         camera = null
                         opening = false
-                        reportError(DISCONNECTED_TEXT)
+                        cameraFailed(DISCONNECTED_TEXT)
                     }
 
                     override fun onError(device: CameraDevice, error: Int) {
                         device.close()
                         camera = null
                         opening = false
-                        reportError(OPEN_FAILED_TEXT + " (" + error + ")")
+                        cameraFailed(OPEN_FAILED_TEXT + " (" + error + ")")
                     }
                 }, camHandler)
             } catch (t: Throwable) {
                 opening = false
-                reportError(describe(t))
+                cameraFailed(describe(t))
             }
+        }
+    }
+
+    // -------------------------------------------------------------- the switch --
+
+    /**
+     * 关闭摄像头 / 打开摄像头 (v0.11.4-pad12): release the camera, do not leave the page.
+     *
+     * The owner's correction, in his words: closing the camera means "stop capturing
+     * pictures, so the next 发送 does not carry one", not "go back to the config page".
+     * So this flips [cameraOn], re-labels the button and swaps the live preview for
+     * [CamPlan.CAM_OFF_TEXT]; leaving the page is the system back gesture.
+     *
+     * It **returns at once while a send is in flight** ([busy]), yet the button stays
+     * enabled: releasing the camera mid-still would pull it out from under
+     * [captureStill], while a switch that looks dead for the two seconds of an upload
+     * is a switch the owner presses twice. Ignoring one tap is the smaller lie.
+     *
+     * Runs on the UI thread (it is a click handler), so it touches views directly.
+     * A camera that will not come back is reported later, from the camera thread,
+     * through [cameraFailed] -- which also puts the button back to 打开摄像头 so the
+     * page never claims a camera it does not have.
+     */
+    private fun toggleCamera() {
+        if (busy) return
+        if (cameraOn) {
+            cameraOn = false
+            applyCameraSwitch()
+            // The same teardown onPause uses: one place where the session, the device,
+            // the reader and the preview surface are released.
+            closeCamera()
+            return
+        }
+        val texture = previewView.surfaceTexture
+        if (texture == null) {
+            // Nothing to draw into, so the camera cannot come back. Say so instead of
+            // flipping the label over a preview that will stay black.
+            cameraFailed(OPEN_FAILED_TEXT)
+            return
+        }
+        cameraOn = true
+        applyCameraSwitch()
+        openCamera(texture)
+    }
+
+    /** The one place that paints the switch; UI thread only. */
+    private fun applyCameraSwitch() {
+        val on = cameraOn
+        cameraButton.text = if (on) CamPlan.CLOSE_CAMERA_TEXT else CamPlan.OPEN_CAMERA_TEXT
+        camOffView.visibility = if (on) View.GONE else View.VISIBLE
+    }
+
+    /**
+     * The camera did not come up: report it *and* leave the switch in the state that
+     * is actually true (v0.11.4-pad12).
+     *
+     * Without the second half the button would keep reading 关闭摄像头 over a black
+     * preview, i.e. the page would claim a camera that is not there. Called from the
+     * camera thread, so the state change is posted to the UI thread.
+     */
+    private fun cameraFailed(reason: String) {
+        reportError(reason)
+        uiHandler.post {
+            if (isFinishing || isDestroyed) return@post
+            if (!cameraOn) return@post
+            cameraOn = false
+            applyCameraSwitch()
         }
     }
 
@@ -382,16 +503,16 @@ class CameraActivity : Activity() {
                             showStatus(READY_TEXT, COLOR_IDLE, TEXT_SIZE_NORMAL)
                         }
                     } catch (t: Throwable) {
-                        reportError(describe(t))
+                        cameraFailed(describe(t))
                     }
                 }
 
                 override fun onConfigureFailed(failed: CameraCaptureSession) {
-                    reportError(SESSION_FAILED_TEXT)
+                    cameraFailed(SESSION_FAILED_TEXT)
                 }
             }, camHandler)
         } catch (t: Throwable) {
-            reportError(describe(t))
+            cameraFailed(describe(t))
         }
     }
 
@@ -449,7 +570,10 @@ class CameraActivity : Activity() {
         }
         // Back from the permission dialog or the home screen: the surface may
         // already be there, in which case no callback will fire for it.
-        val texture = if (started) previewView.surfaceTexture else null
+        // The switch outranks the lifecycle (v0.11.4-pad12): onPause released the
+        // camera, but if the owner closed it himself it must stay closed when the
+        // page comes back -- otherwise the button says 打开摄像头 over a live preview.
+        val texture = if (started && cameraOn) previewView.surfaceTexture else null
         if (texture != null && camera == null) openCamera(texture)
     }
 
@@ -463,16 +587,24 @@ class CameraActivity : Activity() {
     // ------------------------------------------------------------------ send --
 
     /**
-     * 发送：先看有没有字，再等手停下来，然后拍一帧。
+     * 发送：先看有没有字，再等手停下来，然后拍一帧 —— 除非相机是关着的。
      *
      * 空文字直接拒绝而不是照发一张图：操作员收到一张没有问题的照片不知道要看
      * 什么，而手机主人会以为「已经发出去了」，两个人对着同一张图猜。
+     *
+     * v0.11.4-pad12 起这里分成两条路，分岔点是 [cameraOn]，不是「相机开没开成」：
+     * 相机被主人关掉以后，发送**不碰相机、不等 SETTLE_MS、不震**，只把这句话发出去
+     * （[sendTextOnly]）。空文本两路都拦，因为那是同一句话没打。
      */
     private fun send() {
         if (busy) return
         val text = CamPlan.clampText(inputView.text.toString())
         if (text.isEmpty()) {
             showStatus(EMPTY_TEXT, COLOR_IDLE, TEXT_SIZE_NORMAL)
+            return
+        }
+        if (!cameraOn) {
+            sendTextOnly(text)
             return
         }
         if (session == null || camera == null) {
@@ -499,6 +631,49 @@ class CameraActivity : Activity() {
             }
             camHandler.post { captureStill(text) }
         }, CamPlan.SETTLE_MS)
+    }
+
+    /**
+     * 只发文字 (v0.11.4-pad12): the 发送 path while the camera is released.
+     *
+     * No camera, no [CamPlan.SETTLE_MS], no capture buzz: there is nothing to hold
+     * still and nothing to wait for, and a buzz that means "the frame is captured"
+     * would be a lie. What goes out is a normal look note with an **empty blob name
+     * and w/h 0** -- the relay treats a blank blob as legal and answers with a note
+     * that has no picture, which is exactly what the owner asked for.
+     *
+     * [busy] and the disabled 发送 button are kept: two taps in flight would post the
+     * same sentence twice, and the second note would look like the owner repeated
+     * himself.
+     */
+    private fun sendTextOnly(text: String) {
+        busy = true
+        sendButton.isEnabled = false
+        showStatus(SENDING_TEXT, COLOR_IDLE, TEXT_SIZE_NORMAL)
+        // A fresh client per send, exactly like the picture path: RcClient holds no
+        // state, so this needs neither the service nor a prior hello.
+        val base = prefs.relayBase
+        val secret = prefs.secret
+        val id = prefs.agentId
+        val info = agentInfo()
+        Thread({
+            val client = RcClient(base, secret, id, info)
+            // Empty blob and zero dimensions are the agreed shape for "text only"
+            // (SPEC.md §3.29); the relay stores them verbatim.
+            val note = client.postNote(CamPlan.noteBody(id, text, "", 0, 0))
+            if (!note.ok) {
+                reportSendFailed(note.error ?: NOTE_FAILED_TEXT)
+                return@Thread
+            }
+            val chars = text.codePointCount(0, text.length)
+            uiHandler.post {
+                if (isFinishing || isDestroyed) return@post
+                busy = false
+                sendButton.isEnabled = true
+                showStatus(CamPlan.textOnlyLine(chars), COLOR_IDLE, TEXT_SIZE_NORMAL)
+                inputView.setText("")
+            }
+        }, "cam-text").start()
     }
 
     private fun captureStill(text: String) {
@@ -816,6 +991,9 @@ class CameraActivity : Activity() {
         const val SEND_TEXT = "发送"
 
         const val READY_TEXT = "对准要我看的东西，打一句话，按发送"
+
+        /** The only line the text-only path shows while it is in flight (v0.11.4-pad12). */
+        const val SENDING_TEXT = "正在发送"
         const val EMPTY_TEXT = "先打一句话"
         const val NEED_PERMISSION_TEXT = "需要相机权限"
         const val DENIED_TEXT = "没有相机权限，去系统设置里给这个应用打开"

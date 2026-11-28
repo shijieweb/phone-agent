@@ -310,6 +310,62 @@ class CamPlanTest {
         assertFalse(line, line.contains(":"))
     }
 
+
+    // ------------------------------------------- 相机开关 (v0.11.4-pad12) --
+
+    @Test
+    fun openCameraTextIsNotTheCloseLabel() {
+        // The button says what the next tap does. If the two labels ever collapse
+        // into one string, the switch has no visible state and the owner cannot tell
+        // whether the next 发送 carries a picture -- nothing else would notice.
+        assertEquals("打开摄像头", CamPlan.OPEN_CAMERA_TEXT)
+        assertFalse(CamPlan.OPEN_CAMERA_TEXT == CamPlan.CLOSE_CAMERA_TEXT)
+    }
+
+    @Test
+    fun camOffTextPromisesATextOnlySend() {
+        // The placeholder is the only thing that distinguishes "camera switched off"
+        // from "camera stalled on the last frame", and it has to promise the thing the
+        // owner cares about: this send goes out without a picture.
+        assertTrue(CamPlan.CAM_OFF_TEXT, CamPlan.CAM_OFF_TEXT.contains("只发文字"))
+        assertTrue(CamPlan.CAM_OFF_TEXT, CamPlan.CAM_OFF_TEXT.contains("已关闭"))
+    }
+
+    @Test
+    fun textOnlyLineNamesTheCharacterCount() {
+        assertEquals("已发送：文字 12 字（没带图）", CamPlan.textOnlyLine(12))
+    }
+
+    @Test
+    fun textOnlyLineSaysNoPictureInItsOwnWords() {
+        // Not summaryLine with zeros in it: 图 0 B（0x0）reads as "a picture went, and
+        // it was empty", which is the one thing the owner must not think.
+        assertTrue(CamPlan.textOnlyLine(12).contains("没带图"))
+        assertFalse(CamPlan.textOnlyLine(12).contains("图 0 B"))
+    }
+
+    @Test
+    fun textOnlyLineFallsBackWhenTheCountIsNotUsable() {
+        // The send happened, so the sentence still has to say so -- just without a
+        // number that would be a lie.
+        assertEquals("已发送：文字（没带图）", CamPlan.textOnlyLine(0))
+        assertEquals("已发送：文字（没带图）", CamPlan.textOnlyLine(-3))
+    }
+
+    @Test
+    fun aTextOnlyNoteHasAnEmptyBlobAndNoSize() {
+        // This is the whole wire contract of the text-only path: the relay accepts an
+        // empty blob name (it is the "no picture" spelling) and stores w/h verbatim.
+        // A blob name of "null", "0" or a leftover cam-*.jpg would make the far side
+        // fetch a picture that was never uploaded.
+        val body = CamPlan.noteBody("PHONE-MEIZU", "只发文字", "", 0, 0)
+        assertTrue(body, body.contains("\"kind\":\"look\""))
+        assertTrue(body, body.contains("\"blob\":\"\""))
+        assertTrue(body, body.contains("\"w\":0"))
+        assertTrue(body, body.contains("\"h\":0"))
+        assertFalse(body, body.contains(".jpg"))
+    }
+
     @Test
     fun pickSizeReturnsNullWhenNothingIsUsable() {
         assertNull(CamPlan.pickSize(emptyList(), 1280, 720))

@@ -49,14 +49,39 @@ internal object CamPlan {
     const val DONE_HOLD_TEXT = "拍好了，可以动了（正在发送）"
 
     /**
-     * The button that leaves this page without taking a picture (v0.11.3-pad12).
+     * The top-right button that releases the camera (v0.11.3-pad12, retargeted in
+     * v0.11.4-pad12).
      *
      * It moved to the top of the screen when 返回 was dropped from the bottom row:
      * the owner sometimes only wants to send a sentence, and 关闭摄像头 says what it
      * does -- 返回 next to 发送 read like "go back one step" and was pressed by
      * mistake.
+     *
+     * v0.11.4 made it a switch instead of a way out. The owner's words: closing the
+     * camera means "stop capturing pictures, so the next 发送 goes out without one",
+     * not "leave this page". So this label belongs to the ON state and the page
+     * stays where it is; leaving is the system back gesture.
      */
     const val CLOSE_CAMERA_TEXT = "关闭摄像头"
+
+    /**
+     * The same button once the camera is released (v0.11.4-pad12).
+     *
+     * It names the state the button leads *to*, not the state it is in: the button
+     * always says what the next tap does. 打开摄像头 is therefore the only label the
+     * owner can read as "the camera is off right now".
+     */
+    const val OPEN_CAMERA_TEXT = "打开摄像头"
+
+    /**
+     * What the preview area says while the camera is released (v0.11.4-pad12).
+     *
+     * A frozen last frame with no explanation reads as "the camera is still on and
+     * nobody is moving"; this sentence is the difference between a stalled picture
+     * and a switched-off camera, and it also promises the thing that matters for the
+     * next send -- 这次只发文字.
+     */
+    const val CAM_OFF_TEXT = "摄像头已关闭，这次只发文字"
 
     /** The relay accepts `^[A-Za-z0-9_.-]{1,80}$` for a blob name (SPEC.md §4). */
     const val NAME_MAX_CHARS = 80
@@ -134,6 +159,23 @@ internal object CamPlan {
      */
     fun summaryLine(bytes: Int, w: Int, h: Int, chars: Int): String =
         "已发送：图 " + sizeText(bytes) + "（" + w + "x" + h + "）+ 文字 " + chars + " 字"
+
+    /**
+     * The line under the buttons after a send that carried no picture
+     * (v0.11.4-pad12).
+     *
+     * Deliberately a different sentence from [summaryLine], not a summaryLine with
+     * zeros in it: 已发送：图 0 B（0x0）+ 文字 12 字 would read as "a picture went,
+     * and it was empty", which is the one thing the owner must not think. The
+     * parenthetical 没带图 is the whole message.
+     *
+     * [chars] counts code points, so an emoji is one character, not two. A zero or
+     * negative count still produces a sentence -- the send happened.
+     */
+    fun textOnlyLine(chars: Int): String {
+        if (chars <= 0) return "已发送：文字（没带图）"
+        return "已发送：文字 " + chars + " 字（没带图）"
+    }
 
     /** `NNN B` under 1 KiB, `NNN KB` above it (rounded to the nearest KiB). */
     fun sizeText(bytes: Int): String {

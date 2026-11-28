@@ -1849,10 +1849,11 @@ letterboxed to the preview's aspect — a picture of a screen, not of the thing 
 person pointed at. The only way to get the sensor's own image, at a size we
 choose, the right way up, is to open the camera yourself.
 
-`CameraActivity` does exactly that, in one page with three things on it: the live
-preview (a `TextureView`, layout weight 1), a multi-line `EditText` (`maxLength`
-= `CamPlan.MAX_TEXT` = 500 code points, hint 说一句：哪里不对 / 要我看什么) and two
-buttons 发送 / 返回. No command opens this page — the relay cannot summon it and
+`CameraActivity` does exactly that, in one page with four things on it: the camera
+switch in the top-right corner (§6.3 item 5), the live preview (a `TextureView`
+inside a weight-1 `FrameLayout`), a multi-line `EditText` (`maxLength`
+= `CamPlan.MAX_TEXT` = 500 code points, hint 说一句：哪里不对 / 要我看什么) and one
+button 发送. No command opens this page — the relay cannot summon it and
 nothing here is reachable through `Commands.parse`; it is a page the person
 holding the phone opens, because the question — 哪里不对 — is theirs to ask.
 
@@ -1932,6 +1933,30 @@ POST /agent/note
 | `blob` | the name uploaded in step 5, fetched back with `GET /ctl/blob/<name>` |
 | `w`, `h` | the JPEG's real pixel size **after** the re-compress, not the size requested, so the reader never has to guess whether the image was scaled |
 | `seq` | the relay's running counter (in the answer, unused for now) |
+
+**A send with no picture (v0.11.4-pad12).** When the camera switch is off, 发送 skips
+steps 2-5 above entirely and posts a note with no blob at all:
+
+```
+POST /agent/note
+  {"id":"PHONE-MEIZU","kind":"look","text":"屏幕上那个弹窗又出来了",
+   "blob":"","w":0,"h":0}
+  -> {"ok":true,"seq":43}
+```
+
+Same `kind`, same six fields, same endpoint — `blob` is the empty string and `w`/`h`
+are `0`. Nothing on the relay side had to change: `PUT /agent/blob/` is simply never
+called, and `/agent/note` already accepted a note whose blob is empty (it validates
+the name only when there is one). The reader tells the two apart by `blob` alone,
+which is why the empty string beats omitting the field — one shape for every note,
+so no consumer needs a null check for a key that may or may not be present.
+`CamPlan.noteBody` still writes all six fields, which is what
+`aTextOnlyNoteHasAnEmptyBlobAndNoSize` pins.
+
+The status line says so in words, through `CamPlan.textOnlyLine`:
+已发送：文字 8 字（没带图）, and 已发送：文字（没带图） when the count is not usable.
+A person who switched the camera off must never be left wondering whether a photo
+went out with the sentence.
 
 `/agent/note` lives on the relay next to `/agent/blob/` and `/agent/result`
 (`scripts/rc-relay.py`, added the same day as this page). It validates `id`
@@ -2541,10 +2566,11 @@ One button on the config page (`UiText.CAMERA`, 摄像头看图, directly under
 built in code. The protocol and the capture decisions are §3.29; this is only what
 is on the screen.
 
-Top to bottom: one slim 关闭摄像头 button (v0.11.3-pad12, right-aligned), the live
-preview (a `TextureView` at layout weight 1, so it takes everything the text box,
-the status line and the send button do not), one status line, the text box, and
-发送.
+Top to bottom: one slim camera switch (v0.11.3-pad12, right-aligned; a switch
+rather than a way out since v0.11.4-pad12), the live preview (a `TextureView`
+inside a `FrameLayout`, both at layout weight 1, so they take everything the text
+box, the status line and the send button do not), one status line, the text box,
+and 发送.
 
 1. **The preview.** Back camera, repeating `TEMPLATE_PREVIEW` request. It is the
    reason the page exists — the person points the phone at the thing instead of
@@ -2582,15 +2608,54 @@ the status line and the send button do not), one status line, the text box, and
 4. **发送**, full width, the only button in the bottom row. It is disabled while a
    send is in flight — a second press would capture a frame nobody asked for and
    upload it under a second name.
-5. **关闭摄像头** (v0.11.3-pad12), a slim right-aligned button **above** the preview,
-   `CamPlan.CLOSE_CAMERA_TEXT`, `finish()`. It replaced the old 返回 in the bottom
+5. **The camera switch** (v0.11.3-pad12, a switch since v0.11.4-pad12), a slim
+   right-aligned button **above** the preview. It replaced the old 返回 in the bottom
    row: 返回 sitting next to 发送 read like "go back one step" and was pressed by
-   mistake, and the owner sometimes wants to send a sentence with no picture at all,
-   which the button also makes possible. It stays enabled during a send — a page the
-   owner cannot leave is worse than an upload abandoned with the page.
+   mistake. It is **not** `finish()` any more, and that correction is the whole of
+   v0.11.4 — see "The switch is not an exit" below.
+
+   It has exactly two states, and the label always names the state the next tap
+   leads to, never the one the page is in:
+
+   | `cameraOn` | Button | Preview | 发送 |
+   |---|---|---|---|
+   | `true` (default) | 关闭摄像头 (`CamPlan.CLOSE_CAMERA_TEXT`) | live repeating preview | capture + text (§3.29) |
+   | `false` | 打开摄像头 (`CamPlan.OPEN_CAMERA_TEXT`) | `CamPlan.CAM_OFF_TEXT` 摄像头已关闭，这次只发文字 in the idle grey, centred | text only — no capture, no `SETTLE_MS`, no buzz |
+
+   `toggleCamera()` flips `@Volatile cameraOn`, repaints through one
+   `applyCameraSwitch()` (button text plus placeholder visibility, both in one
+   place so they can never disagree), and then calls the **existing** `closeCamera()`
+   or `openCamera(texture)` — the same teardown `onPause` uses, so a session, device,
+   reader and surface still die in exactly one place. The page does not go anywhere;
+   leaving is the system back gesture.
+
+   The switch is **enabled during a send but `toggleCamera()` returns at once while
+   `busy`**: pulling the camera out from under `captureStill` would turn a send in
+   flight into a mystery, while a switch that looks dead for the two seconds of an
+   upload is a switch the owner presses twice. Ignoring one tap is the smaller lie.
+
+   `cameraOn` outranks the lifecycle. `onPause` still releases the camera and posts
+   `cam-close`; `onResume` re-opens **only if `cameraOn`** (`if (started && cameraOn)`),
+   and `onSurfaceTextureAvailable` guards on it too — otherwise a config change or a
+   return from the home screen would light the camera while the button says it is
+   off. If the camera cannot come back (no permission, taken by another app, no
+   surface), the failure goes through `cameraFailed()`: the red line as usual, and
+   then `cameraOn = false` plus a repaint, so the button reads 打开摄像头 and the
+   placeholder is visible. The page must never claim a camera it does not have.
+
+   **The switch is not an exit.** v0.11.3 shipped this button as `finish()` and the
+   owner corrected it in his own words: 关闭摄像头 means "stop capturing pictures, so
+   the next 发送 goes out without one", not "go back to the config page". He was
+   describing the thing he wanted — a send with no picture — and `finish()` was the
+   wrong mechanism for it: it made him re-enter the page to send one sentence with a
+   picture afterwards, and it left the far end with no way to tell "camera released
+   on purpose" from "page closed". Releasing the camera in place keeps both facts
+   true at once, and it is the only reading under which the two labels above make
+   sense.
 
 The labels live in `CameraActivity`'s private companion (`SEND_TEXT` = 发送) and in
-`CamPlan` (`CLOSE_CAMERA_TEXT`, `HOLD_TEXT`, `DONE_HOLD_TEXT`, `retryLine()`),
+`CamPlan` (`CLOSE_CAMERA_TEXT`, `OPEN_CAMERA_TEXT`, `CAM_OFF_TEXT`, `HOLD_TEXT`,
+`DONE_HOLD_TEXT`, `retryLine()`, `textOnlyLine()`),
 deliberately not `UiText` constants — `click apply 发送` on this page must have
 exactly one candidate, the same rule §6.2 states for 视频转音乐.
 
@@ -3220,6 +3285,24 @@ framework** — do not mock `AccessibilityService`. Required cases:
         `aChunkNeverSplitsASurrogatePair` had payloads under 81 characters, which
         no longer produce a cut at all — their inputs were lengthened so the cut
         they pin is still exercised.
+
+    40. The v0.11.4-pad12 camera switch. The switch itself is an Activity concern, so
+        what a JVM can pin is the vocabulary around it, on the pure `CamPlan`:
+        `openCameraTextIsNotTheCloseLabel` (打开摄像头 is not 关闭摄像头 — one button,
+        two labels, and a copy-paste slip would leave the owner tapping the same word
+        twice and never understanding why nothing changed),
+        `camOffTextPromisesATextOnlySend` (the placeholder says 只发文字, so the grey
+        rectangle explains itself instead of looking like a camera that broke),
+        `textOnlyLineNamesTheCharacterCount`,
+        `textOnlyLineSaysNoPictureInItsOwnWords` (（没带图） in both branches — the
+        sentence the owner reads after a text-only send has to say the picture was
+        not part of it), `textOnlyLineFallsBackWhenTheCountIsNotUsable` (0 and
+        negative counts do not print 文字 0 字) and
+        `aTextOnlyNoteHasAnEmptyBlobAndNoSize` (`noteBody(id, text, "", 0, 0)` is
+        still six fields, `"blob":""` and `"w":0,"h":0` — the wire shape the relay
+        already accepts). What no JVM test can reach is `toggleCamera()` releasing
+        and re-opening a real `CameraDevice`; manualcheck.md §"摄像头开关" is that
+        proof, and `cam` on the control side is where the operator sees the result.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

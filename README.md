@@ -719,6 +719,28 @@ clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 - Anyone holding the relay secret has full control of the device. Treat it as a
   password.
 
+v0.11.4-pad12 is one word taken literally. The button in the top-right corner of
+摄像头看图 read 关闭摄像头 and did `finish()` — it closed the **page**. The owner said
+what he actually meant: 关闭摄像头 is about the **capture**, so that the next 发送 goes
+out as text only, 不是关闭这个摄像头界面. So the button is now a switch with two
+states, and the label always names what the next tap does. Camera on (the default):
+live preview, 发送 captures a frame and posts it with the sentence, exactly as before.
+Camera off: the camera device and its session are released through the same
+`closeCamera()` that `onPause` already used, the preview is replaced by one centred
+grey line 摄像头已关闭，这次只发文字, the button reads 打开摄像头, and 发送 posts
+`{"id":…,"kind":"look","text":…,"blob":"","w":0,"h":0}` — no capture, no 300 ms
+settle wait, no buzz, no upload. Nothing on the relay changed: `/agent/note` already
+accepted a note whose blob is empty, and the empty string beats a missing key so
+every note keeps one shape. The status line says 已发送：文字 N 字（没带图）, so a
+person who switched the camera off is never left guessing whether a photo went out.
+The state outranks the lifecycle — `onResume` and `onSurfaceTextureAvailable` both
+check it, or coming back from the home screen would light a camera the button says is
+off — and if the camera cannot come back the failure flips the switch off rather than
+leaving a page that claims a camera it does not have. During an upload the switch is
+visible but inert (`toggleCamera()` returns while `busy`): pulling the device out from
+under `captureStill` would turn a send in flight into a mystery. Leaving the page is
+the system back gesture, which it always was. See `SPEC.md` §3.29, §6.3 and §10 case 40.
+
 v0.11.3-pad12 makes `speak` stop waiting on its own synthesizer. The complaint was
 concrete: a long sentence arrived with a several-second silence at every full stop.
 The cause is arithmetic — synthesis costs ~0.10 s per character and playback reads
