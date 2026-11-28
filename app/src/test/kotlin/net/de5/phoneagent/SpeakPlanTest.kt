@@ -20,6 +20,9 @@ import org.junit.Test
  *    at 120 (about 12 s), even though the server would accept 500 (about 62 s).
  *  - the receipt. A partial playback must NOT fall back to the system voice, or
  *    the listener hears the opening twice.
+ *  - the synthesis fan-out (v0.11.3-pad12): three chunks at a time, four queued,
+ *    handed over in index order -- the order and the bounds themselves are
+ *    pinned in [SynthBoardTest].
  *  - the wire format. The body is hand-written JSON, so its exact bytes are
  *    pinned here -- a stray backslash is a 400 from the server.
  */
@@ -101,6 +104,12 @@ class SpeakPlanTest {
         assertEquals(500, SpeakPlan.SERVER_MAX)
         assertTrue(SpeakPlan.CHUNK_MAX < SpeakPlan.SERVER_MAX)
         assertTrue(SpeakPlan.FIRST_MAX < SpeakPlan.CHUNK_MAX)
+        // v0.11.3-pad12: at or below this the text is one request, not a first
+        // chunk plus a tail -- 80 characters is ~8 s of synthesis, which is as
+        // long as the first sound may wait.
+        assertEquals(80, SpeakPlan.SINGLE_SHOT_MAX)
+        assertTrue(SpeakPlan.FIRST_MAX < SpeakPlan.SINGLE_SHOT_MAX)
+        assertTrue(SpeakPlan.SINGLE_SHOT_MAX <= SpeakPlan.CHUNK_MAX)
     }
 
     @Test
@@ -118,14 +127,23 @@ class SpeakPlanTest {
     }
 
     @Test
-    fun sixtyCharactersBecomeTwoChunksSoTheFirstSoundIsEarly() {
-        // Packing everything under 120 into one chunk meant 6 s of silence for
-        // 60 characters; the first chunk is capped at 40.
-        val chunks = SpeakPlan.chunks("测".repeat(60))
+    fun aLineUpToEightyCharactersIsOneRequestAndEightyOneIsTwo() {
+        // v0.11.3-pad12. Cutting a 60-character line into 40 + 20 (and a
+        // 44-character one into 40 + 4) bought an earlier first sound at the
+        // price of an extra round trip, an audible join, and a tail synthesized
+        // on its own without the sentence's intonation. The owner said he can
+        // wait, so the whole line goes out in one request up to 80 characters;
+        // 81 is the first length that chunks again.
+        val sixty = "测".repeat(60)
+        assertEquals(listOf(sixty), SpeakPlan.chunks(sixty))
+        val eighty = "测".repeat(SpeakPlan.SINGLE_SHOT_MAX)
+        assertEquals(listOf(eighty), SpeakPlan.chunks(eighty))
+        val eightyOne = "测".repeat(SpeakPlan.SINGLE_SHOT_MAX + 1)
+        val chunks = SpeakPlan.chunks(eightyOne)
         assertEquals(2, chunks.size)
         assertEquals(40, chunks[0].length)
-        assertEquals(20, chunks[1].length)
-        assertEquals("测".repeat(60), chunks.joinToString(""))
+        assertEquals(41, chunks[1].length)
+        assertEquals(eightyOne, chunks.joinToString(""))
     }
 
     @Test
@@ -147,10 +165,12 @@ class SpeakPlanTest {
 
     @Test
     fun aCutPrefersASentenceEndThenAClauseEndThenTheHardLimit() {
-        assertEquals("你好世界。", SpeakPlan.chunks("你好世界。" + "a".repeat(50))[0])
+        // Both payloads are over SINGLE_SHOT_MAX on purpose: a short line is one
+        // chunk now, and one chunk cannot demonstrate a preference.
+        assertEquals("你好世界。", SpeakPlan.chunks("你好世界。" + "a".repeat(90))[0])
         assertEquals(
             "一二三四五六七八九十，",
-            SpeakPlan.chunks("一二三四五六七八九十，" + "b".repeat(50))[0]
+            SpeakPlan.chunks("一二三四五六七八九十，" + "b".repeat(90))[0]
         )
     }
 
@@ -187,7 +207,9 @@ class SpeakPlanTest {
     fun aChunkNeverSplitsASurrogatePair() {
         // 39 ASCII characters then an emoji: the hard cut at 40 would land in
         // the middle of the pair, so it backs off by one.
-        val text = "a".repeat(39) + "\uD83D\uDE00" + "b".repeat(20)
+        // 39 + one emoji (two UTF-16 units) + 60 = 101 characters, i.e. over
+        // SINGLE_SHOT_MAX, so the cut at 40 is really exercised.
+        val text = "a".repeat(39) + "\uD83D\uDE00" + "b".repeat(60)
         val chunks = SpeakPlan.chunks(text)
         assertEquals(39, chunks[0].length)
         assertEquals(text, chunks.joinToString(""))
@@ -282,8 +304,22 @@ class SpeakPlanTest {
     fun theTimeoutsAreTheAgreedOnes() {
         assertEquals(10_000, SpeakPlan.CONNECT_TIMEOUT_MS)
         assertEquals(90_000, SpeakPlan.READ_TIMEOUT_MS)
-        // Two chunks of look-ahead, and the player never buffers more.
-        assertEquals(2, SpeakPlan.QUEUE_CAPACITY)
+    }
+
+    @Test
+    fun parallelSynthesisIsThreeWideAndGivesUpOnAWedgedChunk() {
+        // v0.11.3-pad12. One synthesizer could not keep up (0.10 s per
+        // character against 4-5 characters a second of playback), so every
+        // sentence boundary waited seconds. Three run at once, four finished
+        // chunks may queue, and a chunk that never arrives is abandoned after
+        // 110 s -- the upstream service took 80.8 s for 1 request in 10, so the
+        // wait has to be finite or one dead connection hangs the command.
+        assertEquals(3, SpeakPlan.SYNTH_WORKERS)
+        assertEquals(4, SpeakPlan.QUEUE_CAPACITY)
+        assertEquals(110_000L, SpeakPlan.SYNTH_WAIT_MS)
+        assertTrue(SpeakPlan.SYNTH_WAIT_MS > SpeakPlan.READ_TIMEOUT_MS)
+        assertEquals("合成卡死（已等 110.00s）", SpeakPlan.synthTimeout(110_000L))
+        assertEquals("合成失败：boom", SpeakPlan.synthFailure(IllegalStateException("boom")))
     }
 
     // -------------------------------------------------------------- audio route

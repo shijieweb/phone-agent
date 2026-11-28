@@ -719,6 +719,30 @@ clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 - Anyone holding the relay secret has full control of the device. Treat it as a
   password.
 
+v0.11.3-pad12 makes `speak` stop waiting on its own synthesizer. The complaint was
+concrete: a long sentence arrived with a several-second silence at every full stop.
+The cause is arithmetic — synthesis costs ~0.10 s per character and playback reads
+4-5 characters a second, so a 120-character chunk needed ~12 s behind a 40-character
+chunk that played for ~10 s. One daemon thread could never keep up with one
+listener, no matter how the text was cut. `SynthBoard` (new file, plain JDK, no
+dependency) now runs **three** synthesizers and hands finished chunks to the poll
+thread **in index order** — whatever order they finish in, playback is text order —
+with at most four finished chunks waiting, so a long paragraph still never buffers
+thirty MP3s in `cacheDir`. Every wait stays bounded: a worker that never returns is
+abandoned after 110 s with `合成卡死（已等 110.00s）`, and `stop()` joins each worker
+for at most a second, because the upstream service really does wedge — ten serial
+syntheses measured 2.3-2.9 s each **except the seventh, at 80.8 s**.
+
+The same version stops cutting short lines at all. `chunks()` returns the text as a
+single piece at or below `SINGLE_SHOT_MAX = 80` characters, and that path starts no
+worker thread — `fish()` synthesizes and plays it on the poll thread, since three
+threads for one chunk would be three threads with nothing to do. Cutting a
+44-character line into 40 + 4 bought an earlier first sound at the price of an extra
+round trip, an audible join, and a 4-character tail synthesized on its own without
+the intonation of the sentence it came from. One request for 80 characters is ~8 s
+before the first sound, and the owner said he can wait; 80 is where the first sound
+would otherwise pass 10 s. See `SPEC.md` §3.30 and §10 case 39.
+
 ## Licensing
 
 The project's own code is MIT (see [LICENSE](LICENSE)). As of v0.5.0 the APK also

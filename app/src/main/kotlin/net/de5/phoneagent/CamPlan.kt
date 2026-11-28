@@ -35,6 +35,29 @@ internal object CamPlan {
      */
     const val SETTLE_MS = 300L
 
+    /**
+     * 阶段 A: from the tap on 发送 to the JPEG bytes landing. The owner has to hold
+     * the phone still, so the sentence has to say so (v0.12.0-pad12).
+     *
+     * The split between this and [DONE_HOLD_TEXT] is a real moment -- the bytes
+     * arriving in the ImageReader -- not a timer: a timer would either tell him to
+     * move while the sensor is still integrating, or make him wait for the upload.
+     */
+    const val HOLD_TEXT = "正在拍，先别动"
+
+    /** 阶段 B: the frame is captured, the upload is mine to worry about. He can move. */
+    const val DONE_HOLD_TEXT = "拍好了，可以动了（正在发送）"
+
+    /**
+     * The button that leaves this page without taking a picture (v0.11.3-pad12).
+     *
+     * It moved to the top of the screen when 返回 was dropped from the bottom row:
+     * the owner sometimes only wants to send a sentence, and 关闭摄像头 says what it
+     * does -- 返回 next to 发送 read like "go back one step" and was pressed by
+     * mistake.
+     */
+    const val CLOSE_CAMERA_TEXT = "关闭摄像头"
+
     /** The relay accepts `^[A-Za-z0-9_.-]{1,80}$` for a blob name (SPEC.md §4). */
     const val NAME_MAX_CHARS = 80
 
@@ -130,6 +153,22 @@ internal object CamPlan {
         val trimmed = reason.trim()
         return "发送失败: " + (if (trimmed.isEmpty()) "未知原因" else trimmed)
     }
+
+    /** 阶段 A 的那句话, for the send path. */
+    fun holdLine(): String = HOLD_TEXT
+
+    /** 阶段 B 的那句话, spoken the moment the bytes are in hand. */
+    fun doneHoldLine(): String = DONE_HOLD_TEXT
+
+    /**
+     * The line after a failed *send* (v0.12.0-pad12).
+     *
+     * Deliberately not [errorLine]: "javax.net.ssl.SSLException: ..." tells a person
+     * holding a phone nothing he can act on. The reason belongs in AgentLog; the
+     * screen says what to do next, and the typed text is still in the box for that
+     * second press.
+     */
+    fun retryLine(): String = "没传上去，再按一次发送"
 
     /**
      * What actually gets sent: trimmed, and cut at [MAX_TEXT].

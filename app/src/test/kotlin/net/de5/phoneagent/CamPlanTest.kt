@@ -249,6 +249,67 @@ class CamPlanTest {
         assertEquals(1080, picked[1])
     }
 
+    // ------------------------------------------- 拍完可以动 (v0.12.0-pad12) --
+
+    @Test
+    fun holdLineSaysToStayStill() {
+        assertEquals("正在拍，先别动", CamPlan.holdLine())
+        assertEquals(CamPlan.HOLD_TEXT, CamPlan.holdLine())
+    }
+
+    @Test
+    fun doneHoldLineSaysTheOwnerMayMove() {
+        assertEquals("拍好了，可以动了（正在发送）", CamPlan.doneHoldLine())
+        assertEquals(CamPlan.DONE_HOLD_TEXT, CamPlan.doneHoldLine())
+    }
+
+    @Test
+    fun theTwoStagesNeverLookAlike() {
+        // The whole feature is this inequality: one sentence has to mean "hold
+        // still", the other "you are free". If they ever collapse into the same
+        // string the owner is back to guessing, and nothing else would notice.
+        assertFalse(CamPlan.HOLD_TEXT == CamPlan.DONE_HOLD_TEXT)
+        assertFalse(CamPlan.holdLine() == CamPlan.doneHoldLine())
+    }
+
+    @Test
+    fun doneHoldLineCarriesThePermissionToMove() {
+        // A vaguer rewording ("处理中…") would pass every other test while losing the
+        // one word the owner is waiting for.
+        assertTrue(CamPlan.DONE_HOLD_TEXT, CamPlan.DONE_HOLD_TEXT.contains("可以动"))
+        assertTrue(CamPlan.holdLine(), CamPlan.holdLine().contains("别动"))
+    }
+
+    @Test
+    fun holdTextsAreShortEnoughForOneLine() {
+        // The status line sits above a text box on a phone held at arm's length; a
+        // sentence that wraps is a sentence that is not read.
+        assertTrue(CamPlan.HOLD_TEXT.length <= 20)
+        assertTrue(CamPlan.DONE_HOLD_TEXT.length <= 24)
+    }
+
+    @Test
+    fun retryLineTellsTheOwnerWhatToDoNext() {
+        assertEquals("没传上去，再按一次发送", CamPlan.retryLine())
+        assertTrue(CamPlan.retryLine().contains("再按一次"))
+    }
+
+    @Test
+    fun closeCameraTextSaysItClosesTheCamera() {
+        // The top-right button replaced 返回, which sat next to 发送 and was pressed by
+        // mistake. This word is the whole difference, so pin it.
+        assertEquals("关闭摄像头", CamPlan.CLOSE_CAMERA_TEXT)
+    }
+
+    @Test
+    fun retryLineIsNotAnErrorDump() {
+        // The failure detail belongs in AgentLog: the screen must not carry a class
+        // name or an exception string that the person holding the phone cannot use.
+        val line = CamPlan.retryLine()
+        assertFalse(line, line.contains("Exception"))
+        assertFalse(line, line.contains(":"))
+    }
+
     @Test
     fun pickSizeReturnsNullWhenNothingIsUsable() {
         assertNull(CamPlan.pickSize(emptyList(), 1280, 720))

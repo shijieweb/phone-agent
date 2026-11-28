@@ -200,7 +200,8 @@ and compare against the expectation below.
 | `say -l fr bonjour` | exit 2 (usage) — an unknown language is refused, never read with a Chinese voice |
 | `say` with no text | exit 2, usage `say [-l zh\|en] [rate=PERCENT] [pitch=PERCENT] TEXT` |
 | `speak 你好，我是你的手机` | exit 0, stdout `speak 已朗读 9 字（fish voice=<voice> speed=1.00 1 块 首声 X.XXs 总 X.XXs NNNNNB）` and the phone **says it in the Fish voice** — audibly a different voice from `say`, which is the whole point. `首声` under ~3 s for a short line is normal |
-| `speak <a 300-character paragraph>` | exit 0, the receipt says `N 块` with N >= 3, and the speech is **continuous** — no gap long enough to notice between chunks, because the next chunk is synthesized while the current one plays. `总` should be roughly 0.10 s per character plus a little |
+| `speak <a 300-character paragraph>` | exit 0, the receipt says `N 块` with N >= 3, and the speech is **continuous** — no gap long enough to notice between chunks. Since v0.11.3 **three** chunks are synthesized at once and delivered in order, so the old several-second silence at every full stop is gone; `总` is still roughly 0.10 s per character, but no longer 0.10 s per character **plus** one chunk of playback |
+| `speak 这是一句不到八十个字的短句` | exit 0, receipt `1 块` — one request, one MP3, no join. Under v0.11.2 a 44-character line was cut into 40 + 4 and the receipt said `2 块`; `N 块` > 1 for anything under 81 characters is now a regression. `首声` is later than it used to be (the whole line is synthesized before anything plays) — that is the trade the owner accepted |
 | `speak speed=1.5 测试一下速度` | faster than the default; the receipt echoes `speed=1.50` |
 | `speak speed=9 测试` | exit 0 and the receipt says `speed=2.00` — clamped, not refused |
 | `speak speed=abc 测试` | exit 2, `usage: speak [voice=ID] [speed=0.5-2.0] TEXT` — a flag that cannot parse is never read aloud as text |
@@ -516,8 +517,11 @@ right way up, with no UI, no status line and no keyboard in it. Do this on the
    权限 → 相机 before going further.
 2. Point the camera at something you can name — a box, a remote, a mug — and
    type 这是什么东西 in the box (the phone's own IME voice input is fine).
-   Press 发送 once. The status line goes 正在拍…, the buttons go dead for a
-   moment, and then it reads 已发送：图 NNN KB（WxH）+ 文字 8 字.
+   Press 发送 once. The status line goes **正在拍，先别动** in orange-red, 发送 goes
+   dead for a moment, and then — before the upload finishes — it turns **green**
+   拍好了，可以动了（正在发送） and the phone buzzes once. Move the phone right
+   after the buzz: the picture that arrives must still be sharp, because the frame
+   was already captured. Finally the line reads 已发送：图 NNN KB（WxH）+ 文字 8 字.
 3. On the controller, fetch the blob the note named and **open the image**. It
    must be a real photograph of the thing you pointed at: not black, not a
    screenshot of the UI, not a frame from before the keyboard closed. Its long
@@ -531,15 +535,26 @@ right way up, with no UI, no status line and no keyboard in it. Do this on the
 6. Press 发送 with an empty box: nothing is captured, the status line says
    先打一句话, and no note appears on the controller.
 7. Break one on purpose: put the phone in airplane mode and press 发送. The
-   status line says 发送失败: <reason>, the buttons come back, and **the text you
-   typed is still in the box** — a failed send must not cost the sentence. Turn
-   airplane mode off and press 发送 again: it goes through.
+   status line says **没传上去，再按一次发送** in red, the phone buzzes twice, 发送
+   comes back, and **the text you typed is still in the box** — a failed send must
+   not cost the sentence. The real reason (`SSLException` and friends) is only in
+   the log, never on the screen. Turn airplane mode off and press 发送 again: it
+   goes through.
 8. Rotation (v0.9.1-pad12): turn the phone sideways. The page must **stay
    portrait** — no rebuild, the preview does not letterbox into a 575 px strip,
    the text box keeps its height, and the sentence already typed is still there.
    Send once while holding it sideways: the image is still portrait and upright.
    (Before v0.9.1 the page followed the system rotation, recreated the activity,
    reopened the camera and dropped any still that was in flight.)
+
+### 摄像头页的界面 (v0.11.3-pad12)
+
+1. 从配置页进 摄像头看图：**最上面没有标题栏**，第一个东西就是右上角一个小的 关闭摄像头 按钮。回配置页，那一页同样没有标题栏（原来是 `Phone Agent` 那行）。`tree` 里第一个节点直接是 `ScrollView`，不是 ActionBar 容器。
+2. 摄像头页 `tree` 应该是这几行：`关闭摄像头`（右上，宽约 288px）、预览、状态行、`说一句：…`、`发送`（占满宽度）。**底部没有 返回**。
+3. 输入框里打 回车发送测试，按输入法上的**发送/完成**键（不是屏幕上的 发送 按钮）：应当立刻拍一张并发出去，状态行出现 `已发送：…`，输入框清空。用手机自带语音输入说完一句话再按那个键，效果必须一样。
+4. 输入框是空的按回车：状态行说 先打一句话，不拍照、不上报。
+5. 按住回车不放 / 快速连按两次：只发一条 note（`seq` 只加一），因为 `send()` 在 `busy` 时直接返回。
+6. 点右上角 关闭摄像头：回到配置页，管控侧应当收到一条 `cam-close`。
 
 ### speak 前后音量表读数必须一致 (v0.11.2-pad12)
 
@@ -552,6 +567,20 @@ v0.11.0/v0.11.1 那套「播放期间把媒体音量顶满、播完恢复」在 
 5. 验回落路径也不碰音量：把 `local.properties` 里的 `phoneagent.ttsSecret` 故意改错，重装，音量设成 30%，投 `speak 这次会失败`。回执应当是 `speak 已朗读 N 字（回落系统 TTS：服务端 401…）`，系统 TTS 按 30% 出声，音量表读数仍然是 30%。
 6. 连投两条 `speak`，中间不停：两条之间音量表读数不应出现任何跳变（v0.11.0 时这里会「回落再顶上」，现在不该有了）。
 7. 播放过程中直接杀进程（设置 → 应用 → 强制停止），重开 App 看音量表：必须还是你设的那个值 —— 因为压根没改过，所以也不存在「`finally` 没跑到、音量留在满格」这条旧边界了。
+
+### 长段落每个句号都不再空等，短句只请求一次 (v0.11.3-pad12)
+
+v0.11.2 之前合成是**单线程**的：合成 ~0.10 s/字，播放 4–5 字/秒，所以 120 字的块要 ~12 s，而排在它前面的 40 字块只播 ~10 s —— 每个句号都要空等几秒。这一版改成 3 路并行合成 + 严格保序交付，并且**80 字以内整段只发一个请求**。验的是这两件事，不是「听起来快了」。
+
+1. 投 `speak` 一段 **300 字左右**、句号很多的中文。回执里 `N 块` 应当 >= 3；**逐句听**：句号处不该再出现几秒的空白（v0.11.2 上这一段会明显一顿一顿）。`总` 大约仍是 0.10 s/字，但不再额外叠加一整块播放时间。
+2. 数块数验短文本：投一句 **60 字左右**的话，回执必须是 `1 块`。v0.11.2 会切成 `2 块`（40 + 20），看到 `2 块` 就是没生效（装错包或没重装）。
+3. 边界：**80 字**是 `1 块`，**81 字**是 `2 块`（40 + 41）。这两条用 `python -c "print('测'*80)"` 之类的等长文本最稳，别靠肉眼数字数。
+4. 短句的 `首声` 会比 v0.11.2 晚一点（整句合成完才出声，80 字约 8 s），这是刻意换来的：少一次往返、少一个拼接点、尾巴语调不再被切断。**这是老板点头的取舍，不算回归。**
+5. 保序：投一段长文，注意句子顺序必须和原文**完全一致**。三路并行最容易犯的错是「谁先合成完谁先播」，听到句子跳序就是保序坏了，立即回退。
+6. 卡死有界：把 VPS 的 TTS 服务停掉（`systemctl stop tts`）后投一段 300 字长文。不能挂死 —— 最迟约 110 s 内必须给出回执，文案含 `合成卡死（已等 …）`（若一块都没播出来则是 `回落系统 TTS：合成卡死（已等 …）`）。验完记得 `systemctl start tts`。
+7. 单块失败不拖死后面：把 `phoneagent.ttsSecret` 改错重装，投一段长文。第一块就 401 ⇒ 整段回落系统 TTS（`已朗读 N 字（回落系统 TTS：服务端 401…）`，exit 0），**不许**出现播放到一半再失败。验完恢复 secret 重建。
+8. 播放中 `stop`：投长文，播到第二块时投 `stop`。agent 必须停住，重启后下一条命令正常；`cacheDir` 里残留几个 `tts-*.mp3` 是唯一痕迹（合成线程是 daemon，随进程死）。
+9. 真机看线程：出声期间 `adb shell ps -T -p <pid> | grep speak-synth` 应当能看到 `speak-synth-0/1/2` **三条**（长文时）。短句（<=80 字）反而**一条都不该有** —— 那条路不起 worker 线程，这是本版最容易被改坏的地方。
 
 ### 远程语音的音量和系统 TTS 一样大 (v0.11.1-pad12)
 

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- v0.11.3-pad12: 老板要求这两页不要标题栏，屏幕全留给内容。
+         Not Theme.DeviceDefault.DayNight.NoActionBar: that variant is not
+         guaranteed to exist, and a missing parent is a runtime fallback rather
+         than a build error. Hiding the title on the plain DayNight theme is the
+         form that compiles and renders the same on every device. -->
+    <style name="NoTitleTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+    </style>
+</resources>

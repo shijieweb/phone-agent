@@ -1999,15 +1999,50 @@ put in the receipt (`服务端 502（upstream timeout）`) because the operator'
 move depends on which of the two it was. Connect timeout 10 s, read timeout 90 s:
 a chunk is a short sentence, but a cold free-tier model can take most of a minute.
 
-**Pipeline.** A daemon thread (`speak-synth`) synthesizes into an
-`ArrayBlockingQueue` of capacity 2 while the poll thread plays what is ready, so
-a long paragraph is heard with one chunk of lookahead and never buffers a hundred
-MP3s in the cache dir. Each chunk is written to `cacheDir/tts-<index>.mp3`,
-played by a fresh `MediaPlayer` (`USAGE_MEDIA` + `CONTENT_TYPE_SPEECH` —
-`setDataSource(path)`, synchronous `prepare()`, `isPlaying` polled every 50 ms
-after a 300 ms settle), then deleted. Playback is capped at the file's own
-duration + 5 s, or 120 s when the duration is unknown: a player that never reports
-`false` is a hung poll loop, and this one is shared with every other command.
+**Pipeline: synthesis is parallel, delivery is strictly ordered (v0.11.3-pad12).**
+`SynthBoard` (its own file, plain JDK — no Android, no dependency) runs
+`SYNTH_WORKERS = 3` daemon threads named `speak-synth-0..2`. Each takes the next
+index, POSTs it, writes `cacheDir/tts-<index>.mp3` and parks the result in the
+board; the poll thread asks for index 0, then 1, then 2 — in order, whatever order
+the synthesizers finished in — so playback order is text order and an early finish
+can never reorder a sentence. At most `QUEUE_CAPACITY = 4` finished chunks wait for
+the player, so a 30-chunk paragraph never buffers 30 MP3s.
+
+One synthesizer was not enough, and the numbers are why: synthesis costs ~0.10 s
+per character while playback reads 4-5 characters a second, so a 120-character
+chunk needed ~12 s behind a 40-character chunk that played for ~10 s — **every
+sentence boundary was a several-second silence**, and the 300 ms settle per chunk
+added to it. Three requests at once is what the VPS already serves without
+queueing.
+
+Every wait is bounded. A worker that never returns is not waited on forever:
+`take(SYNTH_WAIT_MS)` gives up after **110 s** (`CONNECT_TIMEOUT_MS` +
+`READ_TIMEOUT_MS` + 10 s) and reports `合成卡死（已等 110.00s）` through the same
+fallback/partial path as any other failure. That bound is not theoretical — ten
+serial syntheses against the VPS measured 2.3-2.9 s each **except the seventh,
+which took 80.8 s**; a request that slow is already past the socket timeouts and
+comes back as a failure, so this catches only a connection that never returns at
+all. `stop()` interrupts every worker and joins each one for at most 1 s, so a
+worker blocked inside a socket read cannot hang the command either.
+
+Each chunk is played by a fresh `MediaPlayer` (`USAGE_MEDIA` +
+`CONTENT_TYPE_SPEECH` — `setDataSource(path)`, synchronous `prepare()`, `isPlaying`
+polled every 50 ms after a 300 ms settle), then deleted. Playback is capped at the
+file's own duration + 5 s, or 120 s when the duration is unknown: a player that
+never reports `false` is a hung poll loop, and this one is shared with every other
+command.
+
+**Short text is one request (v0.11.3-pad12).** `chunks()` returns the text as a
+single piece when it is at most `SINGLE_SHOT_MAX = 80` characters, and that path
+starts **no worker thread at all**: `fish()` synthesizes and plays it on the poll
+thread, because three threads for one chunk would be three threads with nothing to
+do. Cutting a 44-character line into 40 + 4 used to buy an earlier first sound at
+the price of an extra round trip (1-2 s of server overhead), an audible join, and a
+4-character tail synthesized on its own — without the intonation of the sentence it
+was cut from. One request for 80 characters is ~8 s before the first sound, and the
+owner said he can wait; 80 is the balance point, since beyond it the first sound
+would be past 10 s. Above 80 the old ladder applies unchanged (first chunk ≤ 40,
+the rest ≤ 120).
 
 **Fallback, and when it is refused.** Nothing configured (a clone of this repo
 builds with empty `BuildConfig` values), an empty chunk list, or a failure before
@@ -2506,31 +2541,67 @@ One button on the config page (`UiText.CAMERA`, 摄像头看图, directly under
 built in code. The protocol and the capture decisions are §3.29; this is only what
 is on the screen.
 
-Top to bottom: the live preview (a `TextureView` at layout weight 1, so it takes
-everything the text and buttons do not), one status line, the text box, and the
-two buttons.
+Top to bottom: one slim 关闭摄像头 button (v0.11.3-pad12, right-aligned), the live
+preview (a `TextureView` at layout weight 1, so it takes everything the text box,
+the status line and the send button do not), one status line, the text box, and
+发送.
 
 1. **The preview.** Back camera, repeating `TEMPLATE_PREVIEW` request. It is the
    reason the page exists — the person points the phone at the thing instead of
    describing it.
-2. **The status line**, one line, never more: 对准要我看的东西，打一句话，按发送 on
-   arrival, 正在拍… while a send is in flight, then either
-   `已发送：图 148 KB（1280x720）+ 文字 12 字` or `发送失败: <reason>`. Failures are
-   named, never counted — there is no retry button, because pressing 发送 again is
-   the retry and the text is still in the box.
-3. **The text box** — multi-line, `maxLength = CamPlan.MAX_TEXT` (500 code points,
-   so the limit the input filter enforces is the same number the send clamps to),
-   hint 说一句：哪里不对 / 要我看什么. The phone's own IME voice input is the
-   expected way to fill it; the page does nothing about the keyboard except wait
-   for it to leave (300 ms, §3.29).
-4. **发送 / 返回**, equal weight. 发送 is disabled while a send is in flight — a
-   second press would capture a frame nobody asked for and upload it under a
-   second name. 返回 is `finish()` and stays enabled during a send: a page the
+2. **The status line**, one line, never more, and **it says which phase you are in**
+   (v0.11.3-pad12). 对准要我看的东西，打一句话，按发送 on arrival; then
+   `CamPlan.HOLD_TEXT` 正在拍，先别动 in orange-red (`0xFFFF6B00`, 18 sp) while the
+   sensor is integrating — this is the only stretch where the frame can be ruined
+   by moving; then, the instant the JPEG bytes land in the `ImageReader`,
+   `CamPlan.DONE_HOLD_TEXT` 拍好了，可以动了（正在发送） in green (`0xFF12A150`) plus
+   one 70 ms vibration; finally either
+   `已发送：图 148 KB（1280x720）+ 文字 12 字` in the idle grey or
+   `CamPlan.retryLine()` 没传上去，再按一次发送 in red (`0xFFD32F2F`) with two short
+   vibrations. The phase change is driven by the bytes arriving, **not by a timer**:
+   a timer would either tell the owner to move while the sensor is still reading or
+   make him wait for an upload that is none of his business. The failure line says
+   what to do next and the exception text goes to `AgentLog` — a person holding a
+   phone cannot act on `SSLException`, and the sentence he typed is still in the box.
+   Every failure funnels through one `reportFailure` exit, so "press send again" is
+   said once, in one wording.
+3. **The text box** — multi-line visually (`setSingleLine(false)`, `minLines = 2`,
+   `maxLines = 4`), `maxLength = CamPlan.MAX_TEXT` (500 code points, so the limit the
+   input filter enforces is the same number the send clamps to), hint
+   说一句：哪里不对 / 要我看什么. **Enter sends** (v0.11.3-pad12):
+   `imeOptions = IME_ACTION_SEND` with an `OnEditorActionListener` **and** an
+   `OnKeyListener` for `KEYCODE_ENTER`, because some IMEs report the soft key as an
+   editor action and others as a raw key event. `TYPE_TEXT_FLAG_MULTI_LINE` is
+   deliberately absent: with that flag every IME turns its action key into "insert a
+   newline" and never calls the editor action, so Enter would break the line instead
+   of sending. The visual multi-line comes from `setSingleLine(false)`, which is
+   independent of the flag. A double fire is harmless — `send()` returns at once
+   while `busy`. The phone's own IME voice input is still the expected way to fill
+   the box; the page does nothing about the keyboard except wait for it to leave
+   (300 ms, §3.29).
+4. **发送**, full width, the only button in the bottom row. It is disabled while a
+   send is in flight — a second press would capture a frame nobody asked for and
+   upload it under a second name.
+5. **关闭摄像头** (v0.11.3-pad12), a slim right-aligned button **above** the preview,
+   `CamPlan.CLOSE_CAMERA_TEXT`, `finish()`. It replaced the old 返回 in the bottom
+   row: 返回 sitting next to 发送 read like "go back one step" and was pressed by
+   mistake, and the owner sometimes wants to send a sentence with no picture at all,
+   which the button also makes possible. It stays enabled during a send — a page the
    owner cannot leave is worse than an upload abandoned with the page.
 
-Both labels live in `CameraActivity`'s private companion (`SEND_TEXT` = 发送,
-`BACK_TEXT` = 返回), deliberately not `UiText` constants — `click apply 发送` on this
-page must have exactly one candidate, the same rule §6.2 states for 视频转音乐.
+The labels live in `CameraActivity`'s private companion (`SEND_TEXT` = 发送) and in
+`CamPlan` (`CLOSE_CAMERA_TEXT`, `HOLD_TEXT`, `DONE_HOLD_TEXT`, `retryLine()`),
+deliberately not `UiText` constants — `click apply 发送` on this page must have
+exactly one candidate, the same rule §6.2 states for 视频转音乐.
+
+**No title bar** (v0.11.3-pad12). This page and the config page both carry
+`android:theme="@style/NoTitleTheme"` — a `Theme.DeviceDefault.DayNight` child with
+`windowNoTitle` and `windowActionBar` both false (`res/values/styles.xml`). Not
+`Theme.DeviceDefault.DayNight.NoActionBar`: that variant is not guaranteed to exist,
+and a missing parent is a runtime fallback rather than a build error. Hiding it in
+the theme rather than in code also means `MainActivity` needs no change — the title
+was never its view, it was the ActionBar's. The pixels go to the preview, which is
+the only part of the page that gets better with more room.
 
 `android:screenOrientation="portrait"` (v0.9.1-pad12). The page is portrait, always,
 even when the rest of the system is locked landscape. Two reasons, and the first one
@@ -3114,6 +3185,41 @@ framework** — do not mock `AccessibilityService`. Required cases:
        `speakAsksForTheMediaStream`, which no longer calls the guard "the stream
        VolumeGuard raises" — nothing asserted the guard itself, so nothing had to
        be deleted.
+
+    39. The v0.11.3-pad12 parallel pipeline and the single-request short path. The
+        board is its own pure class, so a plain JVM can drive it with a lambda that
+        returns a `String` and sleeps: `deliversInIndexOrderEvenWhenTheFirstChunksAreTheSlowest`
+        (index 0 is the slowest and still comes out first),
+        `everyChunkIsSynthesizedExactlyOnce`, `threeChunksAreSynthesizedAtTheSameTime`
+        (a peak counter proves the fan-out really is 3, not one thread with three
+        names), `lookAheadIsBoundedByTheCapacity` (capacity 2 — the third chunk is
+        not even started while the player idles),
+        `aFailureIsDeliveredInItsOwnPositionAndEndsTheRun` and
+        `afterAFailureNoLaterChunkIsStarted` (the run stops at the failure instead
+        of burning requests nobody will hear),
+        `aThrowingChunkIsDeliveredAsACrashInItsOwnPosition` (a synthesizer that
+        throws becomes a sentence, not a stack trace on the poll thread),
+        `aWedgedSynthesizerIsReportedInsteadOfWaitedOnForever` (`take(5000)` gets
+        chunk 0, the next `take(200)` answers `Stalled(index=1)`),
+        `stopUnblocksAConsumerThatIsStillWaiting`,
+        `stopDoesNotWaitForeverForAWorkerStuckInASocketRead` (a worker parked on a
+        latch — `stop()` still returns in under 4 s),
+        `aLongRunKeepsOrderWithoutDeadlocking` (40 chunks, capacity 4) and
+        `moreWorkersThanChunksIsNotAnError`.
+        `parallelSynthesisIsThreeWideAndGivesUpOnAWedgedChunk` pins the constants
+        (3 / 4 / 110 s, and `SYNTH_WAIT_MS > READ_TIMEOUT_MS`) plus the two
+        sentences a wedged or throwing chunk produces. The short path is pinned on
+        the chunker: `theLimitsAreTheMeasuredOnes` now also pins
+        `SINGLE_SHOT_MAX == 80`, and
+        `aLineUpToEightyCharactersIsOneRequestAndEightyOneIsTwo` is the boundary —
+        60 and 80 characters are one chunk, 81 is `[40, 41]`. Three older
+        assertions had to move with it: the v0.10.0
+        `sixtyCharactersBecomeTwoChunksSoTheFirstSoundIsEarly` (60 characters are
+        one chunk now, so that case became the 80/81 boundary above), and both
+        `aCutPrefersASentenceEndThenAClauseEndThenTheHardLimit` and
+        `aChunkNeverSplitsASurrogatePair` had payloads under 81 characters, which
+        no longer produce a cut at all — their inputs were lengthened so the cut
+        they pin is still exercised.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

@@ -6,7 +6,6 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
-import java.util.concurrent.ArrayBlockingQueue
 
 /**
  * speak -- say TEXT out loud in a Fish voice synthesized on the VPS
@@ -26,10 +25,13 @@ import java.util.concurrent.ArrayBlockingQueue
  *    the first sound, and the server hard-refuses 501 with a 413. The FIRST
  *    chunk is capped at 40 characters for the same reason: 40 characters is
  *    about 4 s to first sound instead of 13 s.
- *  - Playback is a pipeline, not a batch. One thread synthesizes and writes
- *    each chunk into cacheDir, a bounded queue (capacity 2) hands it to this
- *    thread, which plays it with MediaPlayer and polls isPlaying. Synthesizing
- *    everything first would multiply the wait by the chunk count.
+ *  - Playback is a pipeline, not a batch, and since v0.11.3 it is a *parallel*
+ *    one. Three threads synthesize and write chunks into cacheDir while this
+ *    thread plays them with MediaPlayer and polls isPlaying; [SynthBoard] hands
+ *    them over in index order and bounds the look-ahead (4 chunks). One
+ *    synthesizer could not keep up -- 0.10 s per character is slower than the
+ *    4-5 characters a second a listener reads -- so every sentence boundary
+ *    used to be a several-second silence.
  *  - A failure after the first chunk does NOT fall back. Re-reading the whole
  *    text with the system voice would make the listener hear the beginning
  *    twice; the receipt says how many chunks were played instead.
@@ -66,10 +68,16 @@ internal object FeatSpeak : FeatureModule {
     }
 
     /**
-     * Synthesize and play [chunks] as a pipeline.
+     * Synthesize and play [chunks] -- in one request when there is only one.
      *
-     * The synthesizer runs on its own thread and the queue bounds how far ahead
-     * it may run (2 chunks), so a long text never buffers a hundred MP3s.
+     * A short line ([SpeakPlan.SINGLE_SHOT_MAX] characters or less) never starts
+     * a [SynthBoard]: three worker threads for one chunk would be three threads
+     * that find nothing to do, so it is synthesized and played right here. Longer
+     * text goes through the pipeline: [SynthBoard] runs [SpeakPlan.SYNTH_WORKERS]
+     * synthesizers and hands chunks to this thread in index order, never more
+     * than [SpeakPlan.QUEUE_CAPACITY] ahead, so a long text neither buffers a
+     * hundred MP3s nor plays them out of order. Every wait is bounded: a wedged
+     * chunk comes back as a stall, not as a hung command.
      */
     private fun fish(
         ctx: FeatureContext,
@@ -81,30 +89,41 @@ internal object FeatSpeak : FeatureModule {
         chunks: List<String>
     ): ExecutionResult {
         val cache = ctx.context.cacheDir
-        val queue = ArrayBlockingQueue<Synth>(SpeakPlan.QUEUE_CAPACITY)
+        if (chunks.size == 1) return oneShot(ctx, cache, base, secret, voice, speed, text, chunks[0])
+        val board = SynthBoard(
+            total = chunks.size,
+            workers = SpeakPlan.SYNTH_WORKERS,
+            capacity = SpeakPlan.QUEUE_CAPACITY,
+            threadName = "speak-synth",
+            task = { index -> synthesize(cache, base, secret, voice, speed, chunks[index], index) },
+            stopsHere = { it is Synth.Failed }
+        )
         val started = System.currentTimeMillis()
-        val worker = Thread({ synth(queue, cache, base, secret, voice, speed, chunks) }, "speak-synth")
-        worker.isDaemon = true
-        worker.start()
+        board.start()
 
         var played = 0
         var bytes = 0L
         var firstSoundMs = -1L
         try {
             while (true) {
-                val item = queue.take()
+                val item = board.take(SpeakPlan.SYNTH_WAIT_MS) ?: break
                 when (item) {
-                    is Synth.Done -> break
-                    is Synth.Failed -> return incomplete(ctx, text, played, chunks.size, item.index, item.reason)
-                    is Synth.Audio -> {
-                        val out = play(item.file.absolutePath)
-                        item.file.delete()
-                        if (out.error != null) {
-                            return incomplete(ctx, text, played, chunks.size, item.index, out.error)
+                    is SynthDelivery.Stalled ->
+                        return incomplete(ctx, text, played, chunks.size, item.index, SpeakPlan.synthTimeout(item.waitedMs))
+                    is SynthDelivery.Crashed ->
+                        return incomplete(ctx, text, played, chunks.size, item.index, SpeakPlan.synthFailure(item.error))
+                    is SynthDelivery.Value -> when (val synth = item.value) {
+                        is Synth.Failed -> return incomplete(ctx, text, played, chunks.size, synth.index, synth.reason)
+                        is Synth.Audio -> {
+                            val out = play(synth.file.absolutePath)
+                            synth.file.delete()
+                            if (out.error != null) {
+                                return incomplete(ctx, text, played, chunks.size, synth.index, out.error)
+                            }
+                            if (firstSoundMs < 0) firstSoundMs = out.startedAt - started
+                            played++
+                            bytes += synth.bytes
                         }
-                        if (firstSoundMs < 0) firstSoundMs = out.startedAt - started
-                        played++
-                        bytes += item.bytes
                     }
                 }
             }
@@ -112,7 +131,7 @@ internal object FeatSpeak : FeatureModule {
             // Nothing interrupts this thread today; report it as a stopped run.
             return incomplete(ctx, text, played, chunks.size, played, SpeakPlan.interrupted())
         } finally {
-            worker.interrupt()
+            board.stop()
         }
 
         val totalMs = System.currentTimeMillis() - started
@@ -121,41 +140,71 @@ internal object FeatSpeak : FeatureModule {
         return ExecutionResult(EXIT_OK, line, "")
     }
 
-    /** Synthesizer side: POST each chunk, write it to the cache, hand it over. */
-    private fun synth(
-        queue: ArrayBlockingQueue<Synth>,
+    /**
+     * The single-request path: synthesize [chunk], play it, report one line.
+     *
+     * Same receipts as the pipeline -- a failure before any sound falls back to
+     * the system voice, and the success line still says "1 块" -- only without
+     * the queue, because there is nothing to order and nothing to look ahead to.
+     */
+    private fun oneShot(
+        ctx: FeatureContext,
         cache: File,
         base: String,
         secret: String,
         voice: String,
         speed: Float,
-        chunks: List<String>
-    ) {
-        try {
-            for (index in chunks.indices) {
-                when (val fetched = fetch(base, secret, voice, speed, chunks[index])) {
-                    is Fetched.Failed -> {
-                        queue.put(Synth.Failed(index, fetched.reason))
-                        return
-                    }
-                    is Fetched.Audio -> {
-                        val file = File(cache, SpeakPlan.chunkFileName(index))
-                        val written = try {
-                            file.writeBytes(fetched.bytes)
-                            true
-                        } catch (t: Throwable) {
-                            queue.put(Synth.Failed(index, SpeakPlan.writeFailure(t)))
-                            false
-                        }
-                        if (!written) return
-                        queue.put(Synth.Audio(index, file, fetched.bytes.size.toLong()))
-                    }
-                }
-            }
-        } catch (t: InterruptedException) {
-            // The player gave up (or finished early); this thread just stops.
-        } finally {
-            queue.offer(Synth.Done)
+        text: String,
+        chunk: String
+    ): ExecutionResult {
+        val started = System.currentTimeMillis()
+        val synth = synthesize(cache, base, secret, voice, speed, chunk, 0)
+        if (synth is Synth.Failed) {
+            return incomplete(ctx, text, 0, 1, synth.index, synth.reason)
+        }
+        val audio = synth as Synth.Audio
+        val out = play(audio.file.absolutePath)
+        audio.file.delete()
+        if (out.error != null) return incomplete(ctx, text, 0, 1, audio.index, out.error)
+        val line = SpeakPlan.successLine(
+            text.length,
+            voice,
+            speed,
+            1,
+            out.startedAt - started,
+            System.currentTimeMillis() - started,
+            audio.bytes
+        )
+        AgentLog.add("speak", line)
+        return ExecutionResult(EXIT_OK, line, "")
+    }
+
+    /**
+     * Synthesizer side, one chunk: POST it, write it to the cache, hand it back.
+     *
+     * Runs on a [SynthBoard] worker, so it is called once per index and may run
+     * at the same time as two other chunks. Every expected failure is a value,
+     * never a throw: the board would otherwise report a crash where the operator
+     * can read a sentence.
+     */
+    private fun synthesize(
+        cache: File,
+        base: String,
+        secret: String,
+        voice: String,
+        speed: Float,
+        chunk: String,
+        index: Int
+    ): Synth {
+        val fetched = fetch(base, secret, voice, speed, chunk)
+        if (fetched is Fetched.Failed) return Synth.Failed(index, fetched.reason)
+        val audio = fetched as Fetched.Audio
+        val file = File(cache, SpeakPlan.chunkFileName(index))
+        return try {
+            file.writeBytes(audio.bytes)
+            Synth.Audio(index, file, audio.bytes.size.toLong())
+        } catch (t: Throwable) {
+            Synth.Failed(index, SpeakPlan.writeFailure(t))
         }
     }
 
@@ -347,11 +396,15 @@ internal object FeatSpeak : FeatureModule {
         return ExecutionResult(EXIT_OK, line, "")
     }
 
-    /** What the synthesizer hands to the player. */
+    /**
+     * What one synthesizer hands to the player.
+     *
+     * There is no `Done` any more (v0.11.3-pad12): [SynthBoard] answers null
+     * when the run is over, so "finished" is not something anyone can play.
+     */
     private sealed class Synth {
         class Audio(val index: Int, val file: File, val bytes: Long) : Synth()
         class Failed(val index: Int, val reason: String) : Synth()
-        object Done : Synth()
     }
 
     /** One HTTP result. */
@@ -398,6 +451,20 @@ internal object SpeakPlan {
      */
     const val FIRST_MAX = 40
 
+    /**
+     * Text at or below this length is synthesized in **one** request (v0.11.3-pad12).
+     *
+     * Chunking a 44-character line into 40 + 4 buys nothing: synthesis is about
+     * 0.10 s per character, so one request for 80 characters is ~8 s before the
+     * first sound, while cutting it in two only moves that to ~4 s and costs an
+     * extra round trip (1-2 s of server overhead) plus an audible join -- and a
+     * 4-character tail synthesized on its own does not even carry the same
+     * intonation as the sentence it was cut from. The owner said he can wait
+     * (「这个时间也可以长一点也没有关系」), so up to 80 characters go out whole.
+     * 80 is the balance point: beyond it the first sound would be past 10 s.
+     */
+    const val SINGLE_SHOT_MAX = 80
+
     /** The server answers 413 above this. The client never sends it. */
     const val SERVER_MAX = 500
 
@@ -406,8 +473,37 @@ internal object SpeakPlan {
     /** 500 characters take 62 s at worst; 90 s leaves room for a slow VPS. */
     const val READ_TIMEOUT_MS = 90_000
 
-    /** Two chunks of look-ahead: enough to hide synthesis, small enough to bound memory. */
-    const val QUEUE_CAPACITY = 2
+    /**
+     * How many chunks are synthesized at the same time (v0.11.3-pad12).
+     *
+     * One was not enough: synthesis is ~0.10 s per character and the player
+     * reads 4-5 characters a second, so a 120-character chunk needed ~12 s while
+     * the 40-character chunk in front of it played for ~10 s -- every sentence
+     * boundary was a several-second silence. Three requests at once is what the
+     * VPS already serves without queueing.
+     */
+    const val SYNTH_WORKERS = 3
+
+    /**
+     * How many finished chunks may wait for the player (4, was 2).
+     *
+     * With three synthesizers, two slots would leave the workers waiting for the
+     * player instead of the other way round; four still means a 30-chunk
+     * paragraph never buffers 30 MP3s.
+     */
+    const val QUEUE_CAPACITY = 4
+
+    /**
+     * How long the player waits for one chunk before calling its synthesizer
+     * wedged (110 s).
+     *
+     * The upstream service is not reliable per request: ten serial syntheses
+     * measured 2.3-2.9 s each **except the seventh, which took 80.8 s**. A
+     * request slower than the socket timeouts has already come back as a
+     * failure, so this only catches a worker that never returned at all -- and
+     * it must be finite, or one wedged connection would hang `speak` forever.
+     */
+    const val SYNTH_WAIT_MS = CONNECT_TIMEOUT_MS + READ_TIMEOUT_MS + 10_000L
 
     /** Extra time on top of the decoded duration before the player is called stuck. */
     const val PLAY_SLACK_MS = 5_000L
@@ -491,8 +587,9 @@ internal object SpeakPlan {
     fun chunkFileName(index: Int): String = "tts-" + index + ".mp3"
 
     /**
-     * Split [text] into pieces: the first at most [FIRST_MAX] characters, every
-     * later one at most [CHUNK_MAX].
+     * Split [text] into pieces: nothing at all for blank text, **one piece** at or
+     * below [SINGLE_SHOT_MAX], otherwise the first at most [FIRST_MAX] characters
+     * and every later one at most [CHUNK_MAX].
      *
      * Order of preference at each cut: a sentence end, then a clause end, then a
      * hard cut. Small sentences are packed back together, so a 200-character
@@ -501,6 +598,7 @@ internal object SpeakPlan {
      */
     fun chunks(text: String): List<String> {
         if (text.isBlank()) return emptyList()
+        if (text.length <= SINGLE_SHOT_MAX) return listOf(text)
         val first = firstChunk(text)
         if (first.length >= text.length) return listOf(text)
         val out = ArrayList<String>()
@@ -663,6 +761,12 @@ internal object SpeakPlan {
         t.message?.trim().takeUnless { it.isNullOrEmpty() } ?: t.javaClass.simpleName
 
     fun playTimeout(capMs: Long): String = "播放超时（" + seconds(capMs) + "）"
+
+    /** speak 已播 1/3 块，第 2 块失败：合成卡死（已等 110.00s）… */
+    fun synthTimeout(waitedMs: Long): String = "合成卡死（已等 " + seconds(waitedMs) + "）"
+
+    /** A synthesizer that threw instead of reporting a reason. */
+    fun synthFailure(t: Throwable): String = "合成失败：" + reason(t)
 
     /** Duration plus slack, or a fixed generous cap when the duration is unknown. */
     fun playbackCapMs(durationMs: Long): Long =

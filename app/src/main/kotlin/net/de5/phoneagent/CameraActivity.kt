@@ -2,6 +2,7 @@ package net.de5.phoneagent
 
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -18,14 +19,20 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.text.InputFilter
 import android.text.InputType
 import android.util.Size
 import android.util.TypedValue
+import android.view.Gravity
+import android.view.KeyEvent
 import android.view.Surface
 import android.view.TextureView
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -70,6 +77,10 @@ class CameraActivity : Activity() {
     private lateinit var sendButton: Button
 
     private val uiHandler = Handler(Looper.getMainLooper())
+
+    /** Lazy so the vibrator is looked up once, on the first send rather than at launch. */
+    private val haptics: Haptics by lazy { Haptics(this) }
+
     private val camThread = HandlerThread("cam-look")
     private lateinit var camHandler: Handler
 
@@ -110,7 +121,8 @@ class CameraActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
-        title = UiText.CAMERA
+        // No title line any more (v0.11.3-pad12): the theme drops the ActionBar so the
+        // preview gets those pixels back, and a label nothing displays is dead code.
 
         // The phone is held up at something and the owner talks into it; the screen
         // going dark mid-sentence would end the whole interaction.
@@ -119,6 +131,30 @@ class CameraActivity : Activity() {
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setPadding(dp(24), dp(24), dp(24), dp(16))
+
+        // 关闭摄像头 sits above the preview, right-aligned and slim (v0.11.3-pad12):
+        // the owner may want to send a sentence with no picture at all, and leaving
+        // the page used to be the 返回 button at the bottom, which competed with 发送
+        // for the same row. A small button at the edge keeps the frame unobstructed.
+        val topBar = LinearLayout(this)
+        topBar.orientation = LinearLayout.HORIZONTAL
+        topBar.gravity = Gravity.END
+        val closeButton = Button(this)
+        closeButton.text = CamPlan.CLOSE_CAMERA_TEXT
+        closeButton.isAllCaps = false
+        closeButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        closeButton.setPadding(dp(12), dp(4), dp(12), dp(4))
+        closeButton.minHeight = 0
+        closeButton.minimumHeight = 0
+        closeButton.setOnClickListener { finish() }
+        topBar.addView(
+            closeButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+        root.addView(topBar, matchWidth())
 
         // weight 1: the preview takes every pixel the text box and the buttons do
         // not need. A smaller preview is what makes the owner guess what is in frame.
@@ -129,7 +165,8 @@ class CameraActivity : Activity() {
         )
 
         statusView = TextView(this)
-        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, TEXT_SIZE_NORMAL)
+        statusView.setTextColor(COLOR_IDLE)
         statusView.setPadding(0, dp(8), 0, dp(8))
         root.addView(statusView, matchWidth())
 
@@ -138,16 +175,42 @@ class CameraActivity : Activity() {
         inputView.setSingleLine(false)
         inputView.minLines = 2
         inputView.maxLines = 4
-        inputView.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        // No TYPE_TEXT_FLAG_MULTI_LINE on purpose (v0.11.3-pad12): with that flag every
+        // IME turns its action key into "insert a newline" and never calls the editor
+        // action, so Enter would break the line instead of sending. The box still
+        // wraps and still shows two to four lines -- setSingleLine(false) is what does
+        // the visual part; the flag only controls what the Enter key means.
+        inputView.inputType = InputType.TYPE_CLASS_TEXT
         // The IME's own voice key types into whatever has focus, so this box is the
         // whole speech-to-text path: no recogniser, no network, no extra permission.
         inputView.filters = arrayOf<InputFilter>(InputFilter.LengthFilter(CamPlan.MAX_TEXT))
+        // Enter sends instead of inserting a newline (v0.11.3-pad12). Both listeners
+        // are needed: some IMEs report the soft key as an editor action, others as a
+        // raw ENTER key event, and the owner's own voice IME is in the second camp.
+        // A double fire is harmless -- send() returns at once while busy.
+        inputView.imeOptions = EditorInfo.IME_ACTION_SEND
+        inputView.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                send()
+                true
+            } else {
+                false
+            }
+        }
+        inputView.setOnKeyListener { _, keyCode, event ->
+            if (keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN) {
+                send()
+                true
+            } else {
+                false
+            }
+        }
         root.addView(inputView, matchWidth())
 
         val buttons = LinearLayout(this)
         buttons.orientation = LinearLayout.HORIZONTAL
+        // 发送 only: leaving the page is the 关闭摄像头 button at the top now.
         sendButton = addButton(buttons, SEND_TEXT, 1.0f) { send() }
-        addButton(buttons, BACK_TEXT, 1.0f) { finish() }
         root.addView(buttons, matchWidth())
 
         setContentView(root)
@@ -177,7 +240,7 @@ class CameraActivity : Activity() {
         } else {
             // Nothing on this page can work without the camera, so say it once and
             // leave 发送 dead rather than letting it fail with a mystery later.
-            statusView.text = CamPlan.errorLine(DENIED_TEXT)
+            showStatus(CamPlan.errorLine(DENIED_TEXT), COLOR_ERROR, TEXT_SIZE_NORMAL)
             sendButton.isEnabled = false
         }
     }
@@ -316,7 +379,7 @@ class CameraActivity : Activity() {
                         configured.setRepeatingRequest(builder.build(), null, camHandler)
                         uiHandler.post {
                             if (isFinishing || isDestroyed) return@post
-                            statusView.text = READY_TEXT
+                            showStatus(READY_TEXT, COLOR_IDLE, TEXT_SIZE_NORMAL)
                         }
                     } catch (t: Throwable) {
                         reportError(describe(t))
@@ -409,22 +472,29 @@ class CameraActivity : Activity() {
         if (busy) return
         val text = CamPlan.clampText(inputView.text.toString())
         if (text.isEmpty()) {
-            statusView.text = EMPTY_TEXT
+            showStatus(EMPTY_TEXT, COLOR_IDLE, TEXT_SIZE_NORMAL)
             return
         }
         if (session == null || camera == null) {
-            statusView.text = CamPlan.errorLine(NOT_READY_TEXT)
+            // Not a send failure -- nothing was captured -- but the button has to be
+            // usable and the reason has to be visible, so it goes out the same exit.
+            reportError(NOT_READY_TEXT)
             return
         }
         busy = true
         sendButton.isEnabled = false
-        statusView.text = WAITING_TEXT
+        // 阶段 A (v0.12.0-pad12): the sensor is about to read out, so this sentence has
+        // to say "hold still" in a colour he cannot mistake for "done".
+        showStatus(CamPlan.holdLine(), COLOR_HOLD, TEXT_SIZE_STRONG)
 
         // The hand is still moving when the button is released; a frame grabbed now
         // is a blurred picture of the ceiling. CamPlan.SETTLE_MS is that wait.
         uiHandler.postDelayed({
             if (isFinishing || isDestroyed) {
+                // Leaving mid-wait used to leave 发送 disabled forever; the page may
+                // still be alive (a permission dialog, a config change), so put it back.
                 busy = false
+                sendButton.isEnabled = true
                 return@postDelayed
             }
             camHandler.post { captureStill(text) }
@@ -470,11 +540,21 @@ class CameraActivity : Activity() {
             image.close()
         }
         if (bytes == null || bytes.isEmpty()) {
-            reportError(SHOT_FAILED_TEXT)
+            reportSendFailed(SHOT_FAILED_TEXT)
             return
         }
         val text = pendingText
         pendingText = ""
+        // 阶段 B (v0.12.0-pad12): the JPEG is in hand, so the camera work is over and the
+        // owner may move. This is posted BEFORE the upload thread starts on purpose:
+        // the whole point is that he learns it at the capture, not when the upload
+        // ends. The buzz is the same fact for someone looking at the thing in frame
+        // rather than at the screen.
+        uiHandler.post {
+            if (isFinishing || isDestroyed) return@post
+            showStatus(CamPlan.doneHoldLine(), COLOR_DONE, TEXT_SIZE_STRONG)
+            haptics.shotDone()
+        }
         // Decoding, re-encoding and uploading take seconds; the camera has to keep
         // previewing through them, so they run off the camera thread.
         Thread({ deliver(bytes, text) }, "cam-send").start()
@@ -486,7 +566,7 @@ class CameraActivity : Activity() {
             shrink(jpeg)
         } catch (t: Throwable) {
             AgentLog.add("cam", "重压失败: " + describe(t))
-            reportError(SHOT_FAILED_TEXT)
+            reportSendFailed(SHOT_FAILED_TEXT)
             return
         }
         val name = CamPlan.blobName(System.currentTimeMillis(), suffix())
@@ -496,23 +576,28 @@ class CameraActivity : Activity() {
 
         val upload = client.uploadBlob(name, shot.bytes)
         if (!upload.ok) {
-            reportError(upload.error ?: UPLOAD_FAILED_TEXT)
+            reportSendFailed(upload.error ?: UPLOAD_FAILED_TEXT)
             return
         }
         val note = client.postNote(CamPlan.noteBody(prefs.agentId, text, name, shot.width, shot.height))
         if (!note.ok) {
-            reportError(note.error ?: NOTE_FAILED_TEXT)
+            reportSendFailed(note.error ?: NOTE_FAILED_TEXT)
             return
         }
+        // 阶段 C: the upload is done, so the line goes back to the quiet summary colour.
         uiHandler.post {
             if (isFinishing || isDestroyed) return@post
             busy = false
             sendButton.isEnabled = true
-            statusView.text = CamPlan.summaryLine(
-                shot.bytes.size,
-                shot.width,
-                shot.height,
-                text.codePointCount(0, text.length)
+            showStatus(
+                CamPlan.summaryLine(
+                    shot.bytes.size,
+                    shot.width,
+                    shot.height,
+                    text.codePointCount(0, text.length)
+                ),
+                COLOR_IDLE,
+                TEXT_SIZE_NORMAL
             )
             inputView.setText("")
         }
@@ -646,12 +731,43 @@ class CameraActivity : Activity() {
 
     /** One place that turns a reason into the red line, from any thread. */
     private fun reportError(reason: String) {
+        reportFailure(CamPlan.errorLine(reason), reason)
+    }
+
+    /**
+     * A send that did not make it (v0.12.0-pad12).
+     *
+     * The owner is holding a phone and looking at a room, not at a stack trace, so
+     * the screen gets [CamPlan.retryLine] -- "press 发送 again" -- while the real
+     * reason goes to AgentLog. The typed text is left in the box precisely so that
+     * second press costs one tap and no retyping.
+     */
+    private fun reportSendFailed(detail: String) {
+        reportFailure(CamPlan.retryLine(), detail)
+    }
+
+    /**
+     * The single exit for "this did not work": red line, button back on, two buzzes.
+     *
+     * The buzz is here rather than at each call site so no failure path can forget
+     * it: a person waiting for a picture has no other signal that it is not coming.
+     */
+    private fun reportFailure(line: String, detail: String) {
+        AgentLog.add("cam", "失败: " + detail)
         uiHandler.post {
             if (isFinishing || isDestroyed) return@post
             busy = false
             sendButton.isEnabled = true
-            statusView.text = CamPlan.errorLine(reason)
+            showStatus(line, COLOR_ERROR, TEXT_SIZE_NORMAL)
+            haptics.failed()
         }
+    }
+
+    /** One place that writes the line under the preview: text, colour and size together. */
+    private fun showStatus(line: String, color: Int, sizeSp: Float) {
+        statusView.text = line
+        statusView.setTextColor(color)
+        statusView.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -687,11 +803,19 @@ class CameraActivity : Activity() {
         const val PREVIEW_TARGET_H = 720
 
         const val HINT_TEXT = "说一句：哪里不对 / 要我看什么"
+
+        // 阶段 A is a warning (hold still), 阶段 B is a clearance (you may move), and
+        // the two must never look alike at a glance -- that difference is the whole
+        // feature. Red-orange vs green, and both slightly larger than the idle line.
+        const val COLOR_HOLD = 0xFFFF6B00.toInt()
+        const val COLOR_DONE = 0xFF12A150.toInt()
+        const val COLOR_IDLE = 0xFF666666.toInt()
+        const val COLOR_ERROR = 0xFFD32F2F.toInt()
+        const val TEXT_SIZE_STRONG = 18f
+        const val TEXT_SIZE_NORMAL = 14f
         const val SEND_TEXT = "发送"
-        const val BACK_TEXT = "返回"
 
         const val READY_TEXT = "对准要我看的东西，打一句话，按发送"
-        const val WAITING_TEXT = "正在拍…"
         const val EMPTY_TEXT = "先打一句话"
         const val NEED_PERMISSION_TEXT = "需要相机权限"
         const val DENIED_TEXT = "没有相机权限，去系统设置里给这个应用打开"
@@ -703,5 +827,59 @@ class CameraActivity : Activity() {
         const val SHOT_FAILED_TEXT = "这一帧没取到"
         const val UPLOAD_FAILED_TEXT = "图没传上去"
         const val NOTE_FAILED_TEXT = "文字没传上去"
+    }
+
+    /**
+     * 手上能感觉到的那一下 (v0.12.0-pad12).
+     *
+     * The owner is pointing the camera at something and looking at *that*, not at
+     * the line under the preview, so "拍好了" has to arrive through the hand as well
+     * as through the screen: one short buzz when the frame is captured, two when the
+     * send failed.
+     *
+     * VIBRATE is a normal permission (AndroidManifest.xml already declares it), so
+     * there is no runtime request and no way for this to be denied. minSdk is 31, so
+     * VibrationEffect is always available and needs no version branch.
+     *
+     * Every call swallows its Throwable: a device with the motor off, or a vibrator
+     * taken away by another app, must not turn a captured frame into a failed send.
+     */
+    private class Haptics(context: Context) {
+
+        // VibratorManager rather than the deprecated Context.VIBRATOR_SERVICE string:
+        // minSdk is 31, so the manager is always there, and it is the only form the
+        // current SDK does not flag.
+        private val vibrator: Vibrator? = try {
+            context.getSystemService(VibratorManager::class.java)?.defaultVibrator
+        } catch (t: Throwable) {
+            AgentLog.add("cam", "震动服务不可用: " + describe(t))
+            null
+        }
+
+        /** One 70 ms buzz: the frame is captured, the owner may move. */
+        fun shotDone() {
+            fire(VibrationEffect.createOneShot(SHOT_MS, VibrationEffect.DEFAULT_AMPLITUDE))
+        }
+
+        /** Two short buzzes with a gap: the send failed, press 发送 again. */
+        fun failed() {
+            fire(VibrationEffect.createWaveform(longArrayOf(0L, FAIL_MS, GAP_MS, FAIL_MS), -1))
+        }
+
+        private fun fire(effect: VibrationEffect) {
+            val target = vibrator ?: return
+            try {
+                target.vibrate(effect)
+            } catch (t: Throwable) {
+                AgentLog.add("cam", "震动失败: " + describe(t))
+            }
+        }
+
+        private companion object {
+            /** Short enough not to be annoying, long enough to feel through a case. */
+            const val SHOT_MS = 70L
+            const val FAIL_MS = 60L
+            const val GAP_MS = 90L
+        }
     }
 }
