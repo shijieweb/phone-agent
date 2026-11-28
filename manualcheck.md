@@ -523,8 +523,12 @@ right way up, with no UI, no status line and no keyboard in it. Do this on the
    status line says 发送失败: <reason>, the buttons come back, and **the text you
    typed is still in the box** — a failed send must not cost the sentence. Turn
    airplane mode off and press 发送 again: it goes through.
-8. Turn the phone to landscape, send, and open the image: it must be landscape,
-   not a portrait photo with the content rotated 90°.
+8. Rotation (v0.9.1-pad12): turn the phone sideways. The page must **stay
+   portrait** — no rebuild, the preview does not letterbox into a 575 px strip,
+   the text box keeps its height, and the sentence already typed is still there.
+   Send once while holding it sideways: the image is still portrait and upright.
+   (Before v0.9.1 the page followed the system rotation, recreated the activity,
+   reopened the camera and dropped any still that was in flight.)
 
 ### The ancestor the walk picks is one that really holds the label (v0.8.5-pad12)
 

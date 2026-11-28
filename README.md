@@ -168,8 +168,10 @@ captures a still, shrinks it to 1280 px at quality 80, uploads it as
 person is asking to be looked at. The preview and the JPEG share one
 `CaptureSession` — a still is a request on the session that adds the JPEG target,
 so the frame handed back is the frame that was on screen — and the page builds
-its own `RcClient` call by call, so it works with the agent stopped. See
-`SPEC.md` §3.29, §6.3 and §10 case 34.
+its own `RcClient` call by call, so it works with the agent stopped. The page is
+pinned portrait (v0.9.1-pad12): it is a page for pointing an upright phone at a
+shelf, and a rotation would recreate the activity and drop the still in flight.
+See `SPEC.md` §3.29, §6.3 and §10 case 34.
 
 v0.8.2-pad12 is one real-device defect and one sentence of documentation. Both
 came from the same habit: a helper that answers two questions gets trusted for

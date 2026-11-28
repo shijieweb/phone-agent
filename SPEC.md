@@ -2384,6 +2384,16 @@ Both labels live in `CameraActivity`'s private companion (`SEND_TEXT` = 发送,
 `BACK_TEXT` = 返回), deliberately not `UiText` constants — `click apply 发送` on this
 page must have exactly one candidate, the same rule §6.2 states for 视频转音乐.
 
+`android:screenOrientation="portrait"` (v0.9.1-pad12). The page is portrait, always,
+even when the rest of the system is locked landscape. Two reasons, and the first one
+is the owner's: this is a page for pointing a phone at a shelf, held upright — a
+rotated page puts the text box sideways and the preview in a letterbox 575 px tall.
+The second is that rotation is a *rebuild*: the activity is recreated, the camera is
+closed and reopened, and the still that was in flight dies with the old instance.
+A preview that turns because the phone tilted while the person was typing is a page
+that loses the sentence. Everything else in the app follows the system rotation;
+this one screen does not.
+
 `FLAG_KEEP_SCREEN_ON` is set for the life of the page: the owner is holding the
 phone up at something, and a screen that sleeps mid-sentence loses the sentence.
 This is the one place in the app where keeping the screen awake is what the person

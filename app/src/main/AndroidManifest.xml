@@ -209,6 +209,7 @@
             android:name=".CameraActivity"
             android:exported="false"
             android:excludeFromRecents="true"
+            android:screenOrientation="portrait"
             android:label="@string/camera_activity_label" />
 
         <!-- ================== AGENT CORE ================== -->
