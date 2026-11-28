@@ -372,4 +372,85 @@ class CamPlanTest {
         assertNull(CamPlan.pickSize(listOf(intArrayOf(0, 0), intArrayOf(-4, 3)), 1280, 720))
         assertNull(CamPlan.pickSize(listOf(intArrayOf(1280, 720)), 0, 0))
     }
+
+
+    // ------------------------------------------- 回执 (v0.11.5-pad12) --
+
+    @Test
+    fun uploadedLineNamesTheSizeAndTheCharacterCount() {
+        // Same numbers as the old summary line, so the operator recognises the send
+        // he just made -- only the claim at the end of it changed.
+        assertEquals(
+            "已上传：图 148 KB（1280x720）+ 文字 12 字，等我确认",
+            CamPlan.uploadedLine(151_552, 1280, 720, 12)
+        )
+        assertEquals("已上传：图 1 KB（640x480）+ 文字 3 字，等我确认", CamPlan.uploadedLine(1024, 640, 480, 3))
+    }
+
+    @Test
+    fun uploadedLineAsksForConfirmationInsteadOfClaimingItWasSeen() {
+        // The whole point of v0.11.5: the relay storing the note proves the phone got
+        // through, not that anyone looked. A line that says 已读 here would be a lie
+        // the owner would repeat to the person in front of him.
+        val line = CamPlan.uploadedLine(151_552, 1280, 720, 12)
+        assertTrue(line, line.contains("等我确认"))
+        assertFalse(line, line.contains(CamPlan.readLine()))
+    }
+
+    @Test
+    fun uploadedLineIsNotTheOldSentSentence() {
+        // 已发送 was the only thing the phone could ever prove before this version;
+        // keeping it would leave the owner reading "sent" as "seen".
+        val line = CamPlan.uploadedLine(1024, 640, 480, 3)
+        assertFalse(line, line.startsWith("已发送"))
+        assertTrue(line, line.startsWith("已上传"))
+    }
+
+    @Test
+    fun uploadedTextOnlyLineNamesTheCharacterCount() {
+        assertEquals("已上传：文字 12 字（没带图），等我确认", CamPlan.uploadedTextOnlyLine(12))
+    }
+
+    @Test
+    fun uploadedTextOnlyLineFallsBackWhenTheCountIsNotUsable() {
+        // A picture-less send still happened, so it still has to say 没带图 rather than
+        // looking like a picture that came out empty.
+        assertEquals("已上传：文字（没带图），等我确认", CamPlan.uploadedTextOnlyLine(0))
+        assertEquals("已上传：文字（没带图），等我确认", CamPlan.uploadedTextOnlyLine(-3))
+    }
+
+    @Test
+    fun everyPendingLineAsksForConfirmation() {
+        // Both shapes of the pending line -- with a picture and without -- have to
+        // carry the same promise, otherwise one of the two paths silently keeps the
+        // old "sent, therefore seen" reading.
+        assertTrue(CamPlan.uploadedLine(1024, 640, 480, 3), CamPlan.uploadedLine(1024, 640, 480, 3).contains("等我确认"))
+        assertTrue(CamPlan.uploadedTextOnlyLine(3), CamPlan.uploadedTextOnlyLine(3).contains("等我确认"))
+    }
+
+    @Test
+    fun readLineIsTheShortAnswer() {
+        // Two characters, readable from across a room: it is the one line on the page
+        // that is a fact about the operator rather than about the phone.
+        assertEquals("已读", CamPlan.readLine())
+        assertEquals(2, CamPlan.readLine().length)
+    }
+
+    @Test
+    fun unreadLineSaysTheServerHasItAndNobodyLooked() {
+        // Not an error: nothing failed. The note is waiting, and the sentence has to
+        // say both halves -- it arrived, nobody has opened it.
+        assertEquals("服务器收到了，但还没人看", CamPlan.unreadLine())
+        assertTrue(CamPlan.unreadLine(), CamPlan.unreadLine().contains("服务器收到了"))
+        assertTrue(CamPlan.unreadLine(), CamPlan.unreadLine().contains("还没人看"))
+    }
+
+    @Test
+    fun readAndUnreadAreDifferentSentences() {
+        // If these two ever collapse, the ack thread can no longer be tested at all:
+        // the owner would see the same line whether or not anyone looked.
+        assertFalse(CamPlan.readLine() == CamPlan.unreadLine())
+        assertFalse(CamPlan.readLine().contains("还没人看"))
+        assertFalse(CamPlan.unreadLine().contains("等我确认"))
+    }
 }

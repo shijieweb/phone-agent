@@ -719,6 +719,23 @@ clears the in-memory ring buffer (400 lines; nothing is ever written to disk).
 - Anyone holding the relay secret has full control of the device. Treat it as a
   password.
 
+v0.11.5-pad12 answers the question 已发送 never answered: did anyone look at it?
+Until now the line under the buttons only proved the phone reached the relay — the
+operator could still have ignored the note, and the owner had no way to tell. So
+`POST /agent/note` now answers with a `seq`, and the page asks
+`POST /agent/note-status` (`{"id":…,"seq":N}`) whether that seq has been read.
+The line says 已上传：图 148 KB（1280x720）+ 文字 12 字，等我确认 the moment the note
+is stored — 已上传, not 已发送, because that is exactly as far as the phone can prove
+— and a thread named `note-ack` then asks every 2 s for 30 s: `read:true` turns the
+line into 已读, the end of the window into 服务器收到了，但还没人看, and a question
+that never got answered is logged as 回执查询失败 instead of being reported as
+unread. The receipt is deliberately after the unlock: `busy` is cleared, 发送 comes
+back and the box is emptied before the first question, so a courtesy about the other
+side can never stall the next send. One slot (`@Volatile ackSeq`) holds the newest
+seq — an older thread checks it before every write and returns, `onDestroy` sets it
+to -1 and interrupts the sleep, so nothing outlives the page. A relay too old to
+hand back a `seq` is logged and the 等我确认 line simply stays. See `SPEC.md` §3.29
+and §10 case 41.
 v0.11.4-pad12 is one word taken literally. The button in the top-right corner of
 摄像头看图 read 关闭摄像头 and did `finish()` — it closed the **page**. The owner said
 what he actually meant: 关闭摄像头 is about the **capture**, so that the next 发送 goes

@@ -1969,6 +1969,28 @@ restart never re-issues a `seq` the controller has already passed. A send whose
 note is refused shows 发送失败: <reason> while the blob from step 5 is already
 on disk.
 
+**The receipt (v0.11.5-pad12).** 已发送 was never the whole truth: it proved the
+phone reached the relay, not that the operator ever pulled the note down. So
+`POST /agent/note` answers with a `seq`, and `POST /agent/note-status`
+(`{"id":…,"seq":N}`, same `X-RC-Secret` header) answers
+`{"ok":true,"seq":N,"read":true|false,"read_at":N}` — or 404
+`{"ok":false,"error":"no such note"}` for a seq the relay never stored.
+`RcClient.noteStatus` returns `NoteStatus(read, readAt)` and `null` for **any**
+failed question (transport error, 404, a body without `ok`): "could not ask" is
+not "nobody looked", so the caller retries instead of printing it.
+
+The page says 已上传…等我确认 the moment the note is stored
+(`CamPlan.uploadedLine` / `uploadedTextOnlyLine`) and only then starts the receipt
+thread, so the next send never waits on one — the box is emptied and 发送 comes
+back before the first question is asked. That thread (`Thread(…, "note-ack")`,
+`CameraActivity.awaitRead`) asks every `ACK_INTERVAL_MS` = 2 s, `ACK_ATTEMPTS` =
+15 times (30 s): `read:true` puts `CamPlan.readLine` (已读) on the line, the end of
+the window puts `unreadLine` (服务器收到了，但还没人看), and a window with no
+successful answer at all additionally logs `回执查询失败: seq N` — the phone never
+claims "unread" for a question it never got answered. One slot
+(`@Volatile ackSeq`) holds the newest seq: an older thread compares it before every
+write and returns, and `onDestroy` sets it to -1 and interrupts the sleep, so no ack
+thread outlives the page.
 **Independent of the service.** The page builds its own
 `RcClient(prefs.relayBase, prefs.secret, prefs.agentId, agentInfo())` and calls it
 directly. `RcClient` is stateless — one call, one connection, no `hello` first, no
@@ -1978,9 +2000,11 @@ service to be running before you can ask a question about the screen would make
 it useless in precisely the case where the service is what is broken.
 
 Status is one line above the buttons: 对准要我看的东西，打一句话，按发送, then
-正在拍…, then 已发送：图 148 KB（1280x720）+ 文字 12 字 — or 发送失败: <reason>. The
-input box is cleared only on success, so a failed send does not cost the
-sentence. Every camera object is opened, used and closed on one
+正在拍…, then 已上传：图 148 KB（1280x720）+ 文字 12 字，等我确认, then either
+已读 or 服务器收到了，但还没人看 once the receipt window closes — or
+发送失败: <reason>. The input box is cleared only on success, so a failed send does
+not cost the sentence, and the receipt never blocks the next one. Every camera
+object is opened, used and closed on one
 `HandlerThread`; `onPause` closes the session, the device and the reader, and
 `onResume` reopens them, because a return from the permission dialog or the home
 screen does not replay the `SurfaceTexture` callback.
@@ -3303,6 +3327,30 @@ framework** — do not mock `AccessibilityService`. Required cases:
         already accepts). What no JVM test can reach is `toggleCamera()` releasing
         and re-opening a real `CameraDevice`; manualcheck.md §"摄像头开关" is that
         proof, and `cam` on the control side is where the operator sees the result.
+
+    41. The v0.11.5-pad12 receipt. The ack thread is an Activity concern (a real
+        socket on a real clock), so what a JVM can pin is the vocabulary and the
+        promise it makes, on the pure `CamPlan`:
+        `uploadedLineNamesTheSizeAndTheCharacterCount` (the same 图 148 KB（1280x720）
+        + 文字 12 字 the owner already recognised, with 等我确认 at the end),
+        `uploadedLineAsksForConfirmationInsteadOfClaimingItWasSeen` (the pending line
+        must not contain 已读 — that is the one sentence in this feature that would be
+        a lie the owner repeats to the person in front of him),
+        `uploadedLineIsNotTheOldSentSentence` (starts with 已上传, not 已发送: 已发送
+        only ever proved the phone reached the relay),
+        `uploadedTextOnlyLineNamesTheCharacterCount` /
+        `uploadedTextOnlyLineFallsBackWhenTheCountIsNotUsable` (the picture-less send
+        keeps 没带图, including for a zero or negative count) and
+        `everyPendingLineAsksForConfirmation` (both shapes of the pending line carry
+        the same clause, so neither path silently keeps the old reading),
+        `readLineIsTheShortAnswer` (已读, two characters, readable across a room),
+        `unreadLineSaysTheServerHasItAndNobodyLooked` (服务器收到了，但还没人看 — not an
+        error: nothing failed, the note is waiting) and
+        `readAndUnreadAreDifferentSentences` (if those two collapse the ack thread has
+        no observable output left to test). What no JVM test can reach is the relay
+        answering `/agent/note-status` and the 30 s window elapsing;
+        manualcheck.md §"回执" is that proof, and `rc.py look` is where the operator
+        makes the read happen.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

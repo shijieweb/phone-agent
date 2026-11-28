@@ -117,6 +117,22 @@ class CameraActivity : Activity() {
     @Volatile
     private var cameraOn = true
 
+    /**
+     * The seq of the newest note whose receipt is still being waited on
+     * (v0.11.5-pad12).
+     *
+     * A single slot, not a queue: the owner cares about the note he just sent, and
+     * the ack thread of an older send compares this before every write and returns
+     * the moment it no longer owns it. -1 means "nothing in flight" and is also what
+     * [onDestroy] writes to retire the thread without touching its sleep.
+     */
+    @Volatile
+    private var ackSeq = -1L
+
+    /** The ack thread, so [onDestroy] can interrupt its sleep instead of leaking it. */
+    @Volatile
+    private var ackThread: Thread? = null
+
     /** True once the surface listener is installed, so it is not installed twice. */
     private var started = false
 
@@ -578,6 +594,13 @@ class CameraActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // Retire the ack thread first (v0.11.5-pad12): -1 means "you own nothing",
+        // so a pass that is already awake writes nothing, and the interrupt cuts a
+        // pass that is parked in its two-second sleep. Without both, the thread would
+        // outlive the page and post a line onto a dead handler.
+        ackSeq = -1L
+        ackThread?.interrupt()
+        ackThread = null
         uiHandler.removeCallbacksAndMessages(null)
         closeCamera()
         camThread.quitSafely()
@@ -666,13 +689,18 @@ class CameraActivity : Activity() {
                 return@Thread
             }
             val chars = text.codePointCount(0, text.length)
+            // 阶段 A (v0.11.5-pad12): the send is over, so the page is unlocked and the
+            // box is emptied *before* the receipt is asked for. A receipt is a fact
+            // about the other side and can take half a minute; making the next send
+            // wait for it would turn a courtesy into a stall.
             uiHandler.post {
                 if (isFinishing || isDestroyed) return@post
                 busy = false
                 sendButton.isEnabled = true
-                showStatus(CamPlan.textOnlyLine(chars), COLOR_IDLE, TEXT_SIZE_NORMAL)
+                showStatus(CamPlan.uploadedTextOnlyLine(chars), COLOR_IDLE, TEXT_SIZE_NORMAL)
                 inputView.setText("")
             }
+            startAck(client, note.seq)
         }, "cam-text").start()
     }
 
@@ -759,13 +787,15 @@ class CameraActivity : Activity() {
             reportSendFailed(note.error ?: NOTE_FAILED_TEXT)
             return
         }
-        // 阶段 C: the upload is done, so the line goes back to the quiet summary colour.
+        // 阶段 C (v0.11.5-pad12): the upload is done, so the line goes back to the quiet
+        // colour and says 已上传…等我确认. 已发送 would be the old claim, and it was
+        // never the whole truth: it only ever proved the phone reached the relay.
         uiHandler.post {
             if (isFinishing || isDestroyed) return@post
             busy = false
             sendButton.isEnabled = true
             showStatus(
-                CamPlan.summaryLine(
+                CamPlan.uploadedLine(
                     shot.bytes.size,
                     shot.width,
                     shot.height,
@@ -775,6 +805,67 @@ class CameraActivity : Activity() {
                 TEXT_SIZE_NORMAL
             )
             inputView.setText("")
+        }
+        startAck(client, note.seq)
+    }
+
+    /**
+     * 回执 (v0.11.5-pad12, SPEC.md section 3.29): wait for the operator to read it.
+     *
+     * Runs on its own thread, started only after the page is unlocked, so the receipt
+     * can never delay the next send. [seq] is the relay's counter for the note that
+     * was just stored; a relay that did not hand one back leaves nothing to ask
+     * about, which is logged rather than guessed at.
+     */
+    private fun startAck(client: RcClient, seq: Long) {
+        if (seq < 0L) {
+            // Older relay: no seq, so no question to ask. Leave the 等我确认 line
+            // standing -- it is true -- and say so in the log for the operator.
+            AgentLog.add("cam", "回执查询失败: 没拿到 seq")
+            return
+        }
+        ackSeq = seq
+        val worker = Thread({ awaitRead(client, seq) }, "note-ack")
+        ackThread = worker
+        worker.start()
+    }
+
+    /**
+     * Ask the relay about one note until it is read or the window closes.
+     *
+     * Every pass starts by checking [ackSeq]: if a newer send has taken the slot (or
+     * the page is going away) this thread owns nothing and returns without writing.
+     * A `null` answer means the question failed, which is not the same as "unread",
+     * so it is retried rather than reported; only the end of the window produces
+     * [CamPlan.unreadLine], and a window with no successful question at all is
+     * logged as a failed query.
+     */
+    private fun awaitRead(client: RcClient, seq: Long) {
+        var answered = false
+        for (attempt in 1..ACK_ATTEMPTS) {
+            try {
+                Thread.sleep(ACK_INTERVAL_MS)
+            } catch (t: InterruptedException) {
+                return
+            }
+            if (ackSeq != seq) return
+            val status = client.noteStatus(seq) ?: continue
+            answered = true
+            if (status.read) {
+                uiHandler.post {
+                    if (isFinishing || isDestroyed) return@post
+                    if (ackSeq != seq) return@post
+                    showStatus(CamPlan.readLine(), COLOR_DONE, TEXT_SIZE_NORMAL)
+                }
+                return
+            }
+        }
+        if (ackSeq != seq) return
+        if (!answered) AgentLog.add("cam", "回执查询失败: seq " + seq)
+        uiHandler.post {
+            if (isFinishing || isDestroyed) return@post
+            if (ackSeq != seq) return@post
+            showStatus(CamPlan.unreadLine(), COLOR_IDLE, TEXT_SIZE_NORMAL)
         }
     }
 
@@ -988,6 +1079,16 @@ class CameraActivity : Activity() {
         const val COLOR_ERROR = 0xFFD32F2F.toInt()
         const val TEXT_SIZE_STRONG = 18f
         const val TEXT_SIZE_NORMAL = 14f
+
+        /**
+         * Receipt window (v0.11.5-pad12): 15 questions two seconds apart.
+         *
+         * Thirty seconds is the span in which the operator plausibly still has the
+         * page in front of him; past that the honest answer is 还没人看 rather than a
+         * thread that keeps a socket open for the rest of the session.
+         */
+        const val ACK_INTERVAL_MS = 2_000L
+        const val ACK_ATTEMPTS = 15
         const val SEND_TEXT = "发送"
 
         const val READY_TEXT = "对准要我看的东西，打一句话，按发送"

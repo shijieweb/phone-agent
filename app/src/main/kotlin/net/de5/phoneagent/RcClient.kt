@@ -40,6 +40,19 @@ data class BlobUpload(val bytes: Int, val error: String?) {
 data class NoteResult(val ok: Boolean, val seq: Long, val error: String?)
 
 /**
+ * Whether the operator has actually pulled a note down (v0.11.5-pad12, SPEC.md section 3.29).
+ *
+ * A stored note only proves the phone reached the relay. [read] is the relay's
+ * answer to "has anyone looked at it yet", which is the fact the owner actually
+ * asked for; [readAt] is the relay clock when it was first pulled (0 while unread).
+ *
+ * `null` from [RcClient.noteStatus] means *unknown* -- the question could not be
+ * asked -- and must never be rendered as "not read yet": one is a fact, the other
+ * is a network error.
+ */
+data class NoteStatus(val read: Boolean, val readAt: Long)
+
+/**
  * The three relay calls of SPEC.md section 2, on `java.net.HttpURLConnection`.
  *
  * Every call opens a fresh connection, so this class is safe to use from the
@@ -135,6 +148,32 @@ class RcClient(
             }
         } catch (t: Throwable) {
             NoteResult(false, -1L, describe(t))
+        }
+    }
+
+    /**
+     * `POST /agent/note-status` (v0.11.5-pad12): has the operator read note [seq]?
+     *
+     * The relay answers `{"ok":true,"seq":N,"read":true|false,"read_at":N}`, or
+     * 404 `{"ok":false,"error":"no such note"}` for a seq it never stored. Both
+     * the 404 and any transport problem come back as `null`, because the caller
+     * ([CameraActivity]'s ack thread) only has two useful things to say: "read" and
+     * "nobody has looked yet". A failed question is neither, and is retried.
+     *
+     * Never throws: the caller is a background thread whose remaining job is one
+     * sentence on screen, exactly like [postNote].
+     */
+    fun noteStatus(seq: Long): NoteStatus? {
+        if (seq < 0L) return null
+        val body = JSONObject()
+        body.put("id", agentId)
+        body.put("seq", seq)
+        return try {
+            val response = post("/agent/note-status", body, HELLO_READ_TIMEOUT_MS) ?: return null
+            if (!response.optBoolean("ok", false)) return null
+            NoteStatus(response.optBoolean("read", false), response.optLong("read_at", 0L))
+        } catch (t: Throwable) {
+            null
         }
     }
 

@@ -177,6 +177,46 @@ internal object CamPlan {
         return "已发送：文字 " + chars + " 字（没带图）"
     }
 
+    /**
+     * The line under the buttons the moment the relay has stored the note
+     * (v0.11.5-pad12).
+     *
+     * Deliberately not [summaryLine]: 已发送 claims the send succeeded, which is all
+     * the phone could ever prove before this version. 已上传 says the same thing
+     * about the upload and then adds 等我确认 -- the receipt has not arrived yet, and
+     * the sentence has to say so instead of letting the owner read "sent" as
+     * "seen". The trailing clause is what [readLine] replaces a few seconds later.
+     */
+    fun uploadedLine(bytes: Int, w: Int, h: Int, chars: Int): String =
+        "已上传：图 " + sizeText(bytes) + "（" + w + "x" + h + "）+ 文字 " + chars + " 字，等我确认"
+
+    /**
+     * The same receipt-pending line for a send with no picture (v0.11.5-pad12).
+     *
+     * Mirrors [textOnlyLine]'s two branches, including the 没带图 parenthetical, so
+     * the picture-less send never looks like a picture that came out empty.
+     */
+    fun uploadedTextOnlyLine(chars: Int): String {
+        if (chars <= 0) return "已上传：文字（没带图），等我确认"
+        return "已上传：文字 " + chars + " 字（没带图），等我确认"
+    }
+
+    /**
+     * The operator has pulled the note down (v0.11.5-pad12).
+     *
+     * Two characters on purpose: this is the one line in the whole page that is a
+     * fact about the *other* side, and it should be readable from across a room.
+     */
+    fun readLine(): String = "已读"
+
+    /**
+     * The receipt window closed without a read (v0.11.5-pad12).
+     *
+     * Says what is true -- the relay has it -- and then what is not: nobody has
+     * looked. Not an error colour, because nothing failed; the note is waiting.
+     */
+    fun unreadLine(): String = "服务器收到了，但还没人看"
+
     /** `NNN B` under 1 KiB, `NNN KB` above it (rounded to the nearest KiB). */
     fun sizeText(bytes: Int): String {
         val safe = if (bytes < 0) 0 else bytes
