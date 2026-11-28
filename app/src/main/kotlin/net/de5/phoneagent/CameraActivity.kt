@@ -96,6 +96,17 @@ class CameraActivity : Activity() {
     @Volatile
     private var pendingText: String = ""
 
+    /**
+     * True while the operator has been told this page is showing the camera.
+     *
+     * It exists so the open and close notes come in pairs: onResume can run twice
+     * without an onPause in between (a permission dialog returning), and a second
+     * cam-open would read to the operator as a second opening of a camera that
+     * never closed.
+     */
+    @Volatile
+    private var modeOpen = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
@@ -357,12 +368,22 @@ class CameraActivity : Activity() {
     }
 
     override fun onPause() {
+        // Before closeCamera(): the note says "the camera is closing", and it has
+        // to leave while the fact is still true, not after the teardown.
+        if (modeOpen) {
+            modeOpen = false
+            postMode(CamPlan.MODE_CLOSE)
+        }
         closeCamera()
         super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
+        if (!modeOpen) {
+            modeOpen = true
+            postMode(CamPlan.MODE_OPEN)
+        }
         // Back from the permission dialog or the home screen: the surface may
         // already be there, in which case no callback will fire for it.
         val texture = if (started) previewView.surfaceTexture else null
@@ -495,6 +516,30 @@ class CameraActivity : Activity() {
             )
             inputView.setText("")
         }
+    }
+
+    /**
+     * 告诉操作员这一页开了还是关了 (v0.11.0-pad12, SPEC.md §3.31).
+     *
+     * Off the UI thread: the relay can be slow, and blocking in onResume or
+     * onPause blocks the page. A failure only goes to the log -- this is a side
+     * note about the camera, not the frame the owner pressed 发送 for, so it must
+     * not put an error banner over the preview.
+     */
+    private fun postMode(kind: String) {
+        if (!CamPlan.modeNote(kind)) return
+        val base = prefs.relayBase
+        val secret = prefs.secret
+        val id = prefs.agentId
+        val info = agentInfo()
+        val body = CamPlan.modeBody(id, kind)
+        Thread({
+            val client = RcClient(base, secret, id, info)
+            val result = client.postNote(body)
+            if (!result.ok) {
+                AgentLog.add("cam", "相机状态上报失败(" + kind + "): " + (result.error ?: NOTE_FAILED_TEXT))
+            }
+        }, "cam-mode").start()
     }
 
     private data class Shot(val bytes: ByteArray, val width: Int, val height: Int)

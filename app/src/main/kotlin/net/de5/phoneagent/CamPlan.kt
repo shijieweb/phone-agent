@@ -38,6 +38,15 @@ internal object CamPlan {
     /** The relay accepts `^[A-Za-z0-9_.-]{1,80}$` for a blob name (SPEC.md §4). */
     const val NAME_MAX_CHARS = 80
 
+    /**
+     * The two words the camera sends when it opens and closes (v0.11.0-pad12,
+     * SPEC.md §3.31). They are the whole point of the feature: with these two
+     * notes the operator can tell "the camera is on right now" from "the last
+     * frame arrived five minutes ago", which a look note alone cannot express.
+     */
+    const val MODE_OPEN = "cam-open"
+    const val MODE_CLOSE = "cam-close"
+
     private const val NAME_PREFIX = "cam-"
     private const val NAME_EXT = ".jpg"
 
@@ -149,6 +158,23 @@ internal object CamPlan {
             ",\"blob\":" + quote(blob) +
             ",\"w\":" + w +
             ",\"h\":" + h + "}"
+
+    /**
+     * The body of `POST /agent/note` for the camera opening and closing
+     * (v0.11.0-pad12, SPEC.md §3.31), as text.
+     *
+     * Only two words are accepted. The camera is a privacy switch, so a typo in
+     * the caller must not reach the log as a third state that nobody can explain
+     * later: an unknown [kind] becomes an empty string and the note is dropped
+     * by [modeNote] instead of being sent.
+     */
+    fun modeBody(id: String, kind: String): String {
+        val clean = if (kind == MODE_OPEN || kind == MODE_CLOSE) kind else ""
+        return "{\"id\":" + quote(id) + ",\"kind\":" + quote(clean) + "}"
+    }
+
+    /** True when [kind] is one of the two states worth sending. */
+    fun modeNote(kind: String): Boolean = kind == MODE_OPEN || kind == MODE_CLOSE
 
     private fun quote(value: String): String {
         val out = StringBuilder(value.length + 8)

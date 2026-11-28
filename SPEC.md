@@ -2003,7 +2003,7 @@ a chunk is a short sentence, but a cold free-tier model can take most of a minut
 `ArrayBlockingQueue` of capacity 2 while the poll thread plays what is ready, so
 a long paragraph is heard with one chunk of lookahead and never buffers a hundred
 MP3s in the cache dir. Each chunk is written to `cacheDir/tts-<index>.mp3`,
-played by a fresh `MediaPlayer` (`USAGE_ASSISTANT` + `CONTENT_TYPE_SPEECH`,
+played by a fresh `MediaPlayer` (`USAGE_MEDIA` + `CONTENT_TYPE_SPEECH` —
 `setDataSource(path)`, synchronous `prepare()`, `isPlaying` polled every 50 ms
 after a 300 ms settle), then deleted. Playback is capped at the file's own
 duration + 5 s, or 120 s when the duration is unknown: a player that never reports
@@ -2026,12 +2026,82 @@ actually produced: `speak 已朗读 240 字（fish voice=7f92 speed=1.00 3 块 �
 2.40s 总 14.80s 712000B）` — bytes printed exactly, not rounded to KB, so the
 receipt can be compared with the server's own log.
 
+**Why `USAGE_MEDIA` and not `USAGE_ASSISTANT` (v0.11.1-pad12).** The usage
+attribute decides which stream the audio is played on, and the guard below only
+works when it is the *same* stream the sound comes out of. Measured on the
+operator's MEIZU 22 (Android 16) with `dumpsys audio`:
+
+| Attribute | Stream | Max | Speaker was at |
+|---|---|---|---|
+| `USAGE_ASSISTANT` | `STREAM_ASSISTANT` | **15** | **11** (73%) |
+| `USAGE_MEDIA` | `STREAM_MUSIC` | **60** | **60** (100%) |
+
+v0.11.0 shipped `USAGE_ASSISTANT` while the guard raised `STREAM_MUSIC`
+(`dumpsys`: oldIndex 28 → index 60), so the raise happened on a stream nothing
+played to and the owner still heard a voice far quieter than the system one. The
+system engine is not a louder source to blame: `dumpsys audio` prints
+`STREAM_TTS (aliased to: STREAM_MUSIC)`, so `say` plays at 60/60 while `speak`
+was playing at 11/15. The Fish audio itself is fine — `ffmpeg -af ebur128` on a
+returned MP3 measures I: −9.8 LUFS, true peak −0.7 dBFS.
+
+`USAGE_ASSISTANT` is also the wrong stream to push: it belongs to the phone's own
+voice assistant, so raising it would make the owner's assistant louder instead of
+our playback. `CONTENT_TYPE_SPEECH` is kept — it is what tells the system this is
+speech and not music. No flags are set. The usage is exposed as
+`FeatSpeak.SPEAK_USAGE` (an `Int`) so a plain JVM test can pin it; the
+`MediaPlayer` itself still cannot be built off-device.
+
+**Volume (v0.11.0-pad12).** The media stream is pushed to its maximum
+(`STREAM_MUSIC`, `setStreamVolume(..., max, 0)`) and restored to whatever it was
+when the run ends. Two decisions make this safe rather than rude: it is raised on
+the **first play**, not up front, so a run that never makes a sound — a 401, a dead
+network, an empty chunk list — never changes the phone's volume; and every step is
+wrapped in `catch (Throwable)`, so a phone that refuses the change still gets its
+audio, with the failure written to `AgentLog` as
+`调整媒体音量失败: <Class: message>` and nothing on screen. The restore runs in the
+same `finally` as `worker.interrupt()`, which covers the success path, the
+partial-run return and an exception alike. Volume 0 (the owner silenced the phone)
+is raised like any other value — the operator asked to be heard.
+
 **The secret never enters the repository.** `phoneagent.ttsBase`,
 `phoneagent.ttsSecret` and `phoneagent.ttsVoice` live in `local.properties`
 (git-ignored) and are baked into `BuildConfig.DEFAULT_TTS_*` at build time, the
 same mechanism as the relay base and secret. What this costs is stated plainly:
 the text being spoken leaves the phone, and `network_security_config.xml` must
 already allow that host — `say` remains the offline answer.
+
+### 3.31 `cam-open` / `cam-close`: when the camera is on
+
+Not a verb — two note kinds. 摄像头看图 (§6.3) posts one note when the page becomes
+visible and one when it stops being visible, so the far end can tell "the camera is
+on right now" from "the last frame arrived five minutes ago". A `look` note alone
+cannot say that: it is written when 发送 is pressed, which is also true of a page
+that was closed ten seconds later.
+
+**Body.** `POST /agent/note` with exactly two fields —
+`{"id":"<agentId>","kind":"cam-open"}` (`CamPlan.modeBody`). No `text`, no
+`blob`, no `w`/`h`: the relay stores `kind` verbatim (truncated at 24 chars),
+takes `blob` as optional and defaults the size fields to 0, so a two-field body is
+a complete note rather than a malformed one.
+
+**Only two words.** `CamPlan.modeBody` copies `kind` only when it is exactly
+`cam-open` or `cam-close`, and writes an empty string otherwise; `CamPlan.modeNote`
+is what the caller checks first. The camera is a privacy switch, so a typo must not
+reach the operator's log as a third state nobody can explain later — a state that
+never gets sent is recoverable, a state that gets sent is not.
+
+**When.** `onResume` → `cam-open`, `onPause` → `cam-close` **before**
+`closeCamera()`: the note says "the camera is closing" and has to leave while that
+is still true. A `@Volatile modeOpen` flag pairs them, because `onResume` can run
+twice with no `onPause` in between (returning from the permission dialog), and a
+second `cam-open` reads as a second opening of a camera that never closed.
+
+**Off the UI thread.** The note is posted from a `Thread("cam-mode")`, like every
+other network call on this page: blocking in `onResume`/`onPause` blocks the
+page. A failure only goes to the log (`相机状态上报失败(cam-open): <reason>`) — this
+is a side note about the camera, not the frame the owner pressed 发送 for, so it must
+not put an error banner over the preview. The page builds its own `RcClient`, so
+these notes work with the agent stopped, exactly like `look`.
 
 ### Exit codes
 | Code | Meaning |
@@ -2472,6 +2542,15 @@ this one screen does not.
 phone up at something, and a screen that sleeps mid-sentence loses the sentence.
 This is the one place in the app where keeping the screen awake is what the person
 wants rather than a battery decision.
+
+The page also **says when it is showing the camera** (v0.11.0-pad12): `onResume`
+posts a `cam-open` note and `onPause` posts a `cam-close` one, before
+`closeCamera()` — see §3.31 for the body and the two-word rule. They exist because a
+`look` note only says "a frame was sent", which is equally true of a page closed ten
+seconds later; with the pair, the far end can tell a camera that is on now from one
+that was on this morning. They are posted from `Thread("cam-mode")` and a failure is
+logged, never shown: a note about the camera must not put an error banner over the
+frame the owner pressed 发送 for.
 
 Everything camera-shaped runs on one `HandlerThread` (`cam-look`), never the main
 thread: `openCamera`, the session callbacks, the still capture and the
@@ -2983,6 +3062,41 @@ framework** — do not mock `AccessibilityService`. Required cases:
        pins the cap (`0` and `-1` → the 120 s fallback, 3000 → 3000 + 5 s) and the
        `8.00s` / `2.40s` / `0.00s` printing; `theTimeoutsAreTheAgreedOnes` pins
        10 s / 90 s and the 2-chunk lookahead bound.
+
+   36. The v0.11.0-pad12 pair — the volume guard and the two camera-state words.
+       The camera half is on the pure `CamPlan`:
+       `modeBodyOpenCarriesJustTheIdAndTheKind` pins the exact two-field body
+       `{"id":"PHONE-MEIZU","kind":"cam-open"}`, `modeBodyCloseCarriesJustTheIdAndTheKind`
+       the closing one, `modeBodyRejectsAnyOtherKind` the three near-misses that must
+       never be sent (`cam-opening`, `CAM-OPEN`, empty — each becomes
+       `"kind":""`), `modeBodyEscapesTheId` the quote-and-newline escaping that the
+       body inherits from `noteBody`, `modeNoteAcceptsOnlyTheTwoWords` the guard the
+       Activity checks before it starts a thread, and
+       `modeBodyMatchesTheWordsTheRelayStores` the literal strings — the relay stores
+       `kind` verbatim, so those two words *are* the contract with the operator's
+       side. The volume half has no JVM test on purpose: `AudioManager` only exists
+       on a device, and a plan object that pretends to test a system service would
+       pin nothing but its own mock. What is provable without a phone is the shape
+       the code must have — raised on the first play, restored in `finally`, every
+       call wrapped — and that is asserted by reading, not by running; the device
+       check is manualcheck.md.
+
+   37. The v0.11.1-pad12 audio route, the one thing about `speak` a JVM test *can*
+       pin. `speakAsksForTheMediaStream` asserts
+       `FeatSpeak.SPEAK_USAGE == AudioAttributes.USAGE_MEDIA` **and** that it is
+       not `USAGE_ASSISTANT`. Both halves matter: the first is the fix, the second
+       is the regression — v0.11.0 raised `STREAM_MUSIC` while playing on
+       `STREAM_ASSISTANT` (max 15, sitting at 11), which is why the owner heard a
+       quiet voice on a phone whose media volume was at 60/60.
+
+       `SPEAK_USAGE` is a `const val Int`, not a function returning
+       `AudioAttributes`: the test inlines the value, so no `android.media` class is
+       loaded and nothing is mocked (`unitTests.isReturnDefaultValues = true` would
+       make a call that *returns* a framework constant answer `0`, and an assertion
+       of `0 == 0` proves nothing). The `AudioAttributes.Builder` call stays in
+       `FeatSpeak.speakAudioAttributes()` because it is device-only. This is the
+       first `android.*` import in `app/src/test`, and it is a constant, not a
+       service.
 
 **Design for testability**: keep `Commands.parse`, the size ladder, the tree
 formatter's string building, URL joining and JSON building in classes/functions

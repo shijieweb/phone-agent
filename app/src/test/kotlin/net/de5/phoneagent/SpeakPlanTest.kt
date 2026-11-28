@@ -1,5 +1,6 @@
 package net.de5.phoneagent
 
+import android.media.AudioAttributes
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -280,5 +281,20 @@ class SpeakPlanTest {
         assertEquals(90_000, SpeakPlan.READ_TIMEOUT_MS)
         // Two chunks of look-ahead, and the player never buffers more.
         assertEquals(2, SpeakPlan.QUEUE_CAPACITY)
+    }
+
+    // -------------------------------------------------------------- audio route
+
+    @Test
+    fun speakAsksForTheMediaStream() {
+        // USAGE_MEDIA, not USAGE_ASSISTANT (v0.11.1-pad12). Measured on the
+        // MEIZU 22 / Android 16 with `dumpsys audio`: USAGE_ASSISTANT routes to
+        // STREAM_ASSISTANT (max 15, sitting at 11 = 73%), USAGE_MEDIA routes to
+        // STREAM_MUSIC (max 60, speaker at 60) -- the stream VolumeGuard raises,
+        // and the one "STREAM_TTS (aliased to: STREAM_MUSIC)" puts the system
+        // voice on. Both halves are pinned: the value we want, and the one
+        // v0.11.0 shipped and must not come back.
+        assertEquals(AudioAttributes.USAGE_MEDIA, FeatSpeak.SPEAK_USAGE)
+        assertTrue(FeatSpeak.SPEAK_USAGE != AudioAttributes.USAGE_ASSISTANT)
     }
 }

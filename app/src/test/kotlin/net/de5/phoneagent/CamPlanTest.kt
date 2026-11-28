@@ -138,6 +138,62 @@ class CamPlanTest {
     }
 
     @Test
+    fun modeBodyOpenCarriesJustTheIdAndTheKind() {
+        assertEquals(
+            "{\"id\":\"PHONE-MEIZU\",\"kind\":\"cam-open\"}",
+            CamPlan.modeBody("PHONE-MEIZU", CamPlan.MODE_OPEN)
+        )
+    }
+
+    @Test
+    fun modeBodyCloseCarriesJustTheIdAndTheKind() {
+        assertEquals(
+            "{\"id\":\"PHONE-MEIZU\",\"kind\":\"cam-close\"}",
+            CamPlan.modeBody("PHONE-MEIZU", CamPlan.MODE_CLOSE)
+        )
+    }
+
+    @Test
+    fun modeBodyRejectsAnyOtherKind() {
+        // The camera is a privacy switch: a third state nobody can explain later
+        // must never reach the relay.
+        assertEquals(
+            "{\"id\":\"P\",\"kind\":\"\"}",
+            CamPlan.modeBody("P", "cam-opening")
+        )
+        assertEquals(
+            "{\"id\":\"P\",\"kind\":\"\"}",
+            CamPlan.modeBody("P", "CAM-OPEN")
+        )
+        assertEquals(
+            "{\"id\":\"P\",\"kind\":\"\"}",
+            CamPlan.modeBody("P", "")
+        )
+    }
+
+    @Test
+    fun modeBodyEscapesTheId() {
+        val body = CamPlan.modeBody("PHONE\"MEIZU\n2", CamPlan.MODE_OPEN)
+        assertTrue(body, body.contains("\"id\":\"PHONE\\\"MEIZU\\n2\""))
+    }
+
+    @Test
+    fun modeNoteAcceptsOnlyTheTwoWords() {
+        assertTrue(CamPlan.modeNote(CamPlan.MODE_OPEN))
+        assertTrue(CamPlan.modeNote(CamPlan.MODE_CLOSE))
+        assertFalse(CamPlan.modeNote("look"))
+        assertFalse(CamPlan.modeNote(""))
+    }
+
+    @Test
+    fun modeBodyMatchesTheWordsTheRelayStores() {
+        // rc-relay.py stores kind verbatim (truncated at 24 chars), so these two
+        // strings are the whole contract with the operator's side.
+        assertEquals("cam-open", CamPlan.MODE_OPEN)
+        assertEquals("cam-close", CamPlan.MODE_CLOSE)
+    }
+
+    @Test
     fun clampTextTrimsAndKeepsShortText() {
         assertEquals("看下这个", CamPlan.clampText("  看下这个 \n"))
         assertEquals("", CamPlan.clampText("   "))

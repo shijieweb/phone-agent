@@ -155,6 +155,46 @@ byte-for-byte old line (no hint), `up` with nothing overlapping → the same
 `no clickable ancestor for: …` exit 5, and a node with a centre of its own never
 enters this code at all. See `SPEC.md` §3.1, §5 and §10 case 33.
 
+v0.11.1-pad12 is one line and the numbers behind it. v0.11.0 raised the media
+stream around `speak` and the owner still said the voice was too quiet, because
+the raise and the playback were on different streams: `USAGE_ASSISTANT` routes to
+`STREAM_ASSISTANT` (max **15**, the phone was at **11**), while the guard pushed
+`STREAM_MUSIC` (max **60**, at **60**). `dumpsys audio` says
+`STREAM_TTS (aliased to: STREAM_MUSIC)`, which is exactly why the system voice was
+loud and ours was not — and `ffmpeg -af ebur128` on a returned MP3 measures
+I: −9.8 LUFS, so the Fish audio was never the problem. `speak` now asks for
+`USAGE_MEDIA` (`CONTENT_TYPE_SPEECH` kept), so the stream the guard raises is the
+stream the audio plays on. `STREAM_ASSISTANT` is deliberately left alone: it
+belongs to the phone's own voice assistant. The usage is exposed as
+`FeatSpeak.SPEAK_USAGE` so a JVM test can pin it — see `SPEC.md` §3.30 and §10
+case 37.
+
+v0.11.0-pad12 is two small things the phone was telling nobody. The first is
+volume: `speak` played through `USAGE_ASSISTANT`, which does **not** follow the
+media stream (v0.11.1 corrected that — see above), so
+a phone left at 20% read a paragraph nobody could hear from across a room. It now
+raises `STREAM_MUSIC` to its maximum for the duration of one utterance and puts it
+back — raised on the **first play**, not up front, so a run that never makes a sound
+(a 401, a dead network) leaves the phone's volume exactly as it was, and every step
+wrapped so a phone that refuses the change still gets its audio. The restore is in
+the same `finally` as the worker interrupt, which covers the success path, the
+partial-run return and an exception alike. Volume 0 is raised too: the operator
+asked to be heard. See `SPEC.md` §3.30.
+
+The second is that 摄像头看图 never said it was on. A `look` note is written when
+发送 is pressed, which is also true of a page that was closed ten seconds later, so
+the far end could not tell a camera that is showing the room right now from a frame
+from this morning. The page now posts `{"id":…,"kind":"cam-open"}` from `onResume`
+and `cam-close` from `onPause` (before `closeCamera()` — the note has to leave while
+it is still true), through a `@Volatile modeOpen` flag so the two always pair up:
+returning from the permission dialog resumes without pausing, and a second
+`cam-open` would read as a second opening of a camera that never closed. Only those
+two words are accepted — anything else becomes `"kind":""` and is dropped, because
+the camera is a privacy switch and a third state nobody can explain later must
+never reach the log. Both are posted off the UI thread and a failure is logged, not
+shown: a note about the camera must not put an error banner over the frame the owner
+pressed 发送 for. See `SPEC.md` §3.31 and §10 case 36.
+
 v0.10.0-pad12 is a second voice, and a decision about where it lives. `say` uses
 the phone's own engine: always there, no network, and it sounds like a phone
 reading a menu. `speak` sends the sentence to the Fish TTS service on the VPS

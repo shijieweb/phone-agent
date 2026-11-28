@@ -1,6 +1,8 @@
 package net.de5.phoneagent
 
+import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
 import java.io.File
 import java.net.HttpURLConnection
@@ -87,6 +89,9 @@ internal object FeatSpeak : FeatureModule {
         worker.isDaemon = true
         worker.start()
 
+        // Raised lazily on the first play, not here: see [VolumeGuard].
+        val volume = VolumeGuard(ctx)
+
         var played = 0
         var bytes = 0L
         var firstSoundMs = -1L
@@ -97,6 +102,7 @@ internal object FeatSpeak : FeatureModule {
                     is Synth.Done -> break
                     is Synth.Failed -> return incomplete(ctx, text, played, chunks.size, item.index, item.reason)
                     is Synth.Audio -> {
+                        if (played == 0) volume.raise()
                         val out = play(item.file.absolutePath)
                         item.file.delete()
                         if (out.error != null) {
@@ -112,6 +118,7 @@ internal object FeatSpeak : FeatureModule {
             // Nothing interrupts this thread today; report it as a stopped run.
             return incomplete(ctx, text, played, chunks.size, played, SpeakPlan.interrupted())
         } finally {
+            volume.restore()
             worker.interrupt()
         }
 
@@ -211,6 +218,47 @@ internal object FeatSpeak : FeatureModule {
     }
 
     /**
+     * The usage every `speak` playback asks for, exposed so a plain JVM test can
+     * pin it (see [speakAudioAttributes] for why it is not USAGE_ASSISTANT).
+     *
+     * It is a compile-time int on purpose: the test inlines it, so no
+     * `android.media` class is loaded and no `AudioManager` is mocked.
+     */
+    internal const val SPEAK_USAGE: Int = AudioAttributes.USAGE_MEDIA
+
+    /**
+     * What the player asks Android to route us to (v0.11.1-pad12).
+     *
+     * USAGE_MEDIA, deliberately, and **not** USAGE_ASSISTANT. Measured on the
+     * operator's MEIZU 22 (Android 16) with `dumpsys audio` while v0.11.0
+     * was installed:
+     *
+     *  - USAGE_ASSISTANT routes to STREAM_ASSISTANT: max **15**, sitting at
+     *    **11**, so the utterance left the speaker at 73% no matter what the
+     *    media stream said. STREAM_ASSISTANT is also where the phone's own
+     *    voice assistant lives -- pushing it to 15 would change the owner's
+     *    assistant instead of our playback.
+     *  - USAGE_MEDIA routes to STREAM_MUSIC: max **60**, speaker at **60**,
+     *    which is exactly the stream [VolumeGuard] raises and restores. The
+     *    system TTS engine lands there too -- `dumpsys audio` prints
+     *    "STREAM_TTS (aliased to: STREAM_MUSIC)" -- so `speak` and `say`
+     *    are judged at the same volume.
+     *
+     * The rule this encodes: **the stream a guard raises must be the stream the
+     * audio actually plays on.** v0.11.0 raised STREAM_MUSIC (dumpsys: oldIndex
+     * 28 -> index 60) while asking for USAGE_ASSISTANT, and the operator still
+     * heard a quiet voice -- the raise was on a stream nothing played to.
+     *
+     * CONTENT_TYPE_SPEECH stays: it tells the system this is speech rather than
+     * music, which is what ducking and the volume panel read. No flags are set
+     * here, same as before.
+     */
+    private fun speakAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
+        .setUsage(SPEAK_USAGE)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
+
+    /**
      * Play one file to its end.
      *
      * prepare() is synchronous on purpose: this runs on the poll thread, and an
@@ -223,12 +271,7 @@ internal object FeatSpeak : FeatureModule {
         val player = MediaPlayer()
         var startedAt = 0L
         try {
-            player.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
+            player.setAudioAttributes(speakAudioAttributes())
             player.setDataSource(path)
             player.prepare()
             val duration = try {
@@ -321,6 +364,58 @@ internal object FeatSpeak : FeatureModule {
 
     /** One playback result; [startedAt] is wall-clock at start(). */
     private class PlayOut(val error: String?, val startedAt: Long)
+
+    /**
+     * Pushes the media stream to full volume for the duration of one utterance,
+     * then puts the phone back the way the operator left it.
+     *
+     * It is raised on the first sound rather than up front, so a run that never
+     * plays anything -- a 401, a dead network -- does not silently change the
+     * volume. Every step is wrapped: a phone that refuses the change still gets
+     * its audio, and the failure is only written to the log. [restore] is
+     * idempotent, so it is safe from a finally block that may run twice in
+     * spirit (normal end and early return).
+     */
+    private class VolumeGuard(private val ctx: FeatureContext) {
+
+        private var manager: AudioManager? = null
+        private var original = -1
+        private var raised = false
+
+        fun raise() {
+            if (raised) return
+            raised = true
+            try {
+                val audio = ctx.context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+                    ?: return
+                val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+                if (max <= 0) return
+                original = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+                manager = audio
+                if (original >= max) return
+                audio.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+            } catch (t: Throwable) {
+                manager = null
+                original = -1
+                AgentLog.add("speak", "调整媒体音量失败: " + describe(t))
+            }
+        }
+
+        fun restore() {
+            val audio = manager ?: return
+            val back = original
+            manager = null
+            original = -1
+            if (back < 0) return
+            try {
+                if (audio.getStreamVolume(AudioManager.STREAM_MUSIC) != back) {
+                    audio.setStreamVolume(AudioManager.STREAM_MUSIC, back, 0)
+                }
+            } catch (t: Throwable) {
+                AgentLog.add("speak", "恢复媒体音量失败: " + describe(t))
+            }
+        }
+    }
 
     /** How long isPlaying must have had a chance to become true. */
     private const val SETTLE_MS = 300L

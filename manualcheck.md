@@ -541,6 +541,40 @@ right way up, with no UI, no status line and no keyboard in it. Do this on the
    (Before v0.9.1 the page followed the system rotation, recreated the activity,
    reopened the camera and dropped any still that was in flight.)
 
+### speak 会先把媒体音量顶满 (v0.11.0-pad12)
+
+这一条只能在真机上验，因为 `AudioManager` 不在 JVM 里。**关键不是「声音变大了」，而是「音量被改过又还回去了」** —— 第 3、4 步是重点。
+
+1. 先把手机媒体音量调到 20% 左右（按音量键，或设置 → 声音 → 媒体音量），记下这个位置。
+2. 投一条 `speak 这是一次音量测试`。声音必须明显比 20% 大 —— 大致等于把音量键按到顶的效果。
+3. 播完之后立刻按一次音量键：弹出的音量条必须**停在 20% 那个位置**，不是你播完时的满格。这一步不过，说明恢复没跑。
+4. 验「没出声就不许动音量」：把 `local.properties` 里的 `phoneagent.ttsSecret` 故意改错，重装，音量设成 30%，投 `speak 这次会失败`。回执应当是 `speak 已朗读 N 字（回落系统 TTS：服务端 401…）`（系统 TTS 出声，音量**不变**），按音量键看到的仍然是 30%。
+5. 连投两条 `speak`，中间不停：第一条播完到第二条开始之间，音量条可能瞬间回到原值再被顶上去（每次调用各管各的一次），这是预期，不是 bug。
+6. 把媒体音量设成 **0**（静音），投 `speak 静音也要能听见`。必须出声 —— 音量 0 也照样顶满；播完回到 0。
+7. 验异常路径：播放过程中直接杀进程（设置 → 应用 → 强制停止）。下次开 App 后按音量键看：停在满格说明 `finally` 没跑到。进程被 SIGKILL 时确实无法恢复，属于已知边界，但要写进报告。
+
+### 远程语音的音量和系统 TTS 一样大 (v0.11.1-pad12)
+
+v0.11.0 顶的是 `STREAM_MUSIC`，但 `USAGE_ASSISTANT` 把声音送到了 `STREAM_ASSISTANT`（Max 15），所以「音量顶满了还是小」。这一节验的就是**两条流现在对齐了**。改的是 usage，不是音源、不是音量逻辑，所以别拿「听起来更响」当唯一标准——第 2、3 步才是。
+
+1. 手机媒体音量先设成 **20%**（按音量键能看见音量条的位置），别用满格验，满格验不出差别。
+2. 投 `say 这是系统语音`，再投 `speak 这是远程语音`。两句**听起来一样响** —— 系统 TTS 走 `STREAM_TTS`，而 `dumpsys audio` 里它写着 `aliased to: STREAM_MUSIC`，所以它和现在的 `speak` 是同一条流、同一个档位。v0.11.0 上这两句差得很明显。
+3. 出声期间在另一个窗口跑 `dumpsys audio`（或 `adb shell dumpsys audio`），找 `AudioPlaybackConfiguration` 里 `u/pid:<我们的 pid>` 那几行：`usage=USAGE_MEDIA`、`content=CONTENT_TYPE_SPEECH`。**看到 `USAGE_ASSISTANT` 就是没生效**（装错包或没重装）。
+4. 再用 `cmd media_session volume --stream 3 --get` 看媒体流（`STREAM_MUSIC` = 3）在播放期间是不是满档 —— 现在的 usage 和 VolumeGuard 顶的是同一条流，这两个数必须一起变。
+5. 反面验证：`cmd media_session volume --stream 11 --get`（`STREAM_ASSISTANT`）在 `speak` 播放期间**必须还是原值**（实测 11/15）。它要是被顶上去了，说明有人在顶助手那条流，这是明令禁止的改法，立即回退。
+
+### 摄像头看图会说自己是开着的 (v0.11.0-pad12)
+
+管控侧要能分出「现在开着」和「早上发过一张图」，靠的是两条两字段的 note。
+
+1. 手机上打开 摄像头看图。管控侧投 `python scripts/rc.py look --since <上一条的 seq>`（或直接看 notes 列表）：应当出现一条 `kind=cam-open`、**没有图**（打印「（这条没带图）」）、没有文字的记录。
+2. 按 Home 键退到桌面（页面进 onPause，相机释放）。再看 notes：一条 `kind=cam-close`，同样没有图。
+3. 再点回 App 那一页（onResume）：又一条 `cam-open`。**不能**出现连着两条 `cam-open` —— 中间必须有 close。
+4. 权限弹窗那一路：把相机权限撤掉（设置 → 应用 → 权限 → 相机 → 拒绝），进这一页，系统弹权限框时点允许，页面 resume。这一路 `onResume` 会跑两次而 `onPause` 一次都没有，`modeOpen` 就是为了这个 —— notes 里只应有**一条** `cam-open`。
+5. 在 摄像头看图 里正常发一张图。notes 顺序应当是 `cam-open` → `look`（带图）→ 退出页面时 `cam-close`。`kind=look` 那条不受影响，`seq` 连续。
+6. 断网验失败路径：飞行模式，进/出这一页。界面**不能**弹任何错误（预览上方不许出现 `发送失败:` 之类），只有日志里能看到 `相机状态上报失败(cam-open): …`。这是刻意的：一条关于相机的旁注不能盖住人按发送要的那张图。
+7. 停掉 agent（配置页 → 停止），重复第 1–2 步：两条 note 必须照样到 —— 这一页自建 `RcClient`，不依赖服务。
+
 ### The ancestor the walk picks is one that really holds the label (v0.8.5-pad12)
 
 The v0.8.4 check above passes on a screen where walking up happens to be right. This
